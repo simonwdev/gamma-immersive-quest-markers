@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+
+	<string id="ui_mcm_menu_iqm"><text>Immersive Quest Markers</text></string>
+
+	<!-- Tab (subpage) labels -->
+	<string id="ui_mcm_iqm_tab_core"><text>Core</text></string>
+	<string id="ui_mcm_iqm_tab_advanced"><text>Advanced</text></string>
+
+	<!-- Card headers (shown on the card itself, not in MCM) -->
+	<string id="st_iqm_hdr_target"><text>REPORT BACK</text></string>
+	<string id="st_iqm_hdr_guide"><text>LOOKING FOR GUIDE</text></string>
+	<string id="st_iqm_hdr_companion"><text>LOOKING FOR WORK</text></string>
+
+	<string id="ui_mcm_iqm_enabled"><text>Enable markers</text></string>
+	<string id="ui_mcm_iqm_enabled_desc"><text>Master on/off switch for the floating quest marker cards.</text></string>
+
+	<string id="ui_mcm_iqm_mark_targets"><text>Card quest targets</text></string>
+	<string id="ui_mcm_iqm_mark_targets_desc"><text>Show a card over the NPC the game is currently pointing you at for a task - the "go talk to X" step and "return to the giver" turn-ins.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guides"><text>Card the "needs a guide" NPC</text></string>
+	<string id="ui_mcm_iqm_mark_guides_desc"><text>Show a card over the stalker who is currently looking for a guide to escort them (the "Need a guide?" job). Detected via the guide job's own dialogue condition, so it matches exactly when that action is available - only one stalker offers it at a time. Requires the guide-job system (ships with GAMMA); without it this has no effect.</text></string>
+
+	<string id="ui_mcm_iqm_mark_companions"><text>Card recruitable companions</text></string>
+	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now - friendly, part of a squad, and within your companion limit. Detected without a full scan: a party-full early-out skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility check; requires the companion system (ships with GAMMA) - without it this has no effect.</text></string>
+
+	<string id="ui_mcm_iqm_show_node"><text>Show head node dot</text></string>
+	<string id="ui_mcm_iqm_show_node_desc"><text>Draw the small dot at the NPC's head where the leader line begins. Turn off for just the line and card.</text></string>
+
+	<string id="ui_mcm_iqm_node_pulse"><text>Pulse the node glow</text></string>
+	<string id="ui_mcm_iqm_node_pulse_desc"><text>Gently breathe the soft glow halo around the head node dot (a slow, subtle pulse) to draw the eye to the objective. The dot itself stays steady. Turn off for a completely static glow.</text></string>
+
+	<string id="ui_mcm_iqm_sound_alert"><text>PDA chirp on sighting</text></string>
+	<string id="ui_mcm_iqm_sound_alert_desc"><text>Play a subtle PDA alert beep the first time each NPC's card comes into view. A per-NPC cooldown stops brief glances or the NPC ducking behind cover from re-triggering it.</text></string>
+
+	<string id="ui_mcm_iqm_sound_vol"><text>PDA chirp volume</text></string>
+	<string id="ui_mcm_iqm_sound_vol_desc"><text>Loudness of the PDA sighting chirp (0 = silent, 1 = full). Only applies when "PDA chirp on sighting" is on.</text></string>
+
+	<string id="ui_mcm_iqm_appear_dist"><text>Appear distance (m)</text></string>
+	<string id="ui_mcm_iqm_appear_dist_desc"><text>How far away the card starts to fade in as you approach. Beyond this it is hidden.</text></string>
+
+	<string id="ui_mcm_iqm_full_dist"><text>Full-opacity distance (m)</text></string>
+	<string id="ui_mcm_iqm_full_dist_desc"><text>Within this range the card is fully solid. Between this and the appear distance it fades. Keep it below the appear distance.</text></string>
+
+	<string id="ui_mcm_iqm_los_check"><text>Line-of-sight check</text></string>
+	<string id="ui_mcm_iqm_los_check_desc"><text>Hide the card when the NPC is behind a wall or other cover, instead of showing through it. Requires the shared demonized_geometry_ray utility (bundled with many GAMMA mods, including both Catspaw addons); without it this setting has no effect.</text></string>
+
+	<string id="ui_mcm_iqm_los_rate"><text>Line-of-sight check rate (ms)</text></string>
+	<string id="ui_mcm_iqm_los_rate_desc"><text>How often each NPC's line of sight is re-tested. Lower reacts faster to going behind cover but costs more performance; higher is cheaper but slower to hide. Default 150.</text></string>
+
+	<string id="ui_mcm_iqm_los_grace"><text>Line-of-sight grace (ms)</text></string>
+	<string id="ui_mcm_iqm_los_grace_desc"><text>How long the card keeps showing after the NPC slips behind cover, to stop flicker from brief or partial occlusions (a doorway, a passing object). Higher is steadier but lingers longer through cover; 0 hides the instant line of sight is lost. Default 250.</text></string>
+
+	<string id="ui_mcm_iqm_head_lift"><text>Anchor vertical offset (m)</text></string>
+	<string id="ui_mcm_iqm_head_lift_desc"><text>Nudge the node up (+) or down (-) from the NPC's left-shoulder bone. The default (0) sits right on the shoulder near the neck; negative drops it toward the mid-left torso.</text></string>
+
+	<string id="ui_mcm_iqm_head_side"><text>Anchor horizontal offset (m)</text></string>
+	<string id="ui_mcm_iqm_head_side_desc"><text>Manual sideways nudge along the NPC's own body axis - toward their right (+) or left (-). Tracks their facing as they turn. Added on top of the auto shoulder placement below.</text></string>
+
+	<string id="ui_mcm_iqm_auto_side"><text>Auto shoulder side (no body crossing)</text></string>
+	<string id="ui_mcm_iqm_auto_side_desc"><text>Automatically place the node on whichever shoulder sits on the card's side of the screen, so the leader line meets the near shoulder instead of crossing the NPC's body. Both shoulders are tested on-screen and the one toward the card is picked, so it works at any camera angle and NPC facing. Turn off to place the node purely with the manual offset above.</text></string>
+
+	<string id="ui_mcm_iqm_side_amt"><text>Auto shoulder distance (m)</text></string>
+	<string id="ui_mcm_iqm_side_amt_desc"><text>How far onto the shoulder the auto placement pushes the node (roughly a torso half-width). Only used when Auto shoulder side is on.</text></string>
+
+	<string id="ui_mcm_iqm_card_off_x"><text>Card offset X (px)</text></string>
+	<string id="ui_mcm_iqm_card_off_x_desc"><text>Horizontal distance from the head to the card. The card flips to the other side automatically near the screen edge.</text></string>
+
+	<string id="ui_mcm_iqm_card_off_y"><text>Card offset Y (px)</text></string>
+	<string id="ui_mcm_iqm_card_off_y_desc"><text>How far above the head the card floats.</text></string>
+
+	<string id="ui_mcm_iqm_line_thick"><text>Leader line thickness (px)</text></string>
+	<string id="ui_mcm_iqm_line_thick_desc"><text>Thickness of the diagonal line connecting the head to the card.</text></string>
+
+	<string id="ui_mcm_iqm_line_a"><text>Leader line opacity</text></string>
+	<string id="ui_mcm_iqm_line_a_desc"><text>Opacity of the leader line at full visibility (0 = invisible, 255 = solid).</text></string>
+
+	<string id="ui_mcm_iqm_card_a"><text>Card opacity</text></string>
+	<string id="ui_mcm_iqm_card_a_desc"><text>Opacity of the dark card plate at full visibility (0 = invisible, 255 = solid).</text></string>
+
+	<string id="ui_mcm_iqm_node_size"><text>Head node size (px)</text></string>
+	<string id="ui_mcm_iqm_node_size_desc"><text>Full size of the round dot at the NPC's head, reached when you are within the full-opacity distance. Ignored when Show head node dot is off.</text></string>
+
+	<string id="ui_mcm_iqm_node_min"><text>Head node min size (far)</text></string>
+	<string id="ui_mcm_iqm_node_min_desc"><text>How small the dot shrinks at the appear distance, as a fraction of its full size. It grows smoothly to full size as you approach. 1.0 = no distance scaling.</text></string>
+
+	<string id="ui_mcm_iqm_smoothing"><text>Smoothing</text></string>
+	<string id="ui_mcm_iqm_smoothing_desc"><text>How quickly the card eases toward the NPC's head. 1 = instant (snaps / jitters), lower = smoother but laggier. Framerate-independent. Default 0.35.</text></string>
+
+	<string id="ui_mcm_iqm_snap_dist"><text>Snap distance (px)</text></string>
+	<string id="ui_mcm_iqm_snap_dist_desc"><text>Position jumps larger than this teleport instead of gliding, so the card doesn't slide across the screen when the NPC's head first appears or moves suddenly.</text></string>
+
+	<string id="ui_mcm_iqm_col_a"><text>Accent colour: alpha</text></string>
+	<string id="ui_mcm_iqm_col_a_desc"><text>Master alpha of the accent (line / edge bar / header / node).</text></string>
+	<string id="ui_mcm_iqm_col_r"><text>Accent colour: red</text></string>
+	<string id="ui_mcm_iqm_col_r_desc"><text>Red component of the accent colour (0-255).</text></string>
+	<string id="ui_mcm_iqm_col_g"><text>Accent colour: green</text></string>
+	<string id="ui_mcm_iqm_col_g_desc"><text>Green component of the accent colour (0-255).</text></string>
+	<string id="ui_mcm_iqm_col_b"><text>Accent colour: blue</text></string>
+	<string id="ui_mcm_iqm_col_b_desc"><text>Blue component of the accent colour (0-255). Defaults give a soft desaturated gold (224, 196, 122).</text></string>
+
+	<string id="ui_mcm_iqm_debug_log"><text>Diagnostic logging</text></string>
+	<string id="ui_mcm_iqm_debug_log_desc"><text>Write IQM diagnostic lines (line-of-sight checks, card-slot overflow, sound playback, per-slot coords) to the console/log. For troubleshooting; off by default.</text></string>
+
+</string_table>

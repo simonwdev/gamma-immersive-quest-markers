@@ -1,0 +1,37 @@
+<w>
+	<!-- IQM ships its own solid-white texture so its tinted card/line/node draw
+	     correctly with no dependency on any other mod. iqm_white_box is a solid
+	     white region (tint it in script via SetTextureColor). -->
+	<file name="ui\iqm_ui">
+		<texture id="iqm_white_box" x="174" y="0" width="174" height="60" />
+	</file>
+
+	<!-- White anti-aliased filled circle (alpha carries the shape, RGB is white so
+	     tinting stays clean). Used for the head node; a larger black copy behind it
+	     forms the border ring. -->
+	<file name="ui\iqm_circle">
+		<texture id="iqm_circle" x="0" y="0" width="64" height="64" />
+	</file>
+
+	<!-- Soft gaussian halo drawn behind the node dot (glow). White RGB, radial
+	     alpha falloff; tinted the accent colour at low alpha in script. -->
+	<file name="ui\iqm_glow">
+		<texture id="iqm_glow" x="0" y="0" width="128" height="128" />
+	</file>
+
+	<!-- Soft-edged slab stretched under the card as a whole-card drop shadow.
+	     White RGB, feathered alpha; tinted black at low alpha in script. -->
+	<file name="ui\iqm_shadow">
+		<texture id="iqm_shadow" x="0" y="0" width="64" height="64" />
+	</file>
+
+	<!-- Card plate (rounded, clean-premium). A vertical luminance gradient masked by
+	     a rounded rectangle, tinted dark charcoal in script. Drawn as a horizontal
+	     3-slice so corners stay crisp at any card width: left cap (rounded left
+	     corners) | stretched centre column | right cap (rounded right corners). -->
+	<file name="ui\iqm_panel_round">
+		<texture id="iqm_panel_l" x="0"  y="0" width="18" height="64" />
+		<texture id="iqm_panel_c" x="30" y="0" width="4"  height="64" />
+		<texture id="iqm_panel_r" x="46" y="0" width="18" height="64" />
+	</file>
+</w>

@@ -1,0 +1,59 @@
+<w>
+	<!-- Whole-card soft drop shadow: a feathered slab stretched under the plate,
+	     offset down-right and tinted black at low alpha, so the card lifts off the
+	     world. Drawn first (behind everything). -->
+	<card_shadow width="64" height="64" stretch="1">
+		<texture r="0" g="0" b="0" a="120">iqm_shadow</texture>
+	</card_shadow>
+
+	<!-- Card plate, clean-premium: a rounded gradient panel drawn as a horizontal
+	     3-slice (left cap | stretched centre | right cap) so corners stay crisp at any
+	     width. All three tinted the same dark charcoal in script. -->
+	<card_plate_l width="11" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_l</texture></card_plate_l>
+	<card_plate_c width="80" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_c</texture></card_plate_c>
+	<card_plate_r width="11" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_r</texture></card_plate_r>
+
+	<!-- Thin accent bar down the left edge of the card (tinted the accent colour),
+	     inset vertically so it stays clear of the plate's rounded corners. -->
+	<card_accent width="3" height="26" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_white_box</texture>
+	</card_accent>
+
+	<!-- Drop shadow for the leader line (black, drawn behind and slightly thicker). -->
+	<card_line_sh width="64" height="2" stretch="1">
+		<texture r="0" g="0" b="0" a="255">iqm_white_box</texture>
+	</card_line_sh>
+
+	<!-- Leader line: a thin strip, rotated via SetHeading to connect head to card. -->
+	<card_line width="64" height="2" stretch="1">
+		<texture r="224" g="196" b="122" a="200">iqm_white_box</texture>
+	</card_line>
+
+	<!-- Soft glow halo behind the node dot (accent colour, low alpha). -->
+	<card_glow width="40" height="40" stretch="1">
+		<texture r="224" g="196" b="122" a="150">iqm_glow</texture>
+	</card_glow>
+
+	<!-- Single round node at the NPC's chest where the leader line begins. Dark
+	     border ring baked into the texture; tinted the accent colour. -->
+	<card_node width="12" height="12" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_circle</texture>
+	</card_node>
+
+	<!-- Header: clean face, uppercase, accent-coloured. A black copy one pixel behind
+	     (card_head_sh) gives it a subtle drop shadow over bright scenes. -->
+	<card_head_sh>
+		<text font="letterica16" align="l" width="300" height="16" />
+	</card_head_sh>
+	<card_head>
+		<text font="letterica16" align="l" width="300" height="16" />
+	</card_head>
+
+	<!-- NPC name: clean face, warm off-white, with its own 1px black shadow copy. -->
+	<card_name_sh>
+		<text font="letterica18" align="l" width="300" height="20" />
+	</card_name_sh>
+	<card_name>
+		<text font="letterica18" align="l" width="300" height="20" />
+	</card_name>
+</w>

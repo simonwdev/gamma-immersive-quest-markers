@@ -1,0 +1,1080 @@
+-- ======================================================================
+--  Immersive Quest Markers
+-- ======================================================================
+
+local MAX_CARDS     = 6      -- most NPCs carded at once (extras skipped; logged if debug_log)
+local SCAN_INTERVAL = 2000   -- ms between task scans
+
+-- Defaults, also the fallback when MCM is absent. Keys match the MCM option ids
+-- under the "iqm" menu (see iqm_mcm.script). Declared non-local so the menu file
+-- can read it as iqm_markers.DEFAULTS (single source of truth).
+DEFAULTS = {
+	enabled      = true,   -- master on/off
+	mark_targets = true,   -- card the current objective NPC (turn-in / go-talk-to)
+	mark_guides  = true,   -- card the stalker currently looking for a guide ("Need a guide?" job)
+	mark_companions = true, -- card nearby friendly stalkers you could recruit as a companion right now
+	show_node    = true,   -- draw the little dot at the head where the line starts
+	node_pulse   = true,   -- gently breathe the node's glow halo to draw the eye
+	sound_alert  = true,   -- play a subtle PDA chirp when a card first comes into view
+	sound_vol    = 0.9,    -- chirp volume (0-1)
+	debug_log    = false,  -- write IQM diagnostic lines to the console/log
+
+	appear_dist  = 16,     -- metres: card starts fading in at this range
+	full_dist    = 9,      -- metres: card is fully solid once you're this close
+	head_lift    = -0.02,  -- metres to nudge the anchor vertically (0 = on the left-shoulder bone; - drops toward mid-torso; + raises it)
+	head_side    = -0.03,  -- metres to nudge the anchor horizontally along the NPC's own right(+)/left(-) axis
+	auto_side    = true,   -- place the node on the shoulder toward the camera side so the leader line doesn't cross the body
+	side_amt     = 0.18,   -- metres to that shoulder (torso half-width) when auto_side is on
+
+	los_check    = true,   -- hide the card when the NPC is behind cover (needs demonized_geometry_ray)
+	los_rate     = 150,    -- ms between line-of-sight ray casts per NPC
+	los_grace    = 250,    -- ms to keep showing after LOS is lost (anti-flicker)
+
+	card_off_x   = 70,     -- px: horizontal offset from the head to the card
+	card_off_y   = 40,     -- px: how far the card floats above the head
+	line_thick   = 2,      -- px: leader line thickness
+	line_a       = 200,    -- leader line opacity (0-255)
+	card_a       = 185,    -- card plate opacity (0-255)
+	node_size    = 7,      -- head node dot size (px) at full size (close up)
+	node_min     = 0.5,    -- node size as a fraction of node_size at max distance (grows to 1 up close)
+
+	smoothing    = 0.35,   -- ease amount (framerate-independent; 1 = instant, lower = smoother)
+	snap_dist    = 260,    -- px jump beyond which the card teleports instead of sliding
+
+	col_a        = 255,    -- accent colour (alpha / red / green / blue): a soft desaturated gold
+	col_r        = 224,
+	col_g        = 196,
+	col_b        = 122,
+}
+
+-- MCM tab layout. Keys listed here sit on the "Core" subpage; everything else in DEFAULTS
+-- sits on "Advanced". MCM stores a subpage option under "iqm/<tab>/<key>", so read_config
+-- forms the storage path from this. Keep in sync with the two subpages in iqm_mcm.script
+-- (this table is the source of truth for which tab a key belongs to).
+CORE_KEYS = {
+	enabled = true, mark_targets = true, mark_guides = true,
+	mark_companions = true, appear_dist = true, los_check = true, sound_alert = true,
+}
+
+local C          = {}     -- live config (DEFAULTS overlaid with MCM values)
+local tracked    = {}     -- [npc_id] = { role = "target"|"guide"|"companion", slot = n }
+local FILT       = {}     -- [npc_id] = smoothing/alpha state
+local CARDS      = nil    -- the IqmCards dialog instance
+local next_scan  = 0
+local smooth_tau = 38.7   -- derived from C.smoothing in read_config (0 = instant)
+local SNAP2      = 260 * 260
+
+local UI_KX       = 1     -- aspect-correction the engine applies to rotated (heading) statics
+local _ui_w       = 0     -- last screen width UI_KX was computed for (recompute only on change)
+local LINE_HALO   = 2     -- px added to the leader line thickness for its dark outline
+local FADE_TAU    = 90    -- ms: framerate-independent fade in/out time constant
+local APPEAR_TAU  = 70    -- ms: entrance rise/settle time constant
+local APPEAR_LIFT = 7     -- px the card rises into place as it first appears
+local SOUND_PATH  = "iqm\\iqm_alert"  -- bundled phone-vibrate alert (gamedata\sounds\iqm\iqm_alert.ogg)
+local SOUND_CD    = 12000 -- ms: per-NPC cooldown so brief occlusions/glances don't re-chirp
+local _chirp_snd  = nil   -- cached sound_object (created lazily on first play)
+local _chirp_last = 0     -- global throttle so simultaneous appearances don't stack
+local DEBUG       = false -- mirrors the MCM debug_log option (set in read_config)
+local _dbg_t      = 0
+
+-- Hot math globals localised (per-frame projection/draw path) to avoid repeated global
+-- table lookups. math.log only runs one-time (read_config) so it's left as-is.
+local floor, max, sqrt     = math.floor, math.max, math.sqrt
+local sin, exp, abs, atan2 = math.sin, math.exp, math.abs, math.atan2
+-- Other hot globals on the per-frame path, localised for the same reason.
+local GetARGB, time_global, get_obj = GetARGB, time_global, nil  -- get_obj bound in on_game_start (level.* not ready at parse)
+
+-- Reusable scratch vector2s: SetWndPos/SetWndSize consume their argument immediately, so
+-- one pair per purpose can be :set() and handed over instead of allocating a fresh vector2
+-- on every call (draw_slot previously did ~14 allocations per card per frame).
+local _p = vector2()
+local _s = vector2()
+local function P(x, y) return _p:set(x, y) end   -- scratch position
+local function S(x, y) return _s:set(x, y) end   -- scratch size
+
+-- Header text is fixed per role, so translate once and cache instead of calling
+-- game.translate_string every frame in the draw path. Cleared on config change.
+local _hdr_cache = {}
+
+-- easeOutQuint: fast start, gentle settle. Used for the entrance rise.
+local function ease_out_quint(x)
+	if x < 0 then x = 0 elseif x > 1 then x = 1 end
+	local u = 1 - x
+	return 1 - u * u * u * u * u
+end
+
+-- Bones to anchor the node to, best first: left chest/shoulder, then chest, then head.
+local ANCHOR_BONES = { "bip01_l_clavicle", "bip01_spine2", "bip01_spine1", "bip01_spine", "bip01_head" }
+
+-- --------------------------------------------------------------------------
+-- Config
+-- --------------------------------------------------------------------------
+local function read_config()
+	for key, default in pairs(DEFAULTS) do
+		local v = default
+		if ui_mcm and ui_mcm.get then
+			-- options live under a Core/Advanced subpage, so the stored path is
+			-- "iqm/<tab>/<key>" (see CORE_KEYS / iqm_mcm.script).
+			local tab = CORE_KEYS[key] and "core" or "advanced"
+			local got = ui_mcm.get("iqm/" .. tab .. "/" .. key)
+			if got ~= nil then v = got end
+		end
+		C[key] = v
+	end
+	DEBUG = C.debug_log and true or false
+	_hdr_cache = {}   -- rebuild header strings lazily (covers a language change too)
+	-- treat "smoothing" as the per-frame gap fraction at 60fps, converted to a
+	-- time constant so the ease feels the same at any framerate.
+	local sm = C.smoothing or 0.35
+	if sm >= 1 then smooth_tau = 0 else smooth_tau = -16.67 / math.log(1 - sm) end
+	SNAP2 = (C.snap_dist or 260) ^ 2
+
+	-- kx = (h/w) / (UI_BASE_HEIGHT/UI_BASE_WIDTH) = (h/w) / (768/1024). The engine
+	-- scales rotated-static X by this; we invert it so the leader line lines up.
+	local dev = device()
+	local w = dev and dev.width or 0
+	local h = dev and dev.height or 0
+	UI_KX = (w > 0 and h > 0) and ((h / w) / (768 / 1024)) or 1
+end
+
+-- --------------------------------------------------------------------------
+-- NPC selection
+-- --------------------------------------------------------------------------
+local function is_task_active(task)
+	local state = task.last_check_task
+	if state == "complete" or state == "fail" or state == "reversed" then return false end
+	if task.stage == 255 then return false end
+	if task.status == "completed" or task.status == "fail" or task.status == "reversed" then return false end
+	return db.actor:get_task(task.id, true) ~= nil
+end
+
+local function is_enemy_to_actor(obj)
+	if obj:relation(db.actor) == game_object.enemy then return true end
+	local comm = character_community(obj)
+	if comm == "monster" then comm = "stalker" end
+	local actor_comm = character_community(db.actor):sub(7)
+	return game_relations.is_factions_enemies(actor_comm, comm)
+end
+
+local stage_complete_cache = {}
+local function get_stage_complete(task_id)
+	local sc = stage_complete_cache[task_id]
+	if sc == nil then
+		sc = task_manager.task_ini:r_float_ex(task_id, "stage_complete") or false
+		stage_complete_cache[task_id] = sc
+	end
+	return sc or nil
+end
+
+local function target_is_talk_to(task)
+	local sc = get_stage_complete(task.id)
+	if not sc then return true end
+	return task.stage ~= nil and task.stage >= sc
+end
+
+local function is_markable_npc(id)
+	local obj = id and level.object_by_id(id)
+	if not obj then return false end
+	if not (IsStalker(obj) or (obj:clsid() == clsid.script_trader)) then return false end
+	if not obj:alive() then return false end
+	return not is_enemy_to_actor(obj)
+end
+
+local function collect_desired()
+	local desired = {}
+
+	-- quest targets (from the task system)
+	local tm = task_manager and task_manager.get_task_manager and task_manager.get_task_manager()
+	local info = tm and tm.task_info
+	if info then
+		for _, task in pairs(info) do
+			if is_task_active(task) then
+				if C.mark_targets and task.current_target and target_is_talk_to(task) then
+					local id = tonumber(task.current_target)
+					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+						desired[id] = "target"
+					end
+				end
+				-- delivery quests: card the "deliver to" NPC. The engine's own
+				-- current_target can miss these (delivery targets live on another map,
+				-- and only the *selected* task's target is refreshed), so we resolve it
+				-- straight from the delivery job's target functor, which returns the
+				-- deliver-to NPC once past the pickup stage. is_markable_npc filters out
+				-- the stage-0 pickup item automatically. Soft dependency on
+				-- tasks_delivery (ships with GAMMA); skipped if absent.
+				if C.mark_targets and tasks_delivery and task_functor
+				   and tasks_delivery.is_delivery_task and task_functor.general_delivery
+				   and tasks_delivery.is_delivery_task(task.id) then
+					local id = tonumber(task_functor.general_delivery(task.id, "target", nil, task))
+					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+						desired[id] = "target"
+					end
+				end
+			end
+		end
+	end
+
+	-- guide-job NPC: the stalker currently LOOKING FOR a guide, one that wants you to
+	-- escort it somewhere ("Need a guide?" job, st_jg). Instead of scanning NPCs, we
+	-- read the guide system's own saved state (alife_storage_manager .jobs_guide) to
+	-- get the guide squad directly, then resolve its commander via the public
+	-- tasks_guide.get_comm_id, the same squad/commander its dialogue keys off, so
+	-- this matches exactly when the job is available. Only the pending offer (`guid`)
+	-- is carded: on acceptance tasks_guide moves the job into `curr_guid` and empties
+	-- `guid`, so the card disappears once you've taken the escort (no point calling
+	-- out an NPC you're already walking with). Soft dependency: guarded so it no-ops
+	-- without the guide-job system (tasks_guide, ships with GAMMA). is_markable_npc
+	-- filters out the case where that NPC is offline / off-level.
+	if C.mark_guides and tasks_guide and tasks_guide.get_comm_id and alife_storage_manager then
+		local ok, jg = pcall(function() return alife_storage_manager.get_state().jobs_guide end)
+		if ok and jg then
+			local g = jg.guid
+			local id = g and g.squad_id and tasks_guide.get_comm_id(g.squad_id)
+			if id and id > 0 and id ~= AC_ID and not desired[id] and is_markable_npc(id) then
+				desired[id] = "guide"
+			end
+		end
+	end
+
+	return desired
+end
+
+-- --------------------------------------------------------------------------
+-- Slot bookkeeping (one card widget-set per marked NPC)
+-- --------------------------------------------------------------------------
+local function free_slot()
+	local used = {}
+	for _, t in pairs(tracked) do
+		if t.slot then used[t.slot] = true end
+	end
+	for i = 1, MAX_CARDS do
+		if not used[i] then return i end
+	end
+end
+
+local function ensure_entry(id, role)
+	local t = tracked[id]
+	if t then t.role = role; return end
+	local slot = free_slot()
+	if not slot then
+		if DEBUG then printf("[Immersive Quest Markers] more than %s NPCs to card; extras skipped this scan", MAX_CARDS) end
+		return
+	end
+	tracked[id] = { role = role, slot = slot }
+	FILT[id] = { a = 0 }
+end
+
+local function remove_entry(id)
+	local t = tracked[id]
+	if t and t.slot and CARDS then CARDS:hide_slot(t.slot) end
+	tracked[id] = nil
+	FILT[id] = nil
+end
+
+local function clear_all()
+	for _, t in pairs(tracked) do
+		if t.slot and CARDS then CARDS:hide_slot(t.slot) end
+	end
+	tracked = {}
+	FILT = {}
+end
+
+-- --------------------------------------------------------------------------
+-- Per-frame helpers
+-- --------------------------------------------------------------------------
+-- World-space anchor on the NPC (left chest/shoulder, falling back through the
+-- spine to the head). Shared by the on-screen projection and the LOS ray so both
+-- agree on the same point.
+local function anchor_world_pos(obj)
+	local pos
+	for _, b in ipairs(ANCHOR_BONES) do
+		local ok, p = pcall(function() return obj:bone_position(b) end)
+		if ok and p then pos = p; break end
+	end
+	if not pos then
+		pos = obj:position()
+		pos.y = pos.y + 1.2
+	end
+	pos.y = pos.y + C.head_lift   -- vertical nudge (0 = right on the bone)
+	-- Horizontal right-axis (unit, ground plane) tracking the NPC's facing, plus the
+	-- manual head_side nudge (+ = NPC's right, - = their left). The auto shoulder pick
+	-- (which side of the torso the node sits on) is done in render() where we can project,
+	-- so it works at any camera angle. Returns the base point and the right-axis so render
+	-- can offset onto whichever shoulder faces the card.
+	local dir = obj:direction()
+	local rx, rz = -dir.z, dir.x                   -- horizontal perpendicular to facing
+	local rl = sqrt(rx * rx + rz * rz)
+	if rl > 0.001 then rx, rz = rx / rl, rz / rl else rx, rz = 0, 0 end
+	local side = C.head_side or 0
+	if side ~= 0 then
+		pos.x = pos.x + side * rx
+		pos.z = pos.z + side * rz
+	end
+	return pos, rx, rz
+end
+
+-- Project a world point to the screen ourselves (world2ui, same as mag_check_ui,
+-- which lines up with our own dialog). Returns nil when off-screen / behind camera.
+-- world2ui can mutate its argument, so we hand it a copy and keep `pos` intact.
+local function project_world(pos)
+	local ui = game.world2ui(vector():set(pos), false, false)
+	if not ui or ui.x < -9000 then return nil end
+	return ui.x, ui.y
+end
+
+-- Which shoulder (which sign along the body right-axis) should the node sit on, so the
+-- leader line meets the near shoulder instead of crossing the torso. Projecting both
+-- candidates makes this correct at any camera angle / handedness (a facing-only guess
+-- flips at oblique angles). Returns +1 (base + right*amt), -1 (base - right*amt), or 0
+-- (a candidate is off-screen; stay centred). This is the only per-NPC work that needs
+-- TWO extra projections, so render throttles how often it's called (SIDE_RATE) and reuses
+-- the chosen sign in between; the choice barely changes frame to frame.
+local _sv = vector()   -- scratch for the two shoulder candidates (project_world copies it)
+local function shoulder_sign(base, rux, ruz, amt)
+	local ax = project_world(_sv:set(base.x + rux * amt, base.y, base.z + ruz * amt))
+	local bx = project_world(_sv:set(base.x - rux * amt, base.y, base.z - ruz * amt))
+	if not ax or not bx then return 0 end
+	-- the card sits to the right of the head unless there's no room there (then it flips
+	-- left); put the node on the same side so the line doesn't cross the body.
+	local mid = (ax + bx) * 0.5
+	local card_right = (mid + (C.card_off_x or 70) + 200) <= 1014
+	if card_right then
+		return (ax >= bx) and 1 or -1                 -- further-right candidate
+	else
+		return (ax <= bx) and 1 or -1                 -- further-left candidate
+	end
+end
+local SIDE_RATE = 120   -- ms between auto-shoulder re-picks (reuse the sign in between)
+
+-- --------------------------------------------------------------------------
+-- Recruitable-companion detection (option: mark_companions)
+-- --------------------------------------------------------------------------
+-- Unlike quest targets / the guide NPC (resolved from saved state to specific ids,
+-- with no scanning), "can this stalker be recruited right now" is a live per-object
+-- predicate; there's no registry to read. We keep it cheap with three levers:
+--   1. a party-full early-out: one arithmetic check kills the whole scan when you
+--      can't recruit anyone anyway (full party, or the companion system is absent);
+--   2. cheapest-first short-circuits per NPC (alive -> is-stalker -> distance ->
+--      relation -> already-a-companion -> the recruit predicate), the expensive
+--      screen projection last; and
+--   3. a screen-space pre-gate: only NPCs that actually project on-screen are kept,
+--      so off-screen stalkers never eat one of the limited card slots.
+-- It iterates db.storage (the engine's existing table of ONLINE NPCs, not a level
+-- scan; near the actor that's a few dozen entries), throttled to COMPANION_SCAN and
+-- cached in _comp_ids between scans. Soft dependency: no-ops without the companion system.
+local COMPANION_SCAN = 3000   -- ms between recruitable scans (rare state change -> slow cadence)
+local _comp_next     = 0
+local _comp_ids      = {}     -- cached { [id] = true } set from the last scan
+
+-- Party-level gate: is there room for one more companion? Mirrors GAMMA's own
+-- is_room_for_one_in_actor_squad (patriarch/Catspaw-size aware) when present; falls
+-- back to the raw axr_companions capacity. Single check, run once per scan.
+local function room_for_companion()
+	local irc = individually_recruitable_companions
+	if irc and irc.is_room_for_one_in_actor_squad then
+		local ok, room = pcall(irc.is_room_for_one_in_actor_squad, db.actor, nil)
+		return (not ok) or room   -- if the check itself errors, don't block; per-NPC gate still applies
+	end
+	if axr_companions and axr_companions.get_companion_count and axr_companions.max_actor_squad_size then
+		return axr_companions.get_companion_count() < axr_companions.max_actor_squad_size
+	end
+	return true
+end
+
+-- Per-NPC recruit predicate. Uses GAMMA's own "wanna join me?" dialog preconditions
+-- when present (they ARE the exact gate: not a lone squad, actor strong enough), else
+-- falls back to axr_companions.can_join_actor. Wrapped whole in pcall; these are
+-- third-party mod functions we call once per candidate.
+local function npc_recruitable(obj)
+	local ok, res = pcall(function()
+		local irc = individually_recruitable_companions
+		if irc and irc.not_a_one_man_squad then
+			if not irc.not_a_one_man_squad(db.actor, obj) then return false end
+			if irc.get_is_actor_stronger_if_script_is_available
+			   and not irc.get_is_actor_stronger_if_script_is_available(db.actor, obj) then return false end
+			return true
+		end
+		if axr_companions and axr_companions.can_join_actor then
+			return axr_companions.can_join_actor(obj) and true or false
+		end
+		return false
+	end)
+	return ok and res
+end
+
+-- One scan: returns a fresh { [id] = true } set of recruitable stalkers on-screen and
+-- within appear range. Cheapest checks first; projection (option 3) last.
+local function scan_companions()
+	local out = {}
+	if not (axr_companions or individually_recruitable_companions) then return out end  -- system absent
+	if not room_for_companion() then return out end                                     -- party full: nobody recruitable
+	local actor   = db.actor
+	local apos    = actor:position()
+	local appear2 = (C.appear_dist or 16) ^ 2
+	local friend  = game_object.friend
+	for id in pairs(db.storage) do
+		if id ~= AC_ID then
+			local obj = get_obj(id)
+			if obj and obj:alive() and IsStalker(obj)
+			   and obj:position():distance_to_sqr(apos) <= appear2
+			   and obj:relation(actor) == friend
+			   and not obj:has_info("npcx_is_companion")
+			   and npc_recruitable(obj) then
+				local wp = anchor_world_pos(obj)                 -- option 3: keep only on-screen NPCs
+				if wp and project_world(wp) then out[id] = true end
+			end
+		end
+	end
+	return out
+end
+
+-- Merge recruitable ids into the desired set, refreshing the cache on the throttle.
+-- The cache is merged every update (so cards persist) but rescanned only every
+-- COMPANION_SCAN ms. Quest/guide roles already in `desired` win (never overwritten).
+local function augment_companions(desired)
+	if not C.mark_companions then return end
+	local tg = time_global()
+	if tg >= _comp_next then
+		_comp_next = tg + COMPANION_SCAN
+		_comp_ids  = scan_companions()
+	end
+	for id in pairs(_comp_ids) do
+		if not desired[id] then desired[id] = "companion" end
+	end
+end
+
+-- Line-of-sight: cast a geometry ray from the NPC's head toward the camera; if it hits
+-- world geometry noticeably closer than the head, the NPC is behind cover and the card is
+-- hidden. Mirrors Catspaw's HUD-marker LOS (flags 3 = Objects+Statics, ignore the NPC's
+-- own body). Polled per-NPC at los_rate with a short grace window so brief occlusions
+-- don't flicker. Soft dependency: without demonized_geometry_ray (e.g. vanilla Anomaly)
+-- we skip the cull and the card shows whenever it's on-screen.
+--   `fallback_pos` is the already-computed anchor (chest/shoulder); the head bone is
+--   fetched here rather than by the caller so that per-frame pcall only happens on the
+--   frames we actually cast (most frames return the cached result and touch nothing).
+local function has_los(id, obj, fallback_pos, tg)
+	if not C.los_check then
+		if DEBUG then printf("[IQM-LOS] id=%s SHOW: los_check is OFF", id) end
+		return true
+	end
+	if not demonized_geometry_ray then
+		if DEBUG then printf("[IQM-LOS] id=%s SHOW: demonized_geometry_ray MISSING", id) end
+		return true
+	end
+	local f = FILT[id]
+	if f and f.los_next and tg < f.los_next then
+		return f.los ~= false
+	end
+	-- Sample the head (usually visible) rather than the chest anchor, which often sits
+	-- behind waist-high cover and would falsely hide a plainly-visible NPC. Only reached
+	-- on a cast frame, so the pcall/bone lookup cost is paid at los_rate, not every frame.
+	local pos = fallback_pos
+	local okp, hp = pcall(obj.bone_position, obj, "bip01_head")
+	if okp and hp then pos = vector():set(hp) end
+	local cam  = device().cam_pos
+	local dist = pos:distance_to(cam)
+	local dir  = vector():set(cam):sub(pos):normalize()
+
+	-- Cast from the NPC anchor toward the camera. A large range (as Catspaw's marker LOS
+	-- uses) makes a clear shot report a hit well BEYOND the NPC (or nothing), while a wall
+	-- in between reports a hit noticeably CLOSER than the NPC. Wrapped in pcall so a ray
+	-- failure can't silently leave the card showing through walls.
+	local hit
+	local ok = pcall(function()
+		local ray = demonized_geometry_ray.geometry_ray({
+			ray_range     = 1000,
+			ignore_object = obj,   -- don't let the NPC's own body block the ray
+			flags         = 3,     -- 1 Objects + 2 Statics (walls, props)
+		})
+		local res = ray and ray:get(pos, dir)
+		if res then hit = res.distance end
+	end)
+	if hit == nil then hit = 1000 end       -- no hit / ray failed => treat as clear
+	local clear = (dist - hit) < 0.5        -- occluded if something's hit closer than the sample point
+
+	if DEBUG then
+		printf("[IQM-LOS] id=%s los_check=%s ray_ok=%s dist=%.1f hit=%.1f -> clear=%s",
+			id, tostring(C.los_check), tostring(ok), dist, hit, tostring(clear))
+	end
+
+	if not f then return clear end
+	if clear then f.los_good_t = tg end
+	-- NOTE: keep this a real boolean (not nil). If it were nil, `f.los = clear or grace`
+	-- becomes nil, and the cached path's `f.los ~= false` reads nil as visible, which
+	-- showed the card through walls for an NPC never yet glimpsed (i.e. at first approach).
+	local grace = f.los_good_t ~= nil and (tg - f.los_good_t) < (C.los_grace or 250)
+	f.los      = clear or grace
+	f.los_next = tg + (C.los_rate or 150)
+	return f.los
+end
+
+-- Framerate-independent ease toward the projected head point, with a snap for
+-- big jumps and whole-pixel hysteresis so the card sits rock-steady at rest.
+local function smooth_point(id, tx, ty, tg)
+	local f = FILT[id]
+	if not f then f = { a = 0 }; FILT[id] = f end
+	if not f.rdy then
+		f.x, f.y = tx, ty
+		f.rx, f.ry = floor(tx + 0.5), floor(ty + 0.5)
+		f.tg = tg
+		f.rdy = true
+		return f.rx, f.ry
+	end
+	local dx = tx - f.x
+	local dy = ty - f.y
+	if (dx * dx + dy * dy) > SNAP2 then
+		f.x, f.y = tx, ty
+	else
+		local dt = tg - (f.tg or tg)
+		if dt < 1 then dt = 1 elseif dt > 100 then dt = 100 end
+		local alpha = (smooth_tau <= 0) and 1 or (1 - exp(-dt / smooth_tau))
+		f.x = f.x + dx * alpha
+		f.y = f.y + dy * alpha
+	end
+	f.tg = tg
+	if abs(f.x - f.rx) >= 1 then f.rx = floor(f.x + 0.5) end
+	if abs(f.y - f.ry) >= 1 then f.ry = floor(f.y + 0.5) end
+	return f.rx, f.ry
+end
+
+-- Distance fade + node size share one distance (computed once by the caller from the
+-- already-resolved obj, rather than each re-fetching the object and re-measuring).
+--   alpha_for_dist: solid within full_dist, fading to 0 at appear_dist, gone beyond.
+--   node_scale_for_dist: node_min of full size at appear_dist, growing to 1 within full_dist.
+local function alpha_for_dist(d)
+	if d <= C.full_dist then return 255 end
+	if d >= C.appear_dist then return 0 end
+	local span = max(0.1, C.appear_dist - C.full_dist)
+	return floor(((C.appear_dist - d) / span) * 255)
+end
+
+local function node_scale_for_dist(d)
+	local nmin = C.node_min or 0.5
+	if d <= C.full_dist then return 1 end
+	if d >= C.appear_dist then return nmin end
+	local span = max(0.1, C.appear_dist - C.full_dist)
+	return nmin + (1 - nmin) * ((C.appear_dist - d) / span)
+end
+
+-- Header text is fixed per role, so translate once and cache (game.translate_string is a
+-- string-table lookup we were paying every frame). Cache cleared on config/language change.
+local function header_for(role)
+	local h = _hdr_cache[role]
+	if not h then
+		local key = (role == "guide" and "st_iqm_hdr_guide")
+			or (role == "companion" and "st_iqm_hdr_companion")
+			or "st_iqm_hdr_target"
+		h = game.translate_string(key)
+		_hdr_cache[role] = h
+	end
+	return h
+end
+
+-- NPC display name from an already-resolved object (name is stable, so the caller caches
+-- the result on the tracked entry and only calls this once per NPC).
+local function name_from_obj(obj)
+	if not obj then return "" end
+	local n = obj:character_name()
+	if n == nil or n == "" then n = obj:name() end
+	return n or ""
+end
+
+-- Subtle 2D PDA chirp when a card first comes into view. The sound_object is created
+-- lazily and cached; guarded so a missing sound (or an odd engine state) never errors.
+local function play_chirp()
+	if not (C.sound_alert and sound_object) then return end
+	local ok = pcall(function()
+		if not _chirp_snd then _chirp_snd = sound_object(SOUND_PATH) end
+		if _chirp_snd then
+			-- volume is a property, set AFTER play (the pattern working sound mods use);
+			-- there is no set_volume method.
+			_chirp_snd:play(db.actor, 0, sound_object.s2d)
+			_chirp_snd.volume = C.sound_vol or 0.7
+		end
+	end)
+	if DEBUG then printf("[IQM-SND] play '%s' ok=%s handle=%s", SOUND_PATH, tostring(ok), tostring(_chirp_snd)) end
+	if not ok then _chirp_snd = nil end   -- drop a bad handle so we can retry later
+end
+
+-- True while the fullscreen PDA (map / tasks / contacts) is open, so the world overlay
+-- hides instead of floating over the menu. The menu handle is stable once built, so it's
+-- cached after the first successful lookup (only IsShown is polled per frame thereafter).
+local _pda_menu = nil
+local function pda_is_open()
+	if not _pda_menu then
+		if not (ActorMenu and ActorMenu.get_pda_menu) then return false end
+		local ok, m = pcall(ActorMenu.get_pda_menu)
+		if not ok or not m then return false end
+		_pda_menu = m
+	end
+	local ok, shown = pcall(_pda_menu.IsShown, _pda_menu)
+	if not ok then _pda_menu = nil; return false end   -- stale handle: re-fetch next frame
+	return shown or false
+end
+
+local function render(tg)
+	if not CARDS then return end
+	if next(tracked) == nil then return end   -- nothing to draw: skip the PDA/device work entirely
+	-- hide everything while the PDA is up; keep per-NPC state so closing it resumes
+	-- cleanly (no re-chirp, no replayed entrance).
+	if pda_is_open() then
+		for _, t in pairs(tracked) do CARDS:hide_slot(t.slot) end
+		return
+	end
+	-- Aspect factor only changes when the resolution does, so recompute it just then
+	-- (not every frame). The leader line reads UI_KX; keeping it current here is enough.
+	local dev = device()
+	if dev and dev.width and dev.width > 0 and dev.width ~= _ui_w then
+		_ui_w = dev.width
+		UI_KX = (dev.height / dev.width) / (768 / 1024)
+	end
+	local apos = db.actor:position()   -- actor position once per frame, not per NPC
+	for id, t in pairs(tracked) do
+		local f = FILT[id]
+		if not f then f = { a = 0 }; FILT[id] = f end
+
+		local obj = get_obj(id)
+		local hx, hy, vis, dist
+		if obj and obj:alive() then
+			dist = obj:position():distance_to(apos)   -- one distance, shared by fade + node size
+			local wpos, rux, ruz = anchor_world_pos(obj)
+			-- auto shoulder side: recompute which shoulder only every SIDE_RATE ms (two extra
+			-- projections) and reuse the sign in between; then offset the anchor onto it in place.
+			local amt = C.side_amt or 0.18
+			if C.auto_side and amt > 0 and not (rux == 0 and ruz == 0) then
+				if f.side_sign == nil or tg >= (f.side_next or 0) then
+					f.side_sign = shoulder_sign(wpos, rux, ruz, amt)
+					f.side_next = tg + SIDE_RATE
+				end
+				local sgn = f.side_sign
+				if sgn ~= 0 then
+					wpos.x = wpos.x + sgn * rux * amt
+					wpos.z = wpos.z + sgn * ruz * amt
+				end
+			end
+			hx, hy = project_world(wpos)
+			if hx then
+				vis = has_los(id, obj, wpos, tg)   -- head bone fetched inside, only on a cast frame
+			end
+		end
+		local target_a = (hx and vis and alpha_for_dist(dist)) or 0
+
+		-- framerate-independent ease: the alpha fades and the entrance rise both
+		-- settle over a fixed time regardless of FPS (dt clamped against hitches).
+		local dt = tg - (f.ftg or tg)
+		if dt < 1 then dt = 1 elseif dt > 100 then dt = 100 end
+		f.ftg    = tg
+		f.a      = f.a + (target_a - f.a) * (1 - exp(-dt / FADE_TAU))
+		f.appear = (f.appear or 0) + (1 - (f.appear or 0)) * (1 - exp(-dt / APPEAR_TAU))
+
+		if f.a < 2 or not hx then
+			CARDS:hide_slot(t.slot)
+			f.appear = 0   -- replay the entrance next time this card shows
+			f.seen   = false
+		else
+			-- first time this card comes into view (after being hidden): chirp, gated by a
+			-- per-NPC cooldown and a short global throttle so re-glances / simultaneous
+			-- appearances don't spam the sound.
+			if not f.seen then
+				f.seen = true
+				if tg >= (f.chirp_t or 0) and (tg - _chirp_last) > 120 then
+					f.chirp_t   = tg + SOUND_CD
+					_chirp_last = tg
+					play_chirp()
+				end
+			end
+			if not t.name then t.name = name_from_obj(obj) end   -- name is stable: resolve once per NPC
+			local rx, ry = smooth_point(id, hx, hy, tg)
+			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
+			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift)
+		end
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- The card dialog: a fixed pool of card widget-sets, positioned per frame.
+-- --------------------------------------------------------------------------
+class "IqmCards" (CUIScriptWnd)
+
+function IqmCards:__init() super()
+	self:InitControls()
+end
+
+function IqmCards:InitControls()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+	self:SetAutoDelete(true)
+
+	self.xml = CScriptXmlInit()
+	self.xml:ParseFile("iqm_cards.xml")
+
+	self.slots = {}
+	for i = 1, MAX_CARDS do
+		-- Creation order = draw order (later draws on top). Back to front:
+		--  * card_shadow      -- soft slab under the whole card (physical lift)
+		--  * line_sh/line     -- leader line, BEFORE the plate so the plate draws over its
+		--                        end (the line is extended slightly into the card => flush join)
+		--  * plate_l/c/r      -- rounded gradient plate as a horizontal 3-slice
+		--  * accent           -- left edge bar
+		--  * *_sh / text      -- header/name, each with a 1px black shadow copy behind it.
+		--                        Parented to `self` (not the plate) and created AFTER all
+		--                        three plate slices, so the text draws on top of every slice.
+		--  * glow/node        -- head dot + its soft halo (drawn last; they sit on the NPC's
+		--                        body, away from the card, so top-of-stack is fine)
+		local shadow  = self.xml:InitStatic("card_shadow", self)
+		local line_sh = self.xml:InitStatic("card_line_sh", self)
+		local line    = self.xml:InitStatic("card_line", self)
+		local plate_l = self.xml:InitStatic("card_plate_l", self)
+		local plate_c = self.xml:InitStatic("card_plate_c", self)
+		local plate_r = self.xml:InitStatic("card_plate_r", self)
+		local accent  = self.xml:InitStatic("card_accent", self)
+		local head_sh = self.xml:InitTextWnd("card_head_sh:text", self)
+		local name_sh = self.xml:InitTextWnd("card_name_sh:text", self)
+		local head    = self.xml:InitTextWnd("card_head:text", self)
+		local name    = self.xml:InitTextWnd("card_name:text", self)
+		local glow    = self.xml:InitStatic("card_glow", self)
+		local node    = self.xml:InitStatic("card_node", self)
+		self.slots[i] = { shadow = shadow, plate = { plate_l, plate_c, plate_r }, accent = accent,
+		                  line_sh = line_sh, line = line,
+		                  glow = glow, node = node,
+		                  head = head, name = name, head_sh = head_sh, name_sh = name_sh }
+		self:hide_slot(i)
+	end
+end
+
+function IqmCards:hide_slot(i)
+	local s = self.slots[i]
+	if not s then return end
+	s.shadow:Show(false)
+	for _, p in ipairs(s.plate) do p:Show(false) end
+	s.accent:Show(false)
+	s.line_sh:Show(false)
+	s.line:Show(false)
+	s.glow:Show(false)
+	s.node:Show(false)
+	s.head:Show(false)
+	s.name:Show(false)
+	s.head_sh:Show(false)
+	s.name_sh:Show(false)
+end
+
+function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift)
+	local s = self.slots[i]
+	if not s then return end
+	a = floor(a)
+	if a > 255 then a = 255 end
+	nscale = nscale or 1
+	lift   = lift or 0
+
+	-- text + card size. Both strings are fixed for the life of this slot's NPC, so the
+	-- SetText/AdjustWidthToText/GetWidth measure (four text widgets) is done only when the
+	-- text actually changes; otherwise the cached width is reused. This was previously
+	-- paid on every frame.
+	local pad, accent_w, ch = 9, 3, 40
+	local cw = s.cw
+	if header ~= s.last_head or name ~= s.last_name then
+		s.head:SetText(header)
+		s.name:SetText(name)
+		s.head_sh:SetText(header)
+		s.name_sh:SetText(name)
+		s.head:AdjustWidthToText()
+		s.name:AdjustWidthToText()
+		s.head_sh:AdjustWidthToText()
+		s.name_sh:AdjustWidthToText()
+		cw = accent_w + pad + max(s.head:GetWidth(), s.name:GetWidth()) + pad
+		s.cw, s.last_head, s.last_name = cw, header, name
+	end
+
+	-- place the card up and to one side of the head; flip left near the right edge.
+	-- `lift` drops it a few px on first appearance so it rises into place as it fades in.
+	local right = (hx + cfg.card_off_x + cw) <= 1014
+	local cx    = right and (hx + cfg.card_off_x) or (hx - cfg.card_off_x - cw)
+	if cx < 4 then cx = 4 end
+	local cy = hy - cfg.card_off_y - ch + lift
+	if cy < 4 then cy = 4 end
+
+	-- whole-card soft drop shadow: a feathered slab a little larger than the plate,
+	-- nudged down-right and tinted black, so the card reads as lifted off the world.
+	local sh_m, sh_ox, sh_oy = 6, 3, 4
+	s.shadow:SetWndPos(P(cx - sh_m + sh_ox, cy - sh_m + sh_oy))
+	s.shadow:SetWndSize(S(cw + sh_m * 2, ch + sh_m * 2))
+	s.shadow:SetTextureColor(GetARGB(floor(120 * a / 255), 0, 0, 0))
+	s.shadow:Show(true)
+
+	-- rounded plate as a horizontal 3-slice: fixed-width left/right caps (rounded
+	-- corners, crisp) with a stretched centre column between them. cap = the on-screen
+	-- width of each cap; the centre fills whatever is left. The centre overlaps each cap
+	-- by 1px (drawn over the left cap, and the right cap is drawn over the centre) so the
+	-- straight-edged seams can never show a sub-pixel gap.
+	local cap   = 11
+	local cenw  = max(2, cw - cap * 2)
+	local pl, pc, pr = s.plate[1], s.plate[2], s.plate[3]
+	pl:SetWndPos(P(cx, cy));                 pl:SetWndSize(S(cap, ch))
+	pc:SetWndPos(P(cx + cap - 1, cy));       pc:SetWndSize(S(cenw + 2, ch))
+	pr:SetWndPos(P(cx + cw - cap, cy));      pr:SetWndSize(S(cap, ch))
+
+	-- accent bar down the left edge, inset vertically so it stays clear of the rounded corners.
+	local acc_in = 7
+	s.accent:SetWndPos(P(cx, cy + acc_in))
+	s.accent:SetWndSize(S(accent_w, ch - acc_in * 2))
+
+	-- text, positioned absolutely (parented to self), starting past the accent bar.
+	-- Each line has a 1px black shadow copy one pixel down-right, drawn behind it.
+	local txo = cx + accent_w + pad
+	s.head_sh:SetWndPos(P(txo + 1, cy + 6))
+	s.head:SetWndPos(P(txo, cy + 5))
+	s.name_sh:SetWndPos(P(txo + 1, cy + 20))
+	s.name:SetWndPos(P(txo, cy + 19))
+
+	-- Single round node at the head point, with a soft glow halo behind it. The node's
+	-- dark border ring is baked into its texture (dark rim, white core), so it's one
+	-- element and nothing can misalign. Size grows with proximity (nscale). The 4:3
+	-- virtual UI is stretched onto the real (wider) screen, so an equal w/h square draws
+	-- as an oval; we squeeze the width by UI_KX to keep both dot and halo round. Snapped.
+	if cfg.show_node then
+		local ns  = max(2, floor(cfg.node_size * nscale + 0.5))
+		local nsx = max(2, floor(ns * UI_KX + 0.5))
+		-- gentle breathing pulse on the glow halo (size +/-10%, alpha 75-100% of base),
+		-- a slow ~1.6s sine so it draws the eye to the objective without being busy. The
+		-- core dot stays crisp/steady. Time-based, so it's framerate-independent.
+		local p_scale, p_alpha = 1, 1
+		if cfg.node_pulse then
+			local sn = sin(time_global() * 0.0039)
+			p_scale = 1 + 0.10 * sn
+			p_alpha = 0.875 + 0.125 * sn
+		end
+		local gs  = max(6, floor(cfg.node_size * nscale * 2.8 * p_scale + 0.5))
+		local gsx = max(6, floor(gs * UI_KX + 0.5))
+		s.glow:SetWndSize(S(gsx, gs))
+		s.glow:SetWndPos(P(floor(hx - gsx * 0.5 + 0.5), floor(hy - gs * 0.5 + 0.5)))
+		s.glow:SetTextureColor(GetARGB(floor(150 * a / 255 * p_alpha), cfg.col_r, cfg.col_g, cfg.col_b))
+		s.glow:Show(true)
+		s.node:SetWndSize(S(nsx, ns))
+		s.node:SetWndPos(P(floor(hx - nsx * 0.5 + 0.5), floor(hy - ns * 0.5 + 0.5)))
+		s.node:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		s.node:Show(true)
+	else
+		s.glow:Show(false)
+		s.node:Show(false)
+	end
+
+	-- leader line: head point -> nearest bottom corner of the card. The strip
+	-- rotates about its own centre, so put its centre on the segment midpoint.
+	local corner_x = right and cx or (cx + cw)
+	local corner_y = cy + ch
+	local dx  = corner_x - hx
+	local dy  = corner_y - hy
+	-- extend the line a little past the corner so its end tucks under the card (the
+	-- card is drawn over the line), giving a flush join with no gap at any aspect ratio
+	local seglen = sqrt(dx * dx + dy * dy)
+	if seglen > 0.001 then
+		local over = 6
+		dx = dx + dx / seglen * over
+		dy = dy + dy / seglen * over
+		corner_x = hx + dx
+		corner_y = hy + dy
+	end
+	-- The engine's heading rotation multiplies the strip's X by UI_KX (aspect
+	-- correction) while plain SetWndPos (node/card) is not, so we pre-divide dx by
+	-- UI_KX and derive length/angle from that: the rotated ends then land exactly
+	-- on the head point and the card corner. Y is flipped (screen Y points down).
+	local dxk = dx / UI_KX
+	local len = sqrt(dxk * dxk + dy * dy)
+	local ang = atan2(-dy, dxk)
+	local mx  = (hx + corner_x) * 0.5
+	local my  = (hy + corner_y) * 0.5
+	local lx  = mx - len * 0.5
+	local ly  = my - cfg.line_thick * 0.5
+
+	-- outline halo: same strip, black, a touch thicker, sharing the line's exact
+	-- centre and angle so it can never drift. It reads as a thin dark edge that keeps
+	-- the line legible over bright backgrounds. Drawn behind the line.
+	local halo_t = cfg.line_thick + LINE_HALO
+	s.line_sh:SetWndSize(S(len, halo_t))
+	s.line_sh:SetWndPos(P(mx - len * 0.5, my - halo_t * 0.5))
+	s.line_sh:EnableHeading(true)
+	s.line_sh:SetHeading(ang)
+	s.line_sh:SetTextureColor(GetARGB(floor(cfg.line_a * a / 255 * 0.6), 0, 0, 0))
+	s.line_sh:Show(true)
+
+	s.line:SetWndSize(S(len, cfg.line_thick))
+	s.line:SetWndPos(P(lx, ly))
+	s.line:EnableHeading(true)
+	s.line:SetHeading(ang)
+
+	if DEBUG then
+		local tg = time_global()
+		if tg - _dbg_t > 1000 then
+			_dbg_t = tg
+			printf("[IQM] slot=%s head=(%s,%s) card=(cx=%s cy=%s cw=%s ch=%s right=%s) corner=(%s,%s) len=%s a=%s",
+				i, hx, hy, cx, cy, cw, ch, tostring(right), corner_x, corner_y, len, a)
+		end
+	end
+
+	-- colours scaled by the eased alpha. Plate is a warm charcoal (not pure black)
+	-- and the name is a warm off-white, so the card reads as one soft warm object
+	-- rather than harsh black-and-white behind the accent. The header/name each get a
+	-- black shadow copy at ~0.7 alpha for legibility over bright scenes.
+	local plate_col = GetARGB(floor(cfg.card_a * a / 255), 24, 22, 19)
+	for _, p in ipairs(s.plate) do p:SetTextureColor(plate_col); p:Show(true) end
+	s.accent:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+	s.line:SetTextureColor(GetARGB(floor(cfg.line_a * a / 255), cfg.col_r, cfg.col_g, cfg.col_b))
+	local tsh = floor(a * 0.7)
+	s.head_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
+	s.name_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
+	s.head:SetTextColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+	s.name:SetTextColor(GetARGB(a, 214, 210, 202))
+
+	s.accent:Show(true)
+	s.line:Show(true)
+	s.head_sh:Show(true)
+	s.name_sh:Show(true)
+	s.head:Show(true)
+	s.name:Show(true)
+end
+
+-- --------------------------------------------------------------------------
+-- Debug test hook (driven from the F7 debug menu)
+-- --------------------------------------------------------------------------
+-- Force-card the stalker under the crosshair, bypassing the task/guide/companion
+-- sources, so every card style can be exercised without needing a matching quest.
+-- Reachable two ways:
+--   * the F7 debugger's Target tab ("IQM: Card as ..." entries, injected below), or
+--   * the Lua execute box: iqm_markers.debug_card("target" | "guide" | "companion")
+-- Same NPC + same role again unpins them; a different role switches the style.
+-- debug_clear() unpins everything. Pins live in their own table and are merged
+-- into the desired set each scan, so the stale sweep in update() can't remove them.
+local debug_pins = {}   -- [npc_id] = forced role
+
+-- Feedback lands in the F7 debugger's output console when it's around (its
+-- send_output also mirrors to the log), else straight in the log.
+local function dbg_out(fmt, ...)
+	if ui_debug_launcher and ui_debug_launcher.send_output then
+		ui_debug_launcher.send_output(fmt, ...)
+	else
+		printf(fmt, ...)
+	end
+end
+
+function debug_card(role)
+	local obj = level.get_target_obj and level.get_target_obj()
+	if not (obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)) then
+		dbg_out("!IQM: no living stalker under the crosshair")
+		return
+	end
+	if role ~= "guide" and role ~= "companion" then role = "target" end
+	local id = obj:id()
+	if debug_pins[id] == role then
+		debug_pins[id] = nil
+		dbg_out("-IQM: unpinned card on [%s]", obj:name())
+	else
+		debug_pins[id] = role
+		dbg_out("-IQM: pinned [%s] as '%s'", obj:name(), role)
+	end
+	next_scan = 0   -- apply on the next update instead of waiting out the scan interval
+end
+
+function debug_clear()
+	debug_pins = {}
+	next_scan = 0
+	dbg_out("-IQM: all pinned cards cleared")
+end
+
+-- F7 debugger integration: add the pin actions to the launcher's Target tab via
+-- its public extension point (ui_debug_launcher.inject). The launcher's content
+-- table lives for the whole game process, so this runs once (flag) from
+-- on_game_start. hide_ui = 2 closes/unpauses the debugger before the functor
+-- runs, so the card appears (on the NPC still under the crosshair) the moment
+-- the menu drops.
+local _f7_injected = false
+local function inject_f7_actions()
+	if _f7_injected then return end
+	if not (ui_debug_launcher and ui_debug_launcher.inject) then return end
+	_f7_injected = true
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Quest Target", functor = { debug_card, "target" },    hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide",        functor = { debug_card, "guide" },     hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Companion",    functor = { debug_card, "companion" }, hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Clear Pinned Cards",   functor = { debug_clear },             hide_ui = 2 })
+end
+
+-- --------------------------------------------------------------------------
+-- Scan / update loop
+-- --------------------------------------------------------------------------
+local function update()
+	if not db.actor then return end
+	if not C.enabled then
+		if next(tracked) then clear_all() end
+		return
+	end
+
+	local desired = collect_desired()
+	augment_companions(desired)   -- add recruitable stalkers (throttled scan; no-op if off)
+
+	-- debug_card pins: forced entries that override the detected role (forcing the
+	-- style is the point of the tool). Dead/gone NPCs drop their pin.
+	if next(debug_pins) then
+		for id, role in pairs(debug_pins) do
+			local obj = get_obj(id)
+			if obj and obj:alive() then
+				desired[id] = role
+			else
+				debug_pins[id] = nil
+			end
+		end
+	end
+
+	local stale = {}
+	for id in pairs(tracked) do
+		if not desired[id] then stale[#stale + 1] = id end
+	end
+	for _, id in ipairs(stale) do
+		remove_entry(id)
+	end
+
+	-- quest / guide NPCs claim card slots first; companions (lower priority) fill what's
+	-- left, so a full slate of objectives is never crowded out by nearby recruitables.
+	for id, role in pairs(desired) do
+		if role ~= "companion" then ensure_entry(id, role) end
+	end
+	for id, role in pairs(desired) do
+		if role == "companion" then ensure_entry(id, role) end
+	end
+end
+
+-- Create the card dialog and attach it to the HUD the first time the HUD is
+-- available. get_hud() returns nil at on_game_start (the HUD isn't built yet),
+-- so we do this lazily from the update loop.
+local function ensure_cards()
+	if CARDS then return true end
+	local hud = get_hud()
+	if not hud then return false end
+	CARDS = IqmCards()
+	hud:AddDialogToRender(CARDS)
+	return true
+end
+
+local function actor_on_update()
+	if not ensure_cards() then return end
+	local tg = time_global()
+	if tg >= next_scan then
+		next_scan = tg + SCAN_INTERVAL
+		update()
+	end
+	render(tg)
+end
+
+-- --------------------------------------------------------------------------
+-- MCM live-apply + startup (on_mcm_load lives in iqm_mcm.script)
+-- --------------------------------------------------------------------------
+function on_option_change()
+	read_config()
+	clear_all()
+	next_scan = 0
+end
+
+function on_game_start()
+	get_obj = level.object_by_id   -- bind the hot object lookup as an upvalue (level.* is ready now)
+	read_config()
+	inject_f7_actions()            -- add the pin actions to the F7 debugger's Target tab
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("on_option_change", on_option_change)
+end

@@ -1,0 +1,78 @@
+-- ======================================================================
+--  Immersive Quest Markers: MCM menu
+-- ======================================================================
+--  MCM only discovers on_mcm_load in scripts whose filename ends in
+--  "mcm.script", so the menu lives here. The logic and live option-change
+--  handling are in iqm_markers.script; defaults come from
+--  iqm_markers.DEFAULTS so there is a single source of truth.
+-- ======================================================================
+
+function on_mcm_load()
+	local d = iqm_markers and iqm_markers.DEFAULTS or {}
+	-- Two subpages (tabs): "Core" (the everyday switches) and "Advanced" (fine tuning,
+	-- styling, colour, motion, perf rates). Which key sits on which tab is mirrored from
+	-- iqm_markers.CORE_KEYS, which read_config uses to build the "iqm/<tab>/<key>" path.
+	-- NOTE: the top-level node must NOT have sh (sh marks a leaf PAGE whose gr holds
+	-- options; a folder of subpages is a plain node whose children carry sh).
+	local menu = {
+		id = "iqm", gr = {
+
+			{ id = "core", sh = true, text = "ui_mcm_iqm_tab_core", gr = {
+				{ id = "title",        type = "slide", text = "ui_mcm_menu_iqm", size = {512, 50}, spacing = 20 },
+				{ id = "enabled",         type = "check", val = 1, def = d.enabled },
+				{ id = "mark_targets",    type = "check", val = 1, def = d.mark_targets },
+				{ id = "mark_guides",     type = "check", val = 1, def = d.mark_guides },
+				{ id = "mark_companions", type = "check", val = 1, def = d.mark_companions },
+				{ id = "appear_dist",     type = "track", val = 2, min = 2, max = 60, step = 1, def = d.appear_dist },
+				{ id = "los_check",       type = "check", val = 1,                              def = d.los_check },
+				{ id = "sound_alert",     type = "check", val = 1,                              def = d.sound_alert },
+			}},
+
+			{ id = "advanced", sh = true, text = "ui_mcm_iqm_tab_advanced", gr = {
+				{ id = "title_adv",    type = "slide", text = "ui_mcm_iqm_tab_advanced", size = {512, 50}, spacing = 20 },
+
+				{ id = "show_node",    type = "check", val = 1,                                     def = d.show_node },
+				{ id = "node_pulse",   type = "check", val = 1,                                     def = d.node_pulse },
+				{ id = "node_size",    type = "track", val = 2, min = 4,   max = 24,   step = 1,    def = d.node_size },
+				{ id = "node_min",     type = "track", val = 2, min = 0.2, max = 1,    step = 0.05, def = d.node_min },
+
+				{ id = "sound_vol",    type = "track", val = 2, min = 0,   max = 1,    step = 0.05, def = d.sound_vol },
+
+				{ id = "full_dist",    type = "track", val = 2, min = 1,   max = 60,   step = 1,    def = d.full_dist },
+				{ id = "los_rate",     type = "track", val = 2, min = 50,  max = 500,  step = 10,   def = d.los_rate },
+				{ id = "los_grace",    type = "track", val = 2, min = 0,   max = 1000, step = 10,   def = d.los_grace },
+
+				{ id = "head_lift",    type = "track", val = 2, min = -1,  max = 1,    step = 0.01, prec = 2, def = d.head_lift },
+				{ id = "head_side",    type = "track", val = 2, min = -1,  max = 1,    step = 0.01, prec = 2, def = d.head_side },
+				{ id = "auto_side",    type = "check", val = 1,                                                def = d.auto_side },
+				{ id = "side_amt",     type = "track", val = 2, min = 0,   max = 0.5,  step = 0.01, prec = 2, def = d.side_amt },
+
+				{ id = "card_off_x",   type = "track", val = 2, min = 0,   max = 300,  step = 5,    def = d.card_off_x },
+				{ id = "card_off_y",   type = "track", val = 2, min = 0,   max = 200,  step = 5,    def = d.card_off_y },
+				{ id = "line_thick",   type = "track", val = 2, min = 1,   max = 6,    step = 1,    def = d.line_thick },
+				{ id = "line_a",       type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.line_a },
+				{ id = "card_a",       type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.card_a },
+
+				{ id = "smoothing",    type = "track", val = 2, min = 0.02, max = 1,   step = 0.01, def = d.smoothing },
+				{ id = "snap_dist",    type = "track", val = 2, min = 50,  max = 600,  step = 10,   def = d.snap_dist },
+
+				{ id = "col_a",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_a },
+				{ id = "col_r",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_r },
+				{ id = "col_g",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_g },
+				{ id = "col_b",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_b },
+
+				{ id = "debug_log",    type = "check", val = 1,                                     def = d.debug_log },
+			}},
+		}
+	}
+
+	-- Caption/description keys: MCM's default would include the subpage in the key
+	-- ("ui_mcm_iqm/core/<id>"), but the shipped translations use the flat
+	-- "ui_mcm_iqm_<id>" ids, so point every value option's hint at those.
+	for _, page in ipairs(menu.gr) do
+		for _, o in ipairs(page.gr) do
+			if o.val and not o.hint then o.hint = "iqm_" .. o.id end
+		end
+	end
+	return menu
+end
