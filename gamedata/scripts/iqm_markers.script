@@ -491,9 +491,8 @@ end
 -- engine turns that into a map spot on the NPC's id, queryable per NPC via
 -- level.map_has_object_spot. That matches exactly what the player's PDA legend
 -- flags (it's what GAMMA's own sim_squad_scripted and Tactical Compass key off),
--- so no trade-config scanning is needed. Checked per candidate on the same slow
--- cadence as the companion scan.
-local EXTRA_SCAN  = 5000  -- ms between role rescans (near-static state)
+-- so no trade-config scanning is needed.
+local EXTRA_SCAN  = 2000  -- ms between role rescans (matches the quest scan, so role cards feel as responsive)
 local _extra_next = 0
 local _role_ids   = {}    -- cached { [id] = role } from the last scan
 
@@ -535,9 +534,12 @@ local function refine_trader(id, obj)
 	return r
 end
 
--- One scan of the online-NPC table for role-spot holders on-screen and in range.
--- Same shape as the companion scan: cheapest gates first, screen projection last,
--- so off-screen NPCs never claim card slots.
+-- One scan of the online-NPC table for role-spot holders in range. Unlike the
+-- companion scan there is no on-screen gate here: that would tie a card's
+-- appearance to whether the NPC happened to be projecting the frame the scan
+-- fired, which made role cards feel unresponsive. Instead we add every in-range
+-- role NPC and let render() project and show/hide it per frame, exactly as the
+-- quest/guide cards work. The distance gate keeps the tracked set small.
 local function scan_extras()
 	local roles = {}
 	if not (C.mark_guiders or C.mark_traders or C.mark_important) then return roles end
@@ -553,10 +555,7 @@ local function scan_extras()
 			   and not is_enemy_to_actor(obj) then
 				local role, opt = spot_role(id)
 				if role and C[opt] then
-					local wp = anchor_world_pos(obj)   -- keep only on-screen NPCs (as scan_companions)
-					if wp and project_world(wp) then
-						roles[id] = (role == "trader") and refine_trader(id, obj) or role
-					end
+					roles[id] = (role == "trader") and refine_trader(id, obj) or role
 				end
 			end
 		end
