@@ -327,7 +327,9 @@ end
 local function anchor_world_pos(obj)
 	local pos
 	for _, b in ipairs(ANCHOR_BONES) do
-		local ok, p = pcall(function() return obj:bone_position(b) end)
+		-- pass the method + args to pcall directly (no wrapper closure): this runs once
+		-- per card per frame, and a fresh closure each call would be needless GC churn.
+		local ok, p = pcall(obj.bone_position, obj, b)
 		if ok and p then pos = p; break end
 	end
 	if not pos then
@@ -354,9 +356,11 @@ end
 
 -- Project a world point to the screen ourselves (world2ui, same as mag_check_ui,
 -- which lines up with our own dialog). Returns nil when off-screen / behind camera.
--- world2ui can mutate its argument, so we hand it a copy and keep `pos` intact.
+-- world2ui can mutate its argument, so we hand it a reusable scratch copy (its result
+-- is read immediately, so one shared scratch is safe) and keep `pos` intact.
+local _w2u = vector()   -- scratch handed to world2ui; never overlaps its own result
 local function project_world(pos)
-	local ui = game.world2ui(vector():set(pos), false, false)
+	local ui = game.world2ui(_w2u:set(pos), false, false)
 	if not ui or ui.x < -9000 then return nil end
 	return ui.x, ui.y
 end
@@ -386,6 +390,86 @@ end
 local SIDE_RATE = 120   -- ms between auto-shoulder re-picks (reuse the sign in between)
 
 -- --------------------------------------------------------------------------
+-- Amortized NPC scanner
+-- --------------------------------------------------------------------------
+-- The companion and service/important scans each walk the whole online-NPC table
+-- (db.storage) doing real per-NPC work (recruit preconditions, PDA-spot queries,
+-- projections). Done in a single frame on a 2-3s timer, that whole burst lands as a
+-- periodic hitch. This spreads one scan pass over several frames: snapshot the ids
+-- once, process a bounded SCAN_BUDGET of them per frame into a scratch set, and
+-- publish it (swap into `live`) only when the pass finishes. Callers read `live`; it
+-- just refreshes a little later than before instead of all in one frame.
+local SCAN_BUDGET = 10          -- NPCs processed per scanner per frame
+local EMPTY       = {}          -- shared read-only "nothing found" set (never mutated)
+
+-- Per-frame scan context (actor pos / ranges), rebuilt only on frames that actually
+-- process a slice. One reused table, so a scanning frame allocates nothing beyond the
+-- id snapshot and the result set.
+local _scan_ctx = {}
+local function scan_ctx()
+	local actor = db.actor
+	_scan_ctx.actor   = actor
+	_scan_ctx.apos    = actor:position()
+	local ad = C.appear_dist or 16
+	_scan_ctx.appear2 = ad * ad
+	_scan_ctx.friend  = game_object.friend
+	return _scan_ctx
+end
+
+-- interval: ms between the START of successive passes. scan_one(id, ctx) returns a
+-- value to store for that id (any non-nil) or nil to skip it. pre_pass() is an optional
+-- cheap gate run once per pass; when it returns false the pass is skipped entirely
+-- (feature off / system absent / no room) and an empty set is published.
+local function make_scanner(interval, scan_one, pre_pass)
+	return { interval = interval, scan_one = scan_one, pre_pass = pre_pass,
+	         live = EMPTY, next_due = 0, ids = nil, cursor = 0, partial = nil }
+end
+
+local function scanner_reset(sc)
+	sc.live, sc.next_due, sc.ids, sc.cursor, sc.partial = EMPTY, 0, nil, 0, nil
+end
+
+-- Advance one scanner by up to SCAN_BUDGET NPCs; call every frame. Returns true on the
+-- frame a pass completes (a fresh set was just published), so the caller can merge it
+-- promptly instead of waiting out the update throttle.
+local function scanner_tick(sc, tg)
+	if not sc.ids then
+		if tg < sc.next_due then return false end            -- not due for a new pass yet
+		if sc.pre_pass and not sc.pre_pass() then            -- gated out: clear + reschedule
+			sc.next_due = tg + sc.interval
+			if sc.live ~= EMPTY then sc.live = EMPTY; return true end
+			return false
+		end
+		local ids, n = {}, 0                                 -- snapshot the online ids once per pass
+		for id in pairs(db.storage) do
+			if id ~= AC_ID then n = n + 1; ids[n] = id end
+		end
+		sc.ids, sc.cursor, sc.partial = ids, 0, {}
+	end
+
+	local ids, one, partial = sc.ids, sc.scan_one, sc.partial
+	local n    = #ids
+	local i    = sc.cursor
+	local stop = i + SCAN_BUDGET
+	if stop > n then stop = n end
+	local ctx  = scan_ctx()
+	while i < stop do
+		i = i + 1
+		local id = ids[i]
+		local v  = one(id, ctx)
+		if v ~= nil then partial[id] = v end
+	end
+	sc.cursor = i
+
+	if i >= n then                                           -- pass complete: publish the fresh set
+		sc.live, sc.ids, sc.partial = partial, nil, nil
+		sc.next_due = tg + sc.interval
+		return true
+	end
+	return false
+end
+
+-- --------------------------------------------------------------------------
 -- Recruitable-companion detection (option: mark_companions)
 -- --------------------------------------------------------------------------
 -- Unlike quest targets / the guide NPC (resolved from saved state to specific ids,
@@ -399,11 +483,10 @@ local SIDE_RATE = 120   -- ms between auto-shoulder re-picks (reuse the sign in 
 --   3. a screen-space pre-gate: only NPCs that actually project on-screen are kept,
 --      so off-screen stalkers never eat one of the limited card slots.
 -- It iterates db.storage (the engine's existing table of ONLINE NPCs, not a level
--- scan; near the actor that's a few dozen entries), throttled to COMPANION_SCAN and
--- cached in _comp_ids between scans. Soft dependency: no-ops without the companion system.
+-- scan; near the actor that's a few dozen entries), spread across frames by the
+-- amortized scanner (see scanner_tick), one pass per COMPANION_SCAN. Soft dependency:
+-- no-ops without the companion system.
 local COMPANION_SCAN = 3000   -- ms between recruitable scans (rare state change -> slow cadence)
-local _comp_next     = 0
-local _comp_ids      = {}     -- cached { [id] = true } set from the last scan
 
 -- Party-level gate: is there room for one more companion? Mirrors GAMMA's own
 -- is_room_for_one_in_actor_squad (patriarch/Catspaw-size aware) when present; falls
@@ -441,43 +524,36 @@ local function npc_recruitable(obj)
 	return ok and res
 end
 
--- One scan: returns a fresh { [id] = true } set of recruitable stalkers on-screen and
--- within appear range. Cheapest checks first; projection (option 3) last.
-local function scan_companions()
-	local out = {}
-	if not (axr_companions or individually_recruitable_companions) then return out end  -- system absent
-	if not room_for_companion() then return out end                                     -- party full: nobody recruitable
-	local actor   = db.actor
-	local apos    = actor:position()
-	local ad = C.appear_dist or 16; local appear2 = ad * ad
-	local friend  = game_object.friend
-	for id in pairs(db.storage) do
-		if id ~= AC_ID then
-			local obj = get_obj(id)
-			if obj and obj:alive() and IsStalker(obj)
-			   and obj:position():distance_to_sqr(apos) <= appear2
-			   and obj:relation(actor) == friend
-			   and not obj:has_info("npcx_is_companion")
-			   and npc_recruitable(obj) then
-				local wp = anchor_world_pos(obj)                 -- option 3: keep only on-screen NPCs
-				if wp and project_world(wp) then out[id] = true end
-			end
-		end
+-- Per-NPC test for the recruitable scan: cheapest checks first (option 3's ordering),
+-- the screen projection last. Returns true for a recruitable, on-screen, in-range
+-- stalker, else nil.
+local function companion_scan_one(id, ctx)
+	local obj = get_obj(id)
+	if obj and obj:alive() and IsStalker(obj)
+	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
+	   and obj:relation(ctx.actor) == ctx.friend
+	   and not obj:has_info("npcx_is_companion")
+	   and npc_recruitable(obj) then
+		local wp = anchor_world_pos(obj)                 -- option 3: keep only on-screen NPCs
+		if wp and project_world(wp) then return true end
 	end
-	return out
 end
 
--- Merge recruitable ids into the desired set, refreshing the cache on the throttle.
--- The cache is merged every update (so cards persist) but rescanned only every
--- COMPANION_SCAN ms. Quest/guide roles already in `desired` win (never overwritten).
+-- Once-per-pass gate: skip the whole scan when the feature is off, the companion
+-- system is absent, or the party is full (nobody recruitable anyway).
+local function companions_available()
+	if not C.mark_companions then return false end
+	if not (axr_companions or individually_recruitable_companions) then return false end
+	return room_for_companion()
+end
+
+local companion_scanner = make_scanner(COMPANION_SCAN, companion_scan_one, companions_available)
+
+-- Merge the recruitable ids (published by the amortized scanner) into the desired set.
+-- Quest/guide roles already in `desired` win (never overwritten).
 local function augment_companions(desired)
 	if not C.mark_companions then return end
-	local tg = time_global()
-	if tg >= _comp_next then
-		_comp_next = tg + COMPANION_SCAN
-		_comp_ids  = scan_companions()
-	end
-	for id in pairs(_comp_ids) do
+	for id in pairs(companion_scanner.live) do
 		want(desired, id, "companion")
 	end
 end
@@ -493,8 +569,6 @@ end
 -- flags (it's what GAMMA's own sim_squad_scripted and Tactical Compass key off),
 -- so no trade-config scanning is needed.
 local EXTRA_SCAN  = 2000  -- ms between role rescans (matches the quest scan, so role cards feel as responsive)
-local _extra_next = 0
-local _role_ids   = {}    -- cached { [id] = role } from the last scan
 
 -- Spot -> role, checked in order (first hit wins for multi-spot NPCs). `opt` is
 -- the MCM toggle gating that role card.
@@ -534,44 +608,36 @@ local function refine_trader(id, obj)
 	return r
 end
 
--- One scan of the online-NPC table for role-spot holders in range. Unlike the
--- companion scan there is no on-screen gate here: that would tie a card's
--- appearance to whether the NPC happened to be projecting the frame the scan
--- fired, which made role cards feel unresponsive. Instead we add every in-range
--- role NPC and let render() project and show/hide it per frame, exactly as the
--- quest/guide cards work. The distance gate keeps the tracked set small.
-local function scan_extras()
-	local roles = {}
-	if not (C.mark_guiders or C.mark_traders or C.mark_important) then return roles end
-	local actor   = db.actor
-	local apos    = actor:position()
-	local ad = C.appear_dist or 16; local appear2 = ad * ad
-	for id in pairs(db.storage) do
-		if id ~= AC_ID then
-			local obj = get_obj(id)
-			if obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)
-			   and obj:position():distance_to_sqr(apos) <= appear2
-			   and not obj:has_info("npcx_is_companion")
-			   and not is_enemy_to_actor(obj) then
-				local role, opt = spot_role(id)
-				if role and C[opt] then
-					roles[id] = (role == "trader") and refine_trader(id, obj) or role
-				end
-			end
+-- Per-NPC test for the role scan. Unlike the companion scan there is no on-screen
+-- gate here: that would tie a card's appearance to whether the NPC happened to be
+-- projecting the frame it was scanned, which made role cards feel unresponsive.
+-- Instead we accept every in-range role NPC and let render() project and show/hide it
+-- per frame, exactly as the quest/guide cards work. The distance gate keeps the
+-- tracked set small. Returns the NPC's refined role string, or nil.
+local function extras_scan_one(id, ctx)
+	local obj = get_obj(id)
+	if obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)
+	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
+	   and not obj:has_info("npcx_is_companion")
+	   and not is_enemy_to_actor(obj) then
+		local role, opt = spot_role(id)
+		if role and C[opt] then
+			return (role == "trader") and refine_trader(id, obj) or role
 		end
 	end
-	return roles
 end
 
--- Merge the cached role set into desired, rescanning on the throttle.
+-- Once-per-pass gate: skip the whole scan when every role option is off.
+local function extras_enabled()
+	return C.mark_guiders or C.mark_traders or C.mark_important
+end
+
+local extras_scanner = make_scanner(EXTRA_SCAN, extras_scan_one, extras_enabled)
+
+-- Merge the cached role set (published by the amortized scanner) into desired.
 local function augment_extras(desired)
-	if not (C.mark_guiders or C.mark_traders or C.mark_important) then return end
-	local tg = time_global()
-	if tg >= _extra_next then
-		_extra_next = tg + EXTRA_SCAN
-		_role_ids = scan_extras()
-	end
-	for id, role in pairs(_role_ids) do want(desired, id, role) end
+	if not extras_enabled() then return end
+	for id, role in pairs(extras_scanner.live) do want(desired, id, role) end
 end
 
 -- Line-of-sight: cast a geometry ray from the NPC's head toward the camera; if it hits
@@ -782,24 +848,30 @@ local function render(tg)
 		local hx, hy, vis, dist
 		if obj and obj:alive() then
 			dist = obj:position():distance_to(apos)   -- one distance, shared by fade + node size
-			local wpos, rux, ruz = anchor_world_pos(obj)
-			-- auto shoulder side: recompute which shoulder only every SIDE_RATE ms (two extra
-			-- projections) and reuse the sign in between; then offset the anchor onto it in place.
-			local amt = C.side_amt or 0.18
-			if C.auto_side and amt > 0 and not (rux == 0 and ruz == 0) then
-				if f.side_sign == nil or tg >= (f.side_next or 0) then
-					f.side_sign = shoulder_sign(wpos, rux, ruz, amt)
-					f.side_next = tg + SIDE_RATE
+			-- Beyond appear_dist the card's alpha is 0 anyway (alpha_for_dist), so an
+			-- out-of-range tracked NPC (e.g. a quest target far across the map) would only
+			-- produce an invisible card. Skip the anchor / shoulder / projection / LOS work
+			-- entirely for it; it resumes the moment the NPC comes back within range.
+			if dist < C.appear_dist then
+				local wpos, rux, ruz = anchor_world_pos(obj)
+				-- auto shoulder side: recompute which shoulder only every SIDE_RATE ms (two extra
+				-- projections) and reuse the sign in between; then offset the anchor onto it in place.
+				local amt = C.side_amt or 0.18
+				if C.auto_side and amt > 0 and not (rux == 0 and ruz == 0) then
+					if f.side_sign == nil or tg >= (f.side_next or 0) then
+						f.side_sign = shoulder_sign(wpos, rux, ruz, amt)
+						f.side_next = tg + SIDE_RATE
+					end
+					local sgn = f.side_sign
+					if sgn ~= 0 then
+						wpos.x = wpos.x + sgn * rux * amt
+						wpos.z = wpos.z + sgn * ruz * amt
+					end
 				end
-				local sgn = f.side_sign
-				if sgn ~= 0 then
-					wpos.x = wpos.x + sgn * rux * amt
-					wpos.z = wpos.z + sgn * ruz * amt
+				hx, hy = project_world(wpos)
+				if hx then
+					vis = has_los(id, obj, wpos, tg)   -- head bone fetched inside, only on a cast frame
 				end
-			end
-			hx, hy = project_world(wpos)
-			if hx then
-				vis = has_los(id, obj, wpos, tg)   -- head bone fetched inside, only on a cast frame
 			end
 		end
 		local target_a = (hx and vis and alpha_for_dist(dist)) or 0
@@ -1285,6 +1357,13 @@ end
 local function actor_on_update()
 	if not ensure_cards() then return end
 	local tg = time_global()
+	-- advance the amortized NPC scans a slice at a time (spread over frames so the
+	-- walk never lands as a periodic hitch). A pass completing forces the merge below
+	-- to run this frame, so a fresh set shows up as promptly as before.
+	if C.enabled then
+		if scanner_tick(companion_scanner, tg) then next_scan = 0 end
+		if scanner_tick(extras_scanner, tg)    then next_scan = 0 end
+	end
 	if tg >= next_scan then
 		next_scan = tg + SCAN_INTERVAL
 		update()
@@ -1298,14 +1377,14 @@ end
 function on_option_change()
 	read_config()
 	clear_all()
-	next_scan   = 0
-	_comp_next  = 0   -- rescan immediately so toggles apply without the throttle lag
-	_extra_next = 0
+	next_scan = 0
+	scanner_reset(companion_scanner)   -- rescan from scratch so toggles apply without the throttle lag
+	scanner_reset(extras_scanner)
 end
 
 function on_game_start()
 	get_obj      = level.object_by_id            -- bind the hot object lookup as an upvalue (level.* is ready now)
-	map_has_spot = level.map_has_object_spot     -- per-NPC in scan_extras
+	map_has_spot = level.map_has_object_spot     -- per-NPC in spot_role (extras scan)
 	char_comm    = character_community           -- per-NPC in is_enemy_to_actor
 	factions_enemies = game_relations.is_factions_enemies
 	read_config()
