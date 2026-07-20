@@ -2,7 +2,7 @@
 --  Immersive Quest Markers
 -- ======================================================================
 
-local MAX_CARDS     = 6      -- most NPCs carded at once (extras skipped; logged if debug_log)
+local MAX_CARDS     = 8      -- most NPCs carded at once (extras skipped; logged if debug_log)
 local SCAN_INTERVAL = 2000   -- ms between task scans
 
 -- Defaults, also the fallback when MCM is absent. Keys match the MCM option ids
@@ -13,10 +13,14 @@ DEFAULTS = {
 	mark_targets = true,   -- card the current objective NPC (turn-in / go-talk-to)
 	mark_guides  = true,   -- card the stalker currently looking for a guide ("Need a guide?" job)
 	mark_companions = true, -- card nearby friendly stalkers you could recruit as a companion right now
+	mark_guiders = true,   -- card guide NPCs (the fast-travel service, PDA "Guide" icon)
+	mark_traders = true,   -- card service NPCs: traders / technicians / barkeeps / medics
+	mark_important = false, -- card story/faction important characters (PDA "Important Character"); off by default (hubs get busy)
 	show_node    = true,   -- draw the little dot at the head where the line starts
 	node_pulse   = true,   -- gently breathe the node's glow halo to draw the eye
 	sound_alert  = true,   -- play a subtle PDA chirp when a card first comes into view
 	sound_vol    = 0.9,    -- chirp volume (0-1)
+	role_style   = 1,      -- service/important card style: 0 text card, 1 text + glyph (default), 2 icon-only chip
 	debug_log    = false,  -- write IQM diagnostic lines to the console/log
 
 	appear_dist  = 16,     -- metres: card starts fading in at this range
@@ -53,7 +57,9 @@ DEFAULTS = {
 -- (this table is the source of truth for which tab a key belongs to).
 CORE_KEYS = {
 	enabled = true, mark_targets = true, mark_guides = true,
-	mark_companions = true, appear_dist = true, los_check = true, sound_alert = true,
+	mark_companions = true, mark_guiders = true,
+	mark_traders = true, mark_important = true,
+	appear_dist = true, los_check = true, sound_alert = true,
 }
 
 local C          = {}     -- live config (DEFAULTS overlaid with MCM values)
@@ -83,6 +89,10 @@ local floor, max, sqrt     = math.floor, math.max, math.sqrt
 local sin, exp, abs, atan2 = math.sin, math.exp, math.abs, math.atan2
 -- Other hot globals on the per-frame path, localised for the same reason.
 local GetARGB, time_global, get_obj = GetARGB, time_global, nil  -- get_obj bound in on_game_start (level.* not ready at parse)
+-- Scan-path globals localised too (called per-NPC on the throttled scans). Bound in
+-- on_game_start alongside get_obj, since these script/engine globals aren't all
+-- guaranteed to exist when this file is first parsed.
+local map_has_spot, char_comm, factions_enemies = nil, nil, nil
 
 -- Reusable scratch vector2s: SetWndPos/SetWndSize consume their argument immediately, so
 -- one pair per purpose can be :set() and handed over instead of allocating a fresh vector2
@@ -127,7 +137,7 @@ local function read_config()
 	-- time constant so the ease feels the same at any framerate.
 	local sm = C.smoothing or 0.35
 	if sm >= 1 then smooth_tau = 0 else smooth_tau = -16.67 / math.log(1 - sm) end
-	SNAP2 = (C.snap_dist or 260) ^ 2
+	local sd = C.snap_dist or 260; SNAP2 = sd * sd
 
 	-- kx = (h/w) / (UI_BASE_HEIGHT/UI_BASE_WIDTH) = (h/w) / (768/1024). The engine
 	-- scales rotated-static X by this; we invert it so the leader line lines up.
@@ -140,6 +150,33 @@ end
 -- --------------------------------------------------------------------------
 -- NPC selection
 -- --------------------------------------------------------------------------
+-- Card roles come in two grammars: STATE roles (something to act on right now;
+-- verb-phrase header, chirps on sighting) and AMBIENT roles (a standing fact
+-- about the NPC; noun header, role glyph, silent). Lower prio claims card
+-- slots first, and wins when one NPC qualifies for several roles.
+local ROLE_PRIO = {
+	target = 1,                           -- the current objective NPC (turn-in / talk-to / delivery)
+	guide  = 2,                           -- the "Need a guide?" job offer
+	companion = 3,                        -- recruitable right now
+	guider = 4, trader = 4, mechanic = 4, barman = 4, medic = 4, important = 4,
+}
+local CHIRP_ROLES = { target = true, guide = true, companion = true }
+
+-- Merge a role into the desired set; the more actionable (lower prio) role wins.
+local function want(desired, id, role)
+	local cur = desired[id]
+	if cur and ROLE_PRIO[cur] <= ROLE_PRIO[role] then return end
+	desired[id] = role
+end
+
+-- Slot-claim order: lower ROLE_PRIO first, stable id tiebreak. Module-level (not a
+-- per-scan closure) so table.sort doesn't allocate a new function each scan.
+local function slot_order_cmp(a, b)
+	local pa, pb = ROLE_PRIO[a.role] or 9, ROLE_PRIO[b.role] or 9
+	if pa ~= pb then return pa < pb end
+	return a.id < b.id
+end
+
 local function is_task_active(task)
 	local state = task.last_check_task
 	if state == "complete" or state == "fail" or state == "reversed" then return false end
@@ -150,10 +187,10 @@ end
 
 local function is_enemy_to_actor(obj)
 	if obj:relation(db.actor) == game_object.enemy then return true end
-	local comm = character_community(obj)
+	local comm = char_comm(obj)
 	if comm == "monster" then comm = "stalker" end
-	local actor_comm = character_community(db.actor):sub(7)
-	return game_relations.is_factions_enemies(actor_comm, comm)
+	local actor_comm = char_comm(db.actor):sub(7)
+	return factions_enemies(actor_comm, comm)
 end
 
 local stage_complete_cache = {}
@@ -192,7 +229,9 @@ local function collect_desired()
 				if C.mark_targets and task.current_target and target_is_talk_to(task) then
 					local id = tonumber(task.current_target)
 					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
-						desired[id] = "target"
+						-- the current objective NPC: a dynamic task at its hand-in stage,
+						-- or a storyline / mid-quest talk-to step. All read REPORT BACK.
+						want(desired, id, "target")
 					end
 				end
 				-- delivery quests: card the "deliver to" NPC. The engine's own
@@ -207,7 +246,7 @@ local function collect_desired()
 				   and tasks_delivery.is_delivery_task(task.id) then
 					local id = tonumber(task_functor.general_delivery(task.id, "target", nil, task))
 					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
-						desired[id] = "target"
+						want(desired, id, "target")
 					end
 				end
 			end
@@ -230,8 +269,8 @@ local function collect_desired()
 		if ok and jg then
 			local g = jg.guid
 			local id = g and g.squad_id and tasks_guide.get_comm_id(g.squad_id)
-			if id and id > 0 and id ~= AC_ID and not desired[id] and is_markable_npc(id) then
-				desired[id] = "guide"
+			if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+				want(desired, id, "guide")
 			end
 		end
 	end
@@ -410,7 +449,7 @@ local function scan_companions()
 	if not room_for_companion() then return out end                                     -- party full: nobody recruitable
 	local actor   = db.actor
 	local apos    = actor:position()
-	local appear2 = (C.appear_dist or 16) ^ 2
+	local ad = C.appear_dist or 16; local appear2 = ad * ad
 	local friend  = game_object.friend
 	for id in pairs(db.storage) do
 		if id ~= AC_ID then
@@ -439,8 +478,101 @@ local function augment_companions(desired)
 		_comp_ids  = scan_companions()
 	end
 	for id in pairs(_comp_ids) do
-		if not desired[id] then desired[id] = "companion" end
+		want(desired, id, "companion")
 	end
+end
+
+-- --------------------------------------------------------------------------
+-- Service / important NPC detection
+-- (options: mark_guiders, mark_traders, mark_important)
+-- --------------------------------------------------------------------------
+-- Role NPCs are read off the engine's own PDA map-spot registry: NPC logic sets
+-- level_spot = trader/mechanic/medic/barman/guider/special/quest_npc and the
+-- engine turns that into a map spot on the NPC's id, queryable per NPC via
+-- level.map_has_object_spot. That matches exactly what the player's PDA legend
+-- flags (it's what GAMMA's own sim_squad_scripted and Tactical Compass key off),
+-- so no trade-config scanning is needed. Checked per candidate on the same slow
+-- cadence as the companion scan.
+local EXTRA_SCAN  = 5000  -- ms between role rescans (near-static state)
+local _extra_next = 0
+local _role_ids   = {}    -- cached { [id] = role } from the last scan
+
+-- Spot -> role, checked in order (first hit wins for multi-spot NPCs). `opt` is
+-- the MCM toggle gating that role card.
+local ROLE_SPOTS = {
+	{ spot = "ui_pda2_scout_location",     role = "guider",    opt = "mark_guiders" },
+	{ spot = "ui_pda2_trader_location",    role = "trader",    opt = "mark_traders" },
+	{ spot = "ui_pda2_mechanic_location",  role = "mechanic",  opt = "mark_traders" },
+	{ spot = "ui_pda2_barman_location",    role = "barman",    opt = "mark_traders" },
+	{ spot = "ui_pda2_medic_location",     role = "medic",     opt = "mark_traders" },
+	{ spot = "ui_pda2_special_location",   role = "important", opt = "mark_important" },
+	{ spot = "ui_pda2_quest_npc_location", role = "important", opt = "mark_important" },
+}
+
+local function spot_role(id)
+	for _, e in ipairs(ROLE_SPOTS) do
+		if map_has_spot(id, e.spot) ~= 0 then return e.role, e.opt end
+	end
+end
+
+-- A "trader" spot can hide a technician/barkeep/medic (their logic just says
+-- trader); trader_autoinject reads the NPC's actual trade file and tells them
+-- apart, so the header/glyph match what the NPC really offers. Trade logic is
+-- stable for an NPC's life, so the answer is cached. Soft dependency (ships
+-- with GAMMA); without it every trader-spot NPC just reads TRADER.
+local TRADER_TYPE_ROLE = { [1] = "mechanic", [2] = "barman", [3] = "medic" }  -- trader_autoinject constants
+local _ttype = {}   -- [id] = refined role for trader-spot NPCs
+local function refine_trader(id, obj)
+	local r = _ttype[id]
+	if r == nil then
+		r = "trader"
+		if trader_autoinject and trader_autoinject.get_trader_type then
+			local ok, tt = pcall(trader_autoinject.get_trader_type, obj)
+			if ok and tt then r = TRADER_TYPE_ROLE[tt] or "trader" end
+		end
+		_ttype[id] = r
+	end
+	return r
+end
+
+-- One scan of the online-NPC table for role-spot holders on-screen and in range.
+-- Same shape as the companion scan: cheapest gates first, screen projection last,
+-- so off-screen NPCs never claim card slots.
+local function scan_extras()
+	local roles = {}
+	if not (C.mark_guiders or C.mark_traders or C.mark_important) then return roles end
+	local actor   = db.actor
+	local apos    = actor:position()
+	local ad = C.appear_dist or 16; local appear2 = ad * ad
+	for id in pairs(db.storage) do
+		if id ~= AC_ID then
+			local obj = get_obj(id)
+			if obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)
+			   and obj:position():distance_to_sqr(apos) <= appear2
+			   and not obj:has_info("npcx_is_companion")
+			   and not is_enemy_to_actor(obj) then
+				local role, opt = spot_role(id)
+				if role and C[opt] then
+					local wp = anchor_world_pos(obj)   -- keep only on-screen NPCs (as scan_companions)
+					if wp and project_world(wp) then
+						roles[id] = (role == "trader") and refine_trader(id, obj) or role
+					end
+				end
+			end
+		end
+	end
+	return roles
+end
+
+-- Merge the cached role set into desired, rescanning on the throttle.
+local function augment_extras(desired)
+	if not (C.mark_guiders or C.mark_traders or C.mark_important) then return end
+	local tg = time_global()
+	if tg >= _extra_next then
+		_extra_next = tg + EXTRA_SCAN
+		_role_ids = scan_extras()
+	end
+	for id, role in pairs(_role_ids) do want(desired, id, role) end
 end
 
 -- Line-of-sight: cast a geometry ray from the NPC's head toward the camera; if it hits
@@ -558,16 +690,30 @@ end
 
 -- Header text is fixed per role, so translate once and cache (game.translate_string is a
 -- string-table lookup we were paying every frame). Cache cleared on config/language change.
+local HDR_KEYS = {
+	target = "st_iqm_hdr_target",  guide  = "st_iqm_hdr_guide",   companion = "st_iqm_hdr_companion",
+	guider = "st_iqm_hdr_guider",  trader = "st_iqm_hdr_trader", mechanic = "st_iqm_hdr_mechanic",
+	barman = "st_iqm_hdr_barman",  medic = "st_iqm_hdr_medic",   important = "st_iqm_hdr_important",
+}
 local function header_for(role)
 	local h = _hdr_cache[role]
 	if not h then
-		local key = (role == "guide" and "st_iqm_hdr_guide")
-			or (role == "companion" and "st_iqm_hdr_companion")
-			or "st_iqm_hdr_target"
-		h = game.translate_string(key)
+		h = game.translate_string(HDR_KEYS[role] or "st_iqm_hdr_target")
 		_hdr_cache[role] = h
 	end
 	return h
+end
+
+-- Role glyph for the ambient cards. Bundled with the mod (see iqm_textures.xml /
+-- iqm_roles.dds), so the role cards are self-contained; no other mod needed.
+local ROLE_ICONS = {
+	trader = "iqm_role_trader", mechanic = "iqm_role_mechanic",
+	barman = "iqm_role_barman", medic    = "iqm_role_medic",
+	guider = "iqm_role_guide",  important = "iqm_role_important",
+}
+local function icon_for(role)
+	if (C.role_style or 1) == 0 then return end   -- text-only style
+	return ROLE_ICONS[role]
 end
 
 -- NPC display name from an already-resolved object (name is stable, so the caller caches
@@ -674,10 +820,11 @@ local function render(tg)
 		else
 			-- first time this card comes into view (after being hidden): chirp, gated by a
 			-- per-NPC cooldown and a short global throttle so re-glances / simultaneous
-			-- appearances don't spam the sound.
+			-- appearances don't spam the sound. Ambient role cards stay silent (walking
+			-- through a trade hub shouldn't sound like a pocket full of pagers).
 			if not f.seen then
 				f.seen = true
-				if tg >= (f.chirp_t or 0) and (tg - _chirp_last) > 120 then
+				if CHIRP_ROLES[t.role] and tg >= (f.chirp_t or 0) and (tg - _chirp_last) > 120 then
 					f.chirp_t   = tg + SOUND_CD
 					_chirp_last = tg
 					play_chirp()
@@ -686,7 +833,8 @@ local function render(tg)
 			if not t.name then t.name = name_from_obj(obj) end   -- name is stable: resolve once per NPC
 			local rx, ry = smooth_point(id, hx, hy, tg)
 			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
-			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift)
+			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift,
+			                t.icon, t.chip)
 		end
 	end
 end
@@ -713,28 +861,29 @@ function IqmCards:InitControls()
 		--  * card_shadow      -- soft slab under the whole card (physical lift)
 		--  * line_sh/line     -- leader line, BEFORE the plate so the plate draws over its
 		--                        end (the line is extended slightly into the card => flush join)
-		--  * plate_l/c/r      -- rounded gradient plate as a horizontal 3-slice
+		--  * plate / chip     -- rounded gradient plate: one quad each (text card / icon chip)
 		--  * accent           -- left edge bar
+		--  * icon             -- role glyph (ambient cards only; texture set at draw time)
 		--  * *_sh / text      -- header/name, each with a 1px black shadow copy behind it.
-		--                        Parented to `self` (not the plate) and created AFTER all
-		--                        three plate slices, so the text draws on top of every slice.
+		--                        Parented to `self` (not the plate) and created AFTER the
+		--                        plate, so the text draws on top of it.
 		--  * glow/node        -- head dot + its soft halo (drawn last; they sit on the NPC's
 		--                        body, away from the card, so top-of-stack is fine)
 		local shadow  = self.xml:InitStatic("card_shadow", self)
 		local line_sh = self.xml:InitStatic("card_line_sh", self)
 		local line    = self.xml:InitStatic("card_line", self)
-		local plate_l = self.xml:InitStatic("card_plate_l", self)
-		local plate_c = self.xml:InitStatic("card_plate_c", self)
-		local plate_r = self.xml:InitStatic("card_plate_r", self)
+		local plate   = self.xml:InitStatic("card_plate", self)
+		local chipbg  = self.xml:InitStatic("card_chip", self)
 		local accent  = self.xml:InitStatic("card_accent", self)
+		local icon    = self.xml:InitStatic("card_icon", self)
 		local head_sh = self.xml:InitTextWnd("card_head_sh:text", self)
 		local name_sh = self.xml:InitTextWnd("card_name_sh:text", self)
 		local head    = self.xml:InitTextWnd("card_head:text", self)
 		local name    = self.xml:InitTextWnd("card_name:text", self)
 		local glow    = self.xml:InitStatic("card_glow", self)
 		local node    = self.xml:InitStatic("card_node", self)
-		self.slots[i] = { shadow = shadow, plate = { plate_l, plate_c, plate_r }, accent = accent,
-		                  line_sh = line_sh, line = line,
+		self.slots[i] = { shadow = shadow, plate = plate, chip = chipbg, accent = accent,
+		                  icon = icon, line_sh = line_sh, line = line,
 		                  glow = glow, node = node,
 		                  head = head, name = name, head_sh = head_sh, name_sh = name_sh }
 		self:hide_slot(i)
@@ -745,8 +894,10 @@ function IqmCards:hide_slot(i)
 	local s = self.slots[i]
 	if not s then return end
 	s.shadow:Show(false)
-	for _, p in ipairs(s.plate) do p:Show(false) end
+	s.plate:Show(false)
+	s.chip:Show(false)
 	s.accent:Show(false)
+	s.icon:Show(false)
 	s.line_sh:Show(false)
 	s.line:Show(false)
 	s.glow:Show(false)
@@ -757,31 +908,50 @@ function IqmCards:hide_slot(i)
 	s.name_sh:Show(false)
 end
 
-function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift)
+function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip)
 	local s = self.slots[i]
 	if not s then return end
 	a = floor(a)
 	if a > 255 then a = 255 end
 	nscale = nscale or 1
 	lift   = lift or 0
+	chip   = (chip and icon) and true or false   -- chip mode needs a glyph to stand alone
 
-	-- text + card size. Both strings are fixed for the life of this slot's NPC, so the
-	-- SetText/AdjustWidthToText/GetWidth measure (four text widgets) is done only when the
-	-- text actually changes; otherwise the cached width is reused. This was previously
-	-- paid on every frame.
-	local pad, accent_w, ch = 9, 3, 40
+	-- Ambient role cards render per the role_style option: a compact ICON-ONLY CHIP
+	-- (no header/name, since the PDA legend already teaches the glyphs and quiet is the
+	-- point of ambient cards), or the full text card with the glyph inlined before
+	-- the text. State cards (and Tactical Compass absent) are always full text.
+	local pad, accent_w = 9, 3
+	local ch  = chip and 34 or 40    -- chip plate a little shorter than the text card
+	local IH  = chip and 26 or 18    -- glyph size: large on the chip, a bit bigger than the text alongside it
+	-- squeeze the glyph's width by UI_KX like the node dot: the 4:3 virtual UI is
+	-- stretched onto the real screen, so an equal w/h square would draw as an oval.
+	local iw    = icon and max(2, floor(IH * UI_KX + 0.5)) or 0
+	local ispan = (icon and not chip) and (iw + 6) or 0   -- inline glyph + gap before the text
+	local lead  = (ispan > 0) and 4 or pad                -- gap from accent bar to first content (tighter when a glyph leads)
+
+	-- card size. Strings / the glyph are fixed for the life of this slot's NPC, so
+	-- the SetText/AdjustWidthToText/GetWidth measure (four text widgets) and the
+	-- glyph's InitTexture run only when they actually change; otherwise the cached
+	-- width is reused. This was previously paid on every frame.
 	local cw = s.cw
-	if header ~= s.last_head or name ~= s.last_name then
-		s.head:SetText(header)
-		s.name:SetText(name)
-		s.head_sh:SetText(header)
-		s.name_sh:SetText(name)
-		s.head:AdjustWidthToText()
-		s.name:AdjustWidthToText()
-		s.head_sh:AdjustWidthToText()
-		s.name_sh:AdjustWidthToText()
-		cw = accent_w + pad + max(s.head:GetWidth(), s.name:GetWidth()) + pad
-		s.cw, s.last_head, s.last_name = cw, header, name
+	if header ~= s.last_head or name ~= s.last_name or icon ~= s.last_icon or chip ~= s.last_chip then
+		if icon then s.icon:InitTexture(icon) end
+		if chip then
+			cw = iw + 18   -- chip: glyph centred with equal padding either side
+		else
+			s.head:SetText(header)
+			s.name:SetText(name)
+			s.head_sh:SetText(header)
+			s.name_sh:SetText(name)
+			s.head:AdjustWidthToText()
+			s.name:AdjustWidthToText()
+			s.head_sh:AdjustWidthToText()
+			s.name_sh:AdjustWidthToText()
+			-- floored so the plate seams (below) land on integer columns
+			cw = floor(accent_w + lead + ispan + max(s.head:GetWidth(), s.name:GetWidth()) + pad + 0.5)
+		end
+		s.cw, s.last_head, s.last_name, s.last_icon, s.last_chip = cw, header, name, icon, chip
 	end
 
 	-- place the card up and to one side of the head; flip left near the right edge.
@@ -794,36 +964,54 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift)
 
 	-- whole-card soft drop shadow: a feathered slab a little larger than the plate,
 	-- nudged down-right and tinted black, so the card reads as lifted off the world.
+	-- Tighter on chips: at chip size the full margin reads as a dark blob.
 	local sh_m, sh_ox, sh_oy = 6, 3, 4
+	if chip then sh_m, sh_ox, sh_oy = 3, 2, 2 end
 	s.shadow:SetWndPos(P(cx - sh_m + sh_ox, cy - sh_m + sh_oy))
 	s.shadow:SetWndSize(S(cw + sh_m * 2, ch + sh_m * 2))
 	s.shadow:SetTextureColor(GetARGB(floor(120 * a / 255), 0, 0, 0))
 	s.shadow:Show(true)
 
-	-- rounded plate as a horizontal 3-slice: fixed-width left/right caps (rounded
-	-- corners, crisp) with a stretched centre column between them. cap = the on-screen
-	-- width of each cap; the centre fills whatever is left. The centre overlaps each cap
-	-- by 1px (drawn over the left cap, and the right cap is drawn over the centre) so the
-	-- straight-edged seams can never show a sub-pixel gap.
-	local cap   = 11
-	local cenw  = max(2, cw - cap * 2)
-	local pl, pc, pr = s.plate[1], s.plate[2], s.plate[3]
-	pl:SetWndPos(P(cx, cy));                 pl:SetWndSize(S(cap, ch))
-	pc:SetWndPos(P(cx + cap - 1, cy));       pc:SetWndSize(S(cenw + 2, ch))
-	pr:SetWndPos(P(cx + cw - cap, cy));      pr:SetWndSize(S(cap, ch))
+	-- plate geometry. Both the chip and the text card are a SINGLE rounded-rect quad
+	-- (chip uses the near-square iqm_chip, text card the wider iqm_plate). A 3-slice
+	-- would put a seam at each cap join; at fractional UI scaling those round to a 1px
+	-- gap or overlap and show as a thin line (transparent or dark) against the world.
+	-- One quad has no seam. The corner radius stretches a little with width, which at
+	-- these sizes is not noticeable.
+	local pbg = chip and s.chip or s.plate
+	pbg:SetWndPos(P(cx, cy)); pbg:SetWndSize(S(cw, ch))
 
-	-- accent bar down the left edge, inset vertically so it stays clear of the rounded corners.
+	-- glyph: centred on the whole plate in chip mode, or inlined between the accent
+	-- bar and the text. Tinted the accent colour, fading with the card.
+	if icon then
+		if chip then
+			s.icon:SetWndPos(P(cx + floor((cw - iw) * 0.5), cy + floor((ch - IH) * 0.5)))
+		else
+			s.icon:SetWndPos(P(cx + accent_w + lead, cy + floor((ch - IH) * 0.5)))
+		end
+		s.icon:SetWndSize(S(iw, IH))
+		s.icon:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		s.icon:Show(true)
+	else
+		s.icon:Show(false)
+	end
+
+	-- accent bar down the left edge, inset vertically clear of the rounded corners.
+	-- Kept on chips too, since it's the card family's identity stripe.
 	local acc_in = 7
 	s.accent:SetWndPos(P(cx, cy + acc_in))
 	s.accent:SetWndSize(S(accent_w, ch - acc_in * 2))
 
-	-- text, positioned absolutely (parented to self), starting past the accent bar.
-	-- Each line has a 1px black shadow copy one pixel down-right, drawn behind it.
-	local txo = cx + accent_w + pad
-	s.head_sh:SetWndPos(P(txo + 1, cy + 6))
-	s.head:SetWndPos(P(txo, cy + 5))
-	s.name_sh:SetWndPos(P(txo + 1, cy + 20))
-	s.name:SetWndPos(P(txo, cy + 19))
+	if not chip then
+		-- text, positioned absolutely (parented to self), starting past the accent bar
+		-- (and the inline glyph, when there is one). Each line has a 1px black shadow
+		-- copy one pixel down-right, drawn behind it.
+		local txo = cx + accent_w + lead + ispan
+		s.head_sh:SetWndPos(P(txo + 1, cy + 6))
+		s.head:SetWndPos(P(txo, cy + 5))
+		s.name_sh:SetWndPos(P(txo + 1, cy + 20))
+		s.name:SetWndPos(P(txo, cy + 19))
+	end
 
 	-- Single round node at the head point, with a soft glow halo behind it. The node's
 	-- dark border ring is baked into its texture (dark rim, white core), so it's one
@@ -915,21 +1103,35 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift)
 	-- rather than harsh black-and-white behind the accent. The header/name each get a
 	-- black shadow copy at ~0.7 alpha for legibility over bright scenes.
 	local plate_col = GetARGB(floor(cfg.card_a * a / 255), 24, 22, 19)
-	for _, p in ipairs(s.plate) do p:SetTextureColor(plate_col); p:Show(true) end
-	s.accent:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+	if chip then
+		s.chip:SetTextureColor(plate_col); s.chip:Show(true); s.plate:Show(false)
+	else
+		s.plate:SetTextureColor(plate_col); s.plate:Show(true); s.chip:Show(false)
+	end
 	s.line:SetTextureColor(GetARGB(floor(cfg.line_a * a / 255), cfg.col_r, cfg.col_g, cfg.col_b))
-	local tsh = floor(a * 0.7)
-	s.head_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
-	s.name_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
-	s.head:SetTextColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
-	s.name:SetTextColor(GetARGB(a, 214, 210, 202))
-
-	s.accent:Show(true)
 	s.line:Show(true)
-	s.head_sh:Show(true)
-	s.name_sh:Show(true)
-	s.head:Show(true)
-	s.name:Show(true)
+
+	s.accent:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+	s.accent:Show(true)
+
+	if chip then
+		-- chip mode: no text
+		s.head_sh:Show(false)
+		s.name_sh:Show(false)
+		s.head:Show(false)
+		s.name:Show(false)
+	else
+		local tsh = floor(a * 0.7)
+		s.head_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
+		s.name_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
+		s.head:SetTextColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		s.name:SetTextColor(GetARGB(a, 214, 210, 202))
+
+		s.head_sh:Show(true)
+		s.name_sh:Show(true)
+		s.head:Show(true)
+		s.name:Show(true)
+	end
 end
 
 -- --------------------------------------------------------------------------
@@ -955,13 +1157,19 @@ local function dbg_out(fmt, ...)
 	end
 end
 
+local DBG_ROLES = {
+	target = true, guide = true, companion = true,
+	guider = true, trader = true, mechanic = true, barman = true,
+	medic = true, important = true,
+}
+
 function debug_card(role)
 	local obj = level.get_target_obj and level.get_target_obj()
 	if not (obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)) then
 		dbg_out("!IQM: no living stalker under the crosshair")
 		return
 	end
-	if role ~= "guide" and role ~= "companion" then role = "target" end
+	if not DBG_ROLES[role] then role = "target" end
 	local id = obj:id()
 	if debug_pins[id] == role then
 		debug_pins[id] = nil
@@ -979,6 +1187,20 @@ function debug_clear()
 	dbg_out("-IQM: all pinned cards cleared")
 end
 
+-- The F7 "Card as Trader" helper cycles through the service glyphs so all four can
+-- be previewed from one button: it pins a random service role, always different
+-- from the one currently on that NPC, so each press visibly changes the icon
+-- (use "Clear Pinned Cards" to remove it).
+local SERVICE_ROLES = { "trader", "mechanic", "barman", "medic" }
+function debug_card_service()
+	local obj = level.get_target_obj and level.get_target_obj()
+	local cur = obj and obj:alive() and debug_pins[obj:id()]
+	math.randomseed(time_global())
+	local role = cur
+	while role == cur do role = SERVICE_ROLES[math.random(#SERVICE_ROLES)] end
+	debug_card(role)
+end
+
 -- F7 debugger integration: add the pin actions to the launcher's Target tab via
 -- its public extension point (ui_debug_launcher.inject). The launcher's content
 -- table lives for the whole game process, so this runs once (flag) from
@@ -993,6 +1215,9 @@ local function inject_f7_actions()
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Quest Target", functor = { debug_card, "target" },    hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide",        functor = { debug_card, "guide" },     hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Companion",    functor = { debug_card, "companion" }, hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide NPC",    functor = { debug_card, "guider" },    hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Trader",       functor = { debug_card_service },      hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Important",    functor = { debug_card, "important" }, hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Clear Pinned Cards",   functor = { debug_clear },             hide_ui = 2 })
 end
 
@@ -1008,6 +1233,7 @@ local function update()
 
 	local desired = collect_desired()
 	augment_companions(desired)   -- add recruitable stalkers (throttled scan; no-op if off)
+	augment_extras(desired)       -- add service/important role NPCs (throttled scan; no-op if off)
 
 	-- debug_card pins: forced entries that override the detected role (forcing the
 	-- style is the point of the tool). Dead/gone NPCs drop their pin.
@@ -1030,13 +1256,18 @@ local function update()
 		remove_entry(id)
 	end
 
-	-- quest / guide NPCs claim card slots first; companions (lower priority) fill what's
-	-- left, so a full slate of objectives is never crowded out by nearby recruitables.
-	for id, role in pairs(desired) do
-		if role ~= "companion" then ensure_entry(id, role) end
-	end
-	for id, role in pairs(desired) do
-		if role == "companion" then ensure_entry(id, role) end
+	-- objectives claim card slots first, ambient roles last: claim in ROLE_PRIO
+	-- order (stable id tiebreak) so a full slate of objectives is never crowded
+	-- out by nearby recruitables or service NPCs.
+	local order = {}
+	for id, role in pairs(desired) do order[#order + 1] = { id = id, role = role } end
+	table.sort(order, slot_order_cmp)
+	-- resolve the glyph + chip flag once here (role is stable for a tracked entry's
+	-- life), so the per-frame render() path reads a field instead of recomputing.
+	for _, e in ipairs(order) do
+		ensure_entry(e.id, e.role)
+		local t = tracked[e.id]
+		if t then t.icon = icon_for(e.role); t.chip = (C.role_style or 1) == 2 end
 	end
 end
 
@@ -1068,11 +1299,16 @@ end
 function on_option_change()
 	read_config()
 	clear_all()
-	next_scan = 0
+	next_scan   = 0
+	_comp_next  = 0   -- rescan immediately so toggles apply without the throttle lag
+	_extra_next = 0
 end
 
 function on_game_start()
-	get_obj = level.object_by_id   -- bind the hot object lookup as an upvalue (level.* is ready now)
+	get_obj      = level.object_by_id            -- bind the hot object lookup as an upvalue (level.* is ready now)
+	map_has_spot = level.map_has_object_spot     -- per-NPC in scan_extras
+	char_comm    = character_community           -- per-NPC in is_enemy_to_actor
+	factions_enemies = game_relations.is_factions_enemies
 	read_config()
 	inject_f7_actions()            -- add the pin actions to the F7 debugger's Target tab
 	RegisterScriptCallback("actor_on_update", actor_on_update)

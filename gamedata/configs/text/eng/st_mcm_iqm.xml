@@ -7,22 +7,45 @@
 	<string id="ui_mcm_iqm_tab_core"><text>Core</text></string>
 	<string id="ui_mcm_iqm_tab_advanced"><text>Advanced</text></string>
 
-	<!-- Card headers (shown on the card itself, not in MCM) -->
+	<!-- Card headers (shown on the card itself, not in MCM). Two grammars on
+	     purpose: verb phrases for act-now state cards, terse nouns for the
+	     ambient service/identity cards (which also carry a role glyph). -->
 	<string id="st_iqm_hdr_target"><text>REPORT BACK</text></string>
 	<string id="st_iqm_hdr_guide"><text>LOOKING FOR GUIDE</text></string>
 	<string id="st_iqm_hdr_companion"><text>LOOKING FOR WORK</text></string>
+	<string id="st_iqm_hdr_guider"><text>GUIDE</text></string>
+	<string id="st_iqm_hdr_trader"><text>TRADER</text></string>
+	<string id="st_iqm_hdr_mechanic"><text>TECHNICIAN</text></string>
+	<string id="st_iqm_hdr_barman"><text>BARKEEP</text></string>
+	<string id="st_iqm_hdr_medic"><text>MEDIC</text></string>
+	<string id="st_iqm_hdr_important"><text>VIP</text></string>
 
 	<string id="ui_mcm_iqm_enabled"><text>Enable markers</text></string>
 	<string id="ui_mcm_iqm_enabled_desc"><text>Master on/off switch for the floating quest marker cards.</text></string>
 
 	<string id="ui_mcm_iqm_mark_targets"><text>Card quest targets</text></string>
-	<string id="ui_mcm_iqm_mark_targets_desc"><text>Show a card over the NPC the game is currently pointing you at for a task - the "go talk to X" step and "return to the giver" turn-ins.</text></string>
+	<string id="ui_mcm_iqm_mark_targets_desc"><text>Show a card over the NPC the game is currently pointing you at for a task: the "go talk to X" step and the "return to the giver" turn-ins.</text></string>
 
 	<string id="ui_mcm_iqm_mark_guides"><text>Card the "needs a guide" NPC</text></string>
-	<string id="ui_mcm_iqm_mark_guides_desc"><text>Show a card over the stalker who is currently looking for a guide to escort them (the "Need a guide?" job). Detected via the guide job's own dialogue condition, so it matches exactly when that action is available - only one stalker offers it at a time. Requires the guide-job system (ships with GAMMA); without it this has no effect.</text></string>
+	<string id="ui_mcm_iqm_mark_guides_desc"><text>Show a card over the stalker who is currently looking for a guide to escort them (the "Need a guide?" job). Detected via the guide job's own dialogue condition, so it matches exactly when that action is available, and only one stalker offers it at a time. Requires the guide-job system (ships with GAMMA); without it this has no effect.</text></string>
 
 	<string id="ui_mcm_iqm_mark_companions"><text>Card recruitable companions</text></string>
-	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now - friendly, part of a squad, and within your companion limit. Detected without a full scan: a party-full early-out skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility check; requires the companion system (ships with GAMMA) - without it this has no effect.</text></string>
+	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now: friendly, part of a squad, and within your companion limit. Detected without a full scan. A party-full check skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility check. Requires the companion system (ships with GAMMA); without it this has no effect.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guiders"><text>Card guide NPCs</text></string>
+	<string id="ui_mcm_iqm_mark_guiders_desc"><text>Show a card ("GUIDE" plus the guide glyph) over NPCs offering fast-travel guide services, the ones your PDA marks with the Guide icon. The Service card style option below can switch it to an icon-only chip or plain text. Detected from the engine's own PDA map-spot registry, so it always matches the map legend.</text></string>
+
+	<string id="ui_mcm_iqm_mark_traders"><text>Card service NPCs</text></string>
+	<string id="ui_mcm_iqm_mark_traders_desc"><text>Show a card over traders, technicians, barkeeps and medics, each with its header ("TRADER" / "TECHNICIAN" / "BARKEEP" / "MEDIC") and role glyph. The Service card style option below can switch them to icon-only chips or plain text. Detected from the engine's PDA map-spot registry; the exact service is read from the NPC's actual trade file, so a technician labelled as a trader by the level still shows the technician glyph.</text></string>
+
+	<string id="ui_mcm_iqm_mark_important"><text>Card important characters</text></string>
+	<string id="ui_mcm_iqm_mark_important_desc"><text>Show a card ("VIP" plus a star glyph) over story and faction important characters, the ones your PDA marks with the Important Character or quest-NPC icon. The Service card style option below can switch it to an icon-only chip or plain text. Off by default, since busy hubs already show plenty of cards.</text></string>
+
+	<string id="ui_mcm_iqm_role_style"><text>Service card style</text></string>
+	<string id="ui_mcm_iqm_role_style_desc"><text>How the service/important cards (trader, technician, barkeep, medic, guide, important character) are drawn. "Icon chip": a compact plate with just the role glyph. "Text + icon": the full card with header, name and the glyph. "Text only": the full card with no glyph. The glyphs are bundled with the mod, so this works on its own.</text></string>
+	<string id="ui_mcm_lst_iqm_style_text"><text>Text only</text></string>
+	<string id="ui_mcm_lst_iqm_style_mixed"><text>Text + icon</text></string>
+	<string id="ui_mcm_lst_iqm_style_chip"><text>Icon chip</text></string>
 
 	<string id="ui_mcm_iqm_show_node"><text>Show head node dot</text></string>
 	<string id="ui_mcm_iqm_show_node_desc"><text>Draw the small dot at the NPC's head where the leader line begins. Turn off for just the line and card.</text></string>
@@ -55,7 +78,7 @@
 	<string id="ui_mcm_iqm_head_lift_desc"><text>Nudge the node up (+) or down (-) from the NPC's left-shoulder bone. The default (0) sits right on the shoulder near the neck; negative drops it toward the mid-left torso.</text></string>
 
 	<string id="ui_mcm_iqm_head_side"><text>Anchor horizontal offset (m)</text></string>
-	<string id="ui_mcm_iqm_head_side_desc"><text>Manual sideways nudge along the NPC's own body axis - toward their right (+) or left (-). Tracks their facing as they turn. Added on top of the auto shoulder placement below.</text></string>
+	<string id="ui_mcm_iqm_head_side_desc"><text>Manual sideways nudge along the NPC's own body axis, toward their right (+) or left (-). Tracks their facing as they turn. Added on top of the auto shoulder placement below.</text></string>
 
 	<string id="ui_mcm_iqm_auto_side"><text>Auto shoulder side (no body crossing)</text></string>
 	<string id="ui_mcm_iqm_auto_side_desc"><text>Automatically place the node on whichever shoulder sits on the card's side of the screen, so the leader line meets the near shoulder instead of crossing the NPC's body. Both shoulders are tested on-screen and the one toward the card is picked, so it works at any camera angle and NPC facing. Turn off to place the node purely with the manual offset above.</text></string>

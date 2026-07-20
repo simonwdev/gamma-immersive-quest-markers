@@ -6,18 +6,29 @@
 		<texture r="0" g="0" b="0" a="120">iqm_shadow</texture>
 	</card_shadow>
 
-	<!-- Card plate, clean-premium: a rounded gradient panel drawn as a horizontal
-	     3-slice (left cap | stretched centre | right cap) so corners stay crisp at any
-	     width. All three tinted the same dark charcoal in script. -->
-	<card_plate_l width="11" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_l</texture></card_plate_l>
-	<card_plate_c width="80" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_c</texture></card_plate_c>
-	<card_plate_r width="11" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_panel_r</texture></card_plate_r>
+	<!-- Text-card plate: one rounded gradient quad, tinted dark charcoal in script.
+	     A single quad (not a 3-slice) so there is no seam to round to a 1px gap or
+	     overlap and show as a thin line at fractional UI scaling. -->
+	<card_plate width="80" height="40" stretch="1"><texture r="24" g="22" b="19" a="185">iqm_plate</texture></card_plate>
 
 	<!-- Thin accent bar down the left edge of the card (tinted the accent colour),
 	     inset vertically so it stays clear of the plate's rounded corners. -->
 	<card_accent width="3" height="26" stretch="1">
 		<texture r="224" g="196" b="122" a="255">iqm_white_box</texture>
 	</card_accent>
+
+	<!-- Rounded-rect plate for the compact icon chip (near-square; the text card uses
+	     the wider card_plate above). Tinted the same charcoal in script. -->
+	<card_chip width="64" height="48" stretch="1">
+		<texture r="24" g="22" b="19" a="185">iqm_chip</texture>
+	</card_chip>
+
+	<!-- Role glyph on service/important cards (guide / trader / technician / barkeep /
+	     medic / VIP), between the accent bar and the text. The texture is set at draw
+	     time from the bundled iqm_roles atlas; this placeholder is never shown untinted. -->
+	<card_icon width="15" height="15" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_white_box</texture>
+	</card_icon>
 
 	<!-- Drop shadow for the leader line (black, drawn behind and slightly thicker). -->
 	<card_line_sh width="64" height="2" stretch="1">
