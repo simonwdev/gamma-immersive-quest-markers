@@ -477,9 +477,11 @@ end
 -- predicate; there's no registry to read. We keep it cheap with three levers:
 --   1. a party-full early-out: one arithmetic check kills the whole scan when you
 --      can't recruit anyone anyway (full party, or the companion system is absent);
---   2. cheapest-first short-circuits per NPC (alive -> is-stalker -> distance ->
+--   2. cheapest-first short-circuits per NPC (is-stalker -> alive -> distance ->
 --      relation -> already-a-companion -> the recruit predicate), the expensive
---      screen projection last; and
+--      screen projection last. The class check must come first: db.storage also
+--      holds non-NPC objects (space restrictors etc.) whose class doesn't export
+--      alive(), and calling it on them throws; and
 --   3. a screen-space pre-gate: only NPCs that actually project on-screen are kept,
 --      so off-screen stalkers never eat one of the limited card slots.
 -- It iterates db.storage (the engine's existing table of ONLINE NPCs, not a level
@@ -529,7 +531,7 @@ end
 -- stalker, else nil.
 local function companion_scan_one(id, ctx)
 	local obj = get_obj(id)
-	if obj and obj:alive() and IsStalker(obj)
+	if obj and IsStalker(obj) and obj:alive()
 	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
 	   and obj:relation(ctx.actor) == ctx.friend
 	   and not obj:has_info("npcx_is_companion")
@@ -616,7 +618,7 @@ end
 -- tracked set small. Returns the NPC's refined role string, or nil.
 local function extras_scan_one(id, ctx)
 	local obj = get_obj(id)
-	if obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)
+	if obj and (IsStalker(obj) or obj:clsid() == clsid.script_trader) and obj:alive()
 	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
 	   and not obj:has_info("npcx_is_companion")
 	   and not is_enemy_to_actor(obj) then
@@ -1236,7 +1238,7 @@ local DBG_ROLES = {
 
 function debug_card(role)
 	local obj = level.get_target_obj and level.get_target_obj()
-	if not (obj and obj:alive() and (IsStalker(obj) or obj:clsid() == clsid.script_trader)) then
+	if not (obj and (IsStalker(obj) or obj:clsid() == clsid.script_trader) and obj:alive()) then
 		dbg_out("!IQM: no living stalker under the crosshair")
 		return
 	end
@@ -1265,7 +1267,9 @@ end
 local SERVICE_ROLES = { "trader", "mechanic", "barman", "medic" }
 function debug_card_service()
 	local obj = level.get_target_obj and level.get_target_obj()
-	local cur = obj and obj:alive() and debug_pins[obj:id()]
+	-- No alive() here: the crosshair object may be a class without it (physics
+	-- object, restrictor), and dead pins are pruned every frame anyway.
+	local cur = obj and debug_pins[obj:id()]
 	math.randomseed(time_global())
 	local role = cur
 	while role == cur do role = SERVICE_ROLES[math.random(#SERVICE_ROLES)] end
