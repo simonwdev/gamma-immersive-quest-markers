@@ -26,6 +26,8 @@ function on_mcm_load()
 				{ id = "mark_guiders",    type = "check", val = 1, def = d.mark_guiders },
 				{ id = "mark_traders",    type = "check", val = 1, def = d.mark_traders },
 				{ id = "mark_important",  type = "check", val = 1, def = d.mark_important },
+				{ id = "faction_colors",  type = "check", val = 1, def = d.faction_colors },
+				{ id = "faction_icons",   type = "check", val = 1, def = d.faction_icons },
 				{ id = "appear_dist",     type = "track", val = 2, min = 2, max = 60, step = 1, def = d.appear_dist },
 				{ id = "los_check",       type = "check", val = 1,                              def = d.los_check },
 				{ id = "sound_alert",     type = "check", val = 1,                              def = d.sound_alert },
@@ -46,6 +48,8 @@ function on_mcm_load()
 					{ 1, "iqm_style_mixed" },
 					{ 2, "iqm_style_chip" },
 				}},
+
+				{ id = "short_ranks",  type = "check", val = 1,                                     def = d.short_ranks },
 
 				{ id = "full_dist",    type = "track", val = 2, min = 1,   max = 60,   step = 1,    def = d.full_dist },
 				{ id = "los_rate",     type = "track", val = 2, min = 50,  max = 500,  step = 10,   def = d.los_rate },

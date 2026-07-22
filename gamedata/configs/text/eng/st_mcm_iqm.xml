@@ -41,6 +41,15 @@
 	<string id="ui_mcm_iqm_mark_important"><text>Card important characters</text></string>
 	<string id="ui_mcm_iqm_mark_important_desc"><text>Show a card ("VIP" plus a star glyph) over story and faction important characters, the ones your PDA marks with the Important Character or quest-NPC icon. The Service card style option below can switch it to an icon-only chip or plain text. Off by default, since busy hubs already show plenty of cards.</text></string>
 
+	<string id="ui_mcm_iqm_faction_colors"><text>Use faction colours</text></string>
+	<string id="ui_mcm_iqm_faction_colors_desc"><text>Tint each card (the leader line, edge bar, header text and head node) with the NPC's faction colour instead of the default gold accent. Colours match the faction palette used by the GAMMA DB site. NPCs of a factionless community (e.g. zombies, monsters) keep the gold accent.</text></string>
+
+	<string id="ui_mcm_iqm_faction_icons"><text>Show faction emblems</text></string>
+	<string id="ui_mcm_iqm_faction_icons_desc"><text>Show the NPC's faction emblem on the state cards (quest turn-in, "needs a guide", recruitable companion), inlined before the text. Service and important-character cards keep their role glyph (trader, medic, guide, etc.) instead. The emblems are the game's own PDA faction patches (from G.A.M.M.A. UI, so they match the faction-relations screen and any HD patch mod you have installed). NPCs of a factionless community show no emblem.</text></string>
+
+	<string id="ui_mcm_iqm_short_ranks"><text>Abbreviate NPC ranks</text></string>
+	<string id="ui_mcm_iqm_short_ranks_desc"><text>Shorten a long military rank at the start of an NPC's name so it fits the card: "Senior Sergeant Abdurakhmanov" becomes "Snr Sgt Abdurakhmanov". Only the leading rank is abbreviated; the surname is left alone. Mostly affects Duty and Military stalkers.</text></string>
+
 	<string id="ui_mcm_iqm_role_style"><text>Service card style</text></string>
 	<string id="ui_mcm_iqm_role_style_desc"><text>How the service/important cards (trader, technician, barkeep, medic, guide, important character) are drawn. "Icon chip": a compact plate with just the role glyph. "Text + icon": the full card with header, name and the glyph. "Text only": the full card with no glyph. The glyphs are bundled with the mod, so this works on its own.</text></string>
 	<string id="ui_mcm_lst_iqm_style_text"><text>Text only</text></string>

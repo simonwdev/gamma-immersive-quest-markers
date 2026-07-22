@@ -16,6 +16,9 @@ DEFAULTS = {
 	mark_guiders = true,   -- card guide NPCs (the fast-travel service, PDA "Guide" icon)
 	mark_traders = true,   -- card service NPCs: traders / technicians / barkeeps / medics
 	mark_important = false, -- card story/faction important characters (PDA "Important Character"); off by default (hubs get busy)
+	faction_colors = true,  -- tint each card (accent/line/node/glow/header) with the NPC's faction colour instead of the gold accent
+	faction_icons  = true,  -- show the NPC's faction emblem on state cards (turn-in / guide / companion); ambient cards keep their role glyph
+	short_ranks  = true,   -- abbreviate a leading military rank in the NPC's name ("Senior Sergeant Ivanov" -> "Snr Sgt Ivanov")
 	show_node    = true,   -- draw the little dot at the head where the line starts
 	node_pulse   = true,   -- gently breathe the node's glow halo to draw the eye
 	sound_alert  = true,   -- play a subtle PDA chirp when a card first comes into view
@@ -59,6 +62,7 @@ CORE_KEYS = {
 	enabled = true, mark_targets = true, mark_guides = true,
 	mark_companions = true, mark_guiders = true,
 	mark_traders = true, mark_important = true,
+	faction_colors = true, faction_icons = true,
 	appear_dist = true, los_check = true, sound_alert = true,
 }
 
@@ -87,6 +91,7 @@ local _dbg_t      = 0
 -- table lookups. math.log only runs one-time (read_config) so it's left as-is.
 local floor, max, sqrt     = math.floor, math.max, math.sqrt
 local sin, exp, abs, atan2 = math.sin, math.exp, math.abs, math.atan2
+local pairs, ipairs        = pairs, ipairs   -- iterators on the per-frame/per-scan paths
 -- Other hot globals on the per-frame path, localised for the same reason.
 local GetARGB, time_global, get_obj = GetARGB, time_global, nil  -- get_obj bound in on_game_start (level.* not ready at parse)
 -- Scan-path globals localised too (called per-NPC on the throttled scans). Bound in
@@ -879,13 +884,75 @@ local function icon_for(role)
 	return ROLE_ICONS[role]
 end
 
+-- Faction palette + emblems, ported straight from the gamma-db header
+-- (site/js/constants.js FACTION_COLORS / FACTION_ICONS), keyed by the bare
+-- community string character_community returns. Drive the two faction options:
+-- faction_colors tints the card to the NPC's faction colour; faction_icons puts
+-- the faction emblem on STATE cards (which carry no role glyph). An unlisted
+-- community (monster/trader/actor, etc.) has no entry, so both options fall back
+-- to the default gold accent / no emblem for it.
+local FACTION_RGB = {
+	stalker  = {212, 168,  67}, bandit   = {181, 160, 104}, dolg     = {196, 112,  96},
+	freedom  = { 95, 191,  95}, csky     = { 91, 164, 207}, ecolog   = {127, 191,  95},
+	killer   = { 74, 144, 217}, army     = {107, 142,  90}, monolith = {160, 128, 192},
+	renegade = {200, 120,  64}, greh     = {139,  74, 139}, isg      = {122, 139, 106},
+	zombied  = {154, 160,  90},
+}
+-- These reference the GAME's own PDA faction patches, not a bundled atlas: the
+-- texture ids are registered by G.A.M.M.A. UI's ui_mm_faction_patches (a mandatory
+-- GAMMA component, so always present), and HD Faction Patches transparently
+-- overrides them at higher resolution when installed. So the emblem on the card is
+-- exactly the patch the player sees on the faction-relations screen. There is no
+-- game patch for zombied (never a markable community anyway), so it gets no emblem.
+local FACTION_TEX = {
+	stalker  = "ui_mm_faction_stalker",  bandit   = "ui_mm_faction_bandit",  dolg     = "ui_mm_faction_dolg",
+	freedom  = "ui_mm_faction_freedom",  csky     = "ui_mm_faction_csky",    ecolog   = "ui_mm_faction_ecolog",
+	killer   = "ui_mm_faction_killer",   army     = "ui_mm_faction_army",    monolith = "ui_mm_faction_monolith",
+	renegade = "ui_mm_faction_renegade", greh     = "ui_mm_faction_greh",    isg      = "ui_mm_faction_isg",
+}
+
+-- Rank abbreviations (option: short_ranks). Generated Duty/Military stalkers are
+-- named "<rank> <surname>" from the game's name tables, and the rank prefix
+-- ("Senior Sergeant", "Junior Lieutenant", ...) can be longer than the surname,
+-- blowing out the card width. Abbreviate just the LEADING rank. Ordered
+-- longest-phrase first so a multi-word rank wins over its own components
+-- ("Senior Sergeant" before "Sergeant", "Lieutenant Colonel" before either word);
+-- the first prefix hit wins and returns.
+local RANK_ABBR = {
+	{ "Lieutenant Colonel", "Lt Col"  }, { "Lieutenant General", "Lt Gen"  },
+	{ "Colonel General",    "Col Gen" }, { "Major General",      "Maj Gen" },
+	{ "Senior Sergeant",    "Snr Sgt" }, { "Junior Sergeant",    "Jr Sgt"  },
+	{ "Master Sergeant",    "Mstr Sgt"}, { "Staff Sergeant",     "SSgt"    },
+	{ "Sergeant Major",     "Sgt Maj" }, { "Senior Lieutenant",  "Snr Lt"  },
+	{ "Junior Lieutenant",  "Jr Lt"   }, { "Senior Private",     "Snr Pte" },
+	{ "Warrant Officer",    "WO"      }, { "Sergeant",           "Sgt"     },
+	{ "Lieutenant",         "Lt"      }, { "Corporal",           "Cpl"     },
+	{ "Private",            "Pte"     }, { "Captain",            "Capt"    },
+	{ "Colonel",            "Col"     }, { "General",            "Gen"     },
+	{ "Major",              "Maj"     }, { "Ensign",             "Ens"     },
+}
+local function shorten_rank(n)
+	for i = 1, #RANK_ABBR do
+		local full = RANK_ABBR[i][1]
+		local lf   = #full
+		if n:sub(1, lf) == full then
+			local nxt = n:byte(lf + 1)
+			if nxt == nil then return RANK_ABBR[i][2] end             -- name is only the rank
+			if nxt == 32  then return RANK_ABBR[i][2] .. n:sub(lf + 1) end  -- "<rank> <surname>"
+		end
+	end
+	return n
+end
+
 -- NPC display name from an already-resolved object (name is stable, so the caller caches
 -- the result on the tracked entry and only calls this once per NPC).
 local function name_from_obj(obj)
 	if not obj then return "" end
 	local n = obj:character_name()
 	if n == nil or n == "" then n = obj:name() end
-	return n or ""
+	n = n or ""
+	if C.short_ranks and n ~= "" then n = shorten_rank(n) end
+	return n
 end
 
 -- Subtle 2D PDA chirp when a card first comes into view. The sound_object is created
@@ -1003,7 +1070,7 @@ local function render(tg)
 			local rx, ry = smooth_point(id, hx, hy, tg)
 			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
 			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift,
-			                t.icon, t.chip, tg)
+			                t.icon, t.chip, t.cr, t.cg, t.cb, t.icon_tinted, tg)
 		end
 	end
 end
@@ -1077,13 +1144,16 @@ function IqmCards:hide_slot(i)
 	s.name_sh:Show(false)
 end
 
-function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip, tg)
+function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip, cr, cg, cb, icon_tinted, tg)
 	local s = self.slots[i]
 	if not s then return end
 	a = floor(a)
 	if a > 255 then a = 255 end
 	nscale = nscale or 1
 	lift   = lift or 0
+	-- accent colour: per-card (faction colour when faction_colors is on), falling back
+	-- to the shared gold accent so a nil never draws a black element.
+	cr = cr or cfg.col_r; cg = cg or cfg.col_g; cb = cb or cfg.col_b
 	chip   = (chip and icon) and true or false   -- chip mode needs a glyph to stand alone
 
 	-- Ambient role cards render per the role_style option: a compact ICON-ONLY CHIP
@@ -1092,7 +1162,10 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 	-- the text. State cards (and Tactical Compass absent) are always full text.
 	local pad, accent_w = 9, 3
 	local ch  = chip and 34 or 40    -- chip plate a little shorter than the text card
-	local IH  = chip and 26 or 18    -- glyph size: large on the chip, a bit bigger than the text alongside it
+	-- glyph height: icon-only chips use the big size; the inline glyph on a text card
+	-- (role glyph in "text + icon" mode, or a faction emblem) sits a little larger than
+	-- the text so it reads clearly alongside it.
+	local IH  = chip and 26 or 22
 	-- squeeze the glyph's width by UI_KX like the node dot: the 4:3 virtual UI is
 	-- stretched onto the real screen, so an equal w/h square would draw as an oval.
 	local iw    = icon and max(2, floor(IH * UI_KX + 0.5)) or 0
@@ -1159,7 +1232,13 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 			s.icon:SetWndPos(P(cx + accent_w + lead, cy + floor((ch - IH) * 0.5)))
 		end
 		s.icon:SetWndSize(S(iw, IH))
-		s.icon:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		-- role glyphs are white-on-transparent and tint to the accent colour; faction
+		-- emblems carry their own colour, so they're drawn white (untinted), just faded.
+		if icon_tinted == false then
+			s.icon:SetTextureColor(GetARGB(a, 255, 255, 255))
+		else
+			s.icon:SetTextureColor(GetARGB(a, cr, cg, cb))
+		end
 		s.icon:Show(true)
 	else
 		s.icon:Show(false)
@@ -1203,11 +1282,11 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 		local gsx = max(6, floor(gs * UI_KX + 0.5))
 		s.glow:SetWndSize(S(gsx, gs))
 		s.glow:SetWndPos(P(floor(hx - gsx * 0.5 + 0.5), floor(hy - gs * 0.5 + 0.5)))
-		s.glow:SetTextureColor(GetARGB(floor(150 * a / 255 * p_alpha), cfg.col_r, cfg.col_g, cfg.col_b))
+		s.glow:SetTextureColor(GetARGB(floor(150 * a / 255 * p_alpha), cr, cg, cb))
 		s.glow:Show(true)
 		s.node:SetWndSize(S(nsx, ns))
 		s.node:SetWndPos(P(floor(hx - nsx * 0.5 + 0.5), floor(hy - ns * 0.5 + 0.5)))
-		s.node:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		s.node:SetTextureColor(GetARGB(a, cr, cg, cb))
 		s.node:Show(true)
 	else
 		s.glow:Show(false)
@@ -1276,10 +1355,10 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 	else
 		s.plate:SetTextureColor(plate_col); s.plate:Show(true); s.chip:Show(false)
 	end
-	s.line:SetTextureColor(GetARGB(floor(cfg.line_a * a / 255), cfg.col_r, cfg.col_g, cfg.col_b))
+	s.line:SetTextureColor(GetARGB(floor(cfg.line_a * a / 255), cr, cg, cb))
 	s.line:Show(true)
 
-	s.accent:SetTextureColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+	s.accent:SetTextureColor(GetARGB(a, cr, cg, cb))
 	s.accent:Show(true)
 
 	if chip then
@@ -1292,7 +1371,7 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 		local tsh = floor(a * 0.7)
 		s.head_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
 		s.name_sh:SetTextColor(GetARGB(tsh, 0, 0, 0))
-		s.head:SetTextColor(GetARGB(a, cfg.col_r, cfg.col_g, cfg.col_b))
+		s.head:SetTextColor(GetARGB(a, cr, cg, cb))
 		s.name:SetTextColor(GetARGB(a, 214, 210, 202))
 
 		s.head_sh:Show(true)
@@ -1437,7 +1516,37 @@ local function update()
 	for _, e in ipairs(order) do
 		ensure_entry(e.id, e.role)
 		local t = tracked[e.id]
-		if t then t.icon = icon_for(e.role); t.chip = (C.role_style or 1) == 2 end
+		if t then
+			local ricon = icon_for(e.role)             -- role glyph (ambient cards) or nil
+			t.icon        = ricon
+			t.chip        = (C.role_style or 1) == 2
+			t.icon_tinted = true                       -- role glyphs tint to the accent colour
+
+			-- Faction lookup, resolved once per NPC (community is stable for its life)
+			-- and cached on the entry, so the per-frame draw path stays lookup-free. The
+			-- tracked set is wiped on any option change (clear_all), so toggling either
+			-- faction option re-resolves cleanly.
+			if (C.faction_colors or C.faction_icons) and t.fcomm == nil then
+				local obj = get_obj(e.id)
+				t.fcomm = (obj and char_comm(obj)) or false
+			end
+			local frgb = t.fcomm and FACTION_RGB[t.fcomm]
+
+			-- faction_colors: tint the whole card to the faction colour, else keep the gold.
+			if C.faction_colors and frgb then
+				t.cr, t.cg, t.cb = frgb[1], frgb[2], frgb[3]
+			else
+				t.cr, t.cg, t.cb = C.col_r, C.col_g, C.col_b
+			end
+
+			-- faction_icons: only on STATE cards (no role glyph there). The emblem carries
+			-- its own colours, so it's drawn untinted; and it stays a full text card (never
+			-- an icon-only chip, which would hide the objective NPC's name).
+			if C.faction_icons and not ricon and t.fcomm then
+				local ftex = FACTION_TEX[t.fcomm]
+				if ftex then t.icon = ftex; t.icon_tinted = false; t.chip = false end
+			end
+		end
 	end
 end
 
