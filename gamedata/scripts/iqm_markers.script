@@ -634,10 +634,15 @@ local SERVICE_OPT = {
 -- like Dushman) and, for story characters (merc guides/traders like Leopard/Dushman),
 -- surfaces only a special/quest_npc spot -> spot_role reads "important" (VIP). This
 -- re-derives the actual service from signals:
---   * guider: fast-travel guide. The guide NPCs all carry "guide" in their section
---     (ds_killer_guide_main_base, zaton_killer_guide_station, red_duty_outpost_guide).
---     The engine hook is a "travel_<class>" actor-dialog, which isn't queryable per
---     object, so the section name is the runtime signal.
+--   * guider: fast-travel guide. Guide NPCs carry "guid" in their section, either as
+--     the guid_* prefix (guid_bar_stalker_navigator, guid_jup_stalker_garik, ...) or
+--     within "guide" (ds_killer_guide_main_base, zaton_killer_guide_station,
+--     mil_freedom_guid). Checked against every character in the pack: "guid" hits only
+--     guides. The engine hook is a "travel_<class>" actor-dialog, which isn't queryable
+--     per object, so the section name is the runtime signal. Two guides slip past this:
+--     lider_monolith_haron (no "guid" token) reads as important, and the monolith/merc
+--     station guides that also sell (trader_monolith_kbo, ...) fall to the trade branch
+--     and card as trader (they do both, so that's fine).
 --   * trader/mechanic/barman/medic: the `trade =` field in the NPC's active [logic]
 --     block (the trade_generic_* constants Demonized's trader_autoinject keys off), backed
 --     by section-name / script_trader clsid / "trader" community for dialog-injected trade
@@ -653,7 +658,7 @@ local function service_role(obj, cls)
 
 	local sec = obj:section()
 	r = false
-	if sec:find("guide") then                                  -- fast-travel guide
+	if sec:find("guid") then                                   -- fast-travel guide (guid_* / *_guide)
 		r = "guider"
 	else
 		local name_mech  = sec:find("mechanic") or sec:find("_tech") or sec:find("mech_mlr") or sec:find("mechan")
