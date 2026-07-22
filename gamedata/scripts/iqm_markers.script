@@ -185,11 +185,16 @@ local function is_task_active(task)
 	return db.actor:get_task(task.id, true) ~= nil
 end
 
-local function is_enemy_to_actor(obj)
+-- actor_comm (the actor's bare community, e.g. "stalker") is constant across a scan
+-- pass, so scan callers pass ctx.actor_comm to skip the per-NPC char_comm+:sub. Other
+-- callers omit it and pay the lookup (they run for a handful of quest targets, not the
+-- whole roster). The personal-relation check short-circuits first, so it's only reached
+-- for NPCs not already personally hostile.
+local function is_enemy_to_actor(obj, actor_comm)
 	if obj:relation(db.actor) == game_object.enemy then return true end
 	local comm = char_comm(obj)
 	if comm == "monster" then comm = "stalker" end
-	local actor_comm = char_comm(db.actor):sub(7)
+	actor_comm = actor_comm or char_comm(db.actor):sub(7)
 	return factions_enemies(actor_comm, comm)
 end
 
@@ -413,6 +418,7 @@ local function scan_ctx()
 	local ad = C.appear_dist or 16
 	_scan_ctx.appear2 = ad * ad
 	_scan_ctx.friend  = game_object.friend
+	_scan_ctx.actor_comm = char_comm(actor):sub(7)   -- bare community, reused by is_enemy_to_actor
 	return _scan_ctx
 end
 
@@ -569,7 +575,12 @@ end
 -- engine turns that into a map spot on the NPC's id, queryable per NPC via
 -- level.map_has_object_spot. That matches exactly what the player's PDA legend
 -- flags (it's what GAMMA's own sim_squad_scripted and Tactical Compass key off),
--- so no trade-config scanning is needed.
+-- so no trade-config scanning is needed. Caveat: the spot tracks the NPC's LOGIC
+-- (level_spot), not the service it offers, so dialog-driven service NPCs (guides,
+-- dm_init_trader traders) carry no service spot. Often they carry only a story
+-- special/quest_npc spot, which cards them as "important" (VIP). extras_scan_one
+-- uses service_role (a self-contained classifier, no external deps) to catch those
+-- and to outrank the VIP role for an active guide/trader; see the note there.
 local EXTRA_SCAN  = 2000  -- ms between role rescans (matches the quest scan, so role cards feel as responsive)
 
 -- Spot -> role, checked in order (first hit wins for multi-spot NPCs). `opt` is
@@ -610,6 +621,70 @@ local function refine_trader(id, obj)
 	return r
 end
 
+-- Signals gating each service role (checked at the call site). Guider is the fast-travel
+-- guide (mark_guiders); the rest are the trade services (mark_traders).
+local SERVICE_OPT = {
+	guider = "mark_guiders", trader = "mark_traders", mechanic = "mark_traders",
+	barman = "mark_traders", medic = "mark_traders",
+}
+
+-- Signal-based service classifier for the spot-less / VIP-preempted fallback (see
+-- extras_scan_one). A ui_pda2_*_location spot tracks the NPC's logic scheme (level_spot),
+-- not the service it offers, so it misses dialog-driven service NPCs (dm_init_trader mercs
+-- like Dushman) and, for story characters (merc guides/traders like Leopard/Dushman),
+-- surfaces only a special/quest_npc spot -> spot_role reads "important" (VIP). This
+-- re-derives the actual service from signals:
+--   * guider: fast-travel guide. The guide NPCs all carry "guide" in their section
+--     (ds_killer_guide_main_base, zaton_killer_guide_station, red_duty_outpost_guide).
+--     The engine hook is a "travel_<class>" actor-dialog, which isn't queryable per
+--     object, so the section name is the runtime signal.
+--   * trader/mechanic/barman/medic: the `trade =` field in the NPC's active [logic]
+--     block (the trade_generic_* constants Demonized's trader_autoinject keys off), backed
+--     by section-name / script_trader clsid / "trader" community for dialog-injected trade
+--     NPCs that declare no trade= field.
+-- Returns "guider"/"trader"/"mechanic"/"barman"/"medic", or nil (non-service, or a
+-- companion whose trade catalog serves only the actor). Self-contained: no dependency on
+-- trader_autoinject or Xlib. Cached per NPC (a service role is stable for its life).
+local _srole = {}
+local function service_role(obj, cls)
+	local id = obj:id()
+	local r = _srole[id]
+	if r ~= nil then return r or nil end   -- false = cached "not a service NPC"
+
+	local sec = obj:section()
+	r = false
+	if sec:find("guide") then                                  -- fast-travel guide
+		r = "guider"
+	else
+		local name_mech  = sec:find("mechanic") or sec:find("_tech") or sec:find("mech_mlr") or sec:find("mechan")
+		local name_medic = sec:find("medic") or sec:find("medik") or sec:find("doctor")
+		local name_trade = sec:find("trader") or sec:find("barm[ae]n")
+		                   or char_comm(obj) == "trader"
+		                   or cls == clsid.script_trader or cls == clsid.trader
+
+		-- trade= catalog in the active logic block: the engine's real trade enabler and
+		-- the most specific signal (names the exact service). Absent for dialog-trade NPCs.
+		local cat
+		local st = db.storage[id]
+		if st and st.ini and st.section_logic then
+			cat = st.ini:r_string_ex(st.section_logic, "trade")
+		end
+
+		if cat and cat:find("companion") then                  -- companion catalog serves only the actor
+			r = false
+		elseif cat and cat:find("trade_generic_mechanic") then r = "mechanic"
+		elseif cat and cat:find("trade_generic_barman")   then r = "barman"
+		elseif cat and cat:find("trade_generic_medic")    then r = "medic"
+		elseif name_mech  then r = "mechanic"                  -- name signals catch NPCs with no trade= field
+		elseif name_medic then r = "medic"
+		elseif cat or name_trade then r = "trader"             -- generic supplier / barman catalog / trader
+		end
+	end
+
+	_srole[id] = r
+	return r or nil
+end
+
 -- Per-NPC test for the role scan. Unlike the companion scan there is no on-screen
 -- gate here: that would tie a card's appearance to whether the NPC happened to be
 -- projecting the frame it was scanned, which made role cards feel unresponsive.
@@ -618,11 +693,27 @@ end
 -- tracked set small. Returns the NPC's refined role string, or nil.
 local function extras_scan_one(id, ctx)
 	local obj = get_obj(id)
-	if obj and (IsStalker(obj) or obj:clsid() == clsid.script_trader) and obj:alive()
+	if not obj then return end
+	local cls = obj:clsid()   -- resolved once: reused by the IsStalker gate and service_role
+	if (IsStalker(obj, cls) or cls == clsid.script_trader) and obj:alive()
 	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
 	   and not obj:has_info("npcx_is_companion")
-	   and not is_enemy_to_actor(obj) then
+	   and not is_enemy_to_actor(obj, ctx.actor_comm) then
 		local role, opt = spot_role(id)
+		-- A real service role beats the ambient "important"/VIP classification. The PDA
+		-- spot reflects the NPC's logic scheme (level_spot), not the service it offers, so
+		-- story-heavy service NPCs (merc guides/traders like Leopard/Dushman) surface only
+		-- a special/quest_npc spot and spot_role returns "important", carding an active
+		-- guide or shopkeeper as a plain story character. So whenever the spot found
+		-- nothing or only "important", re-derive the actual service from signals
+		-- (service_role) and prefer it, gated by that role's own option. service_role
+		-- resolves the exact type (incl. the mechanic/barman/medic split), so it's used
+		-- directly. A genuine service spot (role set and not "important") keeps the fast
+		-- path below unchanged.
+		if role == nil or role == "important" then
+			local sr = service_role(obj, cls)
+			if sr and C[SERVICE_OPT[sr]] then return sr end
+		end
 		if role and C[opt] then
 			return (role == "trader") and refine_trader(id, obj) or role
 		end
@@ -907,7 +998,7 @@ local function render(tg)
 			local rx, ry = smooth_point(id, hx, hy, tg)
 			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
 			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift,
-			                t.icon, t.chip)
+			                t.icon, t.chip, tg)
 		end
 	end
 end
@@ -981,7 +1072,7 @@ function IqmCards:hide_slot(i)
 	s.name_sh:Show(false)
 end
 
-function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip)
+function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip, tg)
 	local s = self.slots[i]
 	if not s then return end
 	a = floor(a)
@@ -1099,7 +1190,7 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 		-- core dot stays crisp/steady. Time-based, so it's framerate-independent.
 		local p_scale, p_alpha = 1, 1
 		if cfg.node_pulse then
-			local sn = sin(time_global() * 0.0039)
+			local sn = sin(tg * 0.0039)
 			p_scale = 1 + 0.10 * sn
 			p_alpha = 0.875 + 0.125 * sn
 		end
@@ -1163,7 +1254,6 @@ function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon,
 	s.line:SetHeading(ang)
 
 	if DEBUG then
-		local tg = time_global()
 		if tg - _dbg_t > 1000 then
 			_dbg_t = tg
 			printf("[IQM] slot=%s head=(%s,%s) card=(cx=%s cy=%s cw=%s ch=%s right=%s) corner=(%s,%s) len=%s a=%s",
