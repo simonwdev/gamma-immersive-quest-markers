@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+
+	<string id="ui_mcm_menu_iqm"><text>Иммерсивные маркеры заданий</text></string>
+
+	<!-- Tab (subpage) labels -->
+	<string id="ui_mcm_iqm_tab_core"><text>Основные</text></string>
+	<string id="ui_mcm_iqm_tab_advanced"><text>Дополнительно</text></string>
+
+	<!-- Card headers (shown on the card itself, not in MCM). Two grammars on
+	     purpose: verb phrases for act-now state cards, terse nouns for the
+	     ambient service/identity cards (which also carry a role glyph). -->
+	<string id="st_iqm_hdr_target"><text>ДОЛОЖИТЬ</text></string>
+	<string id="st_iqm_hdr_guide"><text>ИЩУ ПРОВОДНИКА</text></string>
+	<string id="st_iqm_hdr_companion"><text>ИЩУ РАБОТУ</text></string>
+	<string id="st_iqm_hdr_guider"><text>ПРОВОДНИК</text></string>
+	<string id="st_iqm_hdr_trader"><text>ТОРГОВЕЦ</text></string>
+	<string id="st_iqm_hdr_mechanic"><text>ТЕХНИК</text></string>
+	<string id="st_iqm_hdr_barman"><text>БАРМЕН</text></string>
+	<string id="st_iqm_hdr_medic"><text>МЕДИК</text></string>
+	<string id="st_iqm_hdr_important"><text>ВИП-ПЕРСОНА</text></string>
+
+	<string id="ui_mcm_iqm_enabled"><text>Включить маркеры</text></string>
+	<string id="ui_mcm_iqm_enabled_desc"><text>Главный переключатель плавающих карточек-маркеров заданий.</text></string>
+
+	<string id="ui_mcm_iqm_mark_targets"><text>Карточки над целями заданий</text></string>
+	<string id="ui_mcm_iqm_mark_targets_desc"><text>Показывать карточку над NPC, на которого игра сейчас указывает по заданию: шаг «поговорить с X» и возвращение к заказчику для сдачи задания.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guides"><text>Карточка «нужен проводник»</text></string>
+	<string id="ui_mcm_iqm_mark_guides_desc"><text>Показывать карточку над сталкером, который сейчас ищет проводника для сопровождения (задание «Нужен проводник?»). Определяется по условию диалога самого задания, поэтому совпадает ровно с тем, когда это действие доступно, и предлагает его только один сталкер за раз. Требуется система заданий проводника (входит в GAMMA); без неё опция не действует.</text></string>
+
+	<string id="ui_mcm_iqm_mark_companions"><text>Карточки над наёмными напарниками</text></string>
+	<string id="ui_mcm_iqm_mark_companions_desc"><text>Показывать карточку («ИЩУ РАБОТУ») над дружелюбными сталкерами поблизости, которых прямо сейчас можно нанять в напарники: дружелюбен, состоит в отряде и не превышен ваш лимит напарников. Определяется без полного сканирования. Если группа уже заполнена, проверка полностью пропускается; иначе проверяются только сталкеры на экране в пределах дистанции появления, раз в 3 секунды. Используется собственная проверка игры на доступность диалога найма. Требуется система напарников (входит в GAMMA); без неё опция не действует.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guiders"><text>Карточки над проводниками</text></string>
+	<string id="ui_mcm_iqm_mark_guiders_desc"><text>Показывать карточку («ПРОВОДНИК» плюс значок проводника) над NPC, предлагающими услуги быстрого перемещения, — теми, кого КПК отмечает значком проводника. Опция «Стиль сервисных карточек» ниже может переключить её на компактный значок или простой текст. Определяется по реестру меток КПК самого движка, поэтому всегда совпадает с легендой карты.</text></string>
+
+	<string id="ui_mcm_iqm_mark_traders"><text>Карточки над сервисными NPC</text></string>
+	<string id="ui_mcm_iqm_mark_traders_desc"><text>Показывать карточку над торговцами, техниками, барменами и медиками, каждую со своим заголовком («ТОРГОВЕЦ» / «ТЕХНИК» / «БАРМЕН» / «МЕДИК») и значком роли. Опция «Стиль сервисных карточек» ниже может переключить их на компактные значки или простой текст. Определяется по реестру меток КПК движка; конкретная услуга читается из фактического торгового файла NPC, поэтому техник, помеченный на уровне как торговец, всё равно получит значок техника.</text></string>
+
+	<string id="ui_mcm_iqm_mark_important"><text>Карточки над важными персонажами</text></string>
+	<string id="ui_mcm_iqm_mark_important_desc"><text>Показывать карточку («ВИП-ПЕРСОНА» плюс звезда) над сюжетными и важными для группировок персонажами — теми, кого КПК отмечает значком важного или квестового персонажа. Опция «Стиль сервисных карточек» ниже может переключить её на компактный значок или простой текст. По умолчанию выключено: в оживлённых лагерях карточек и так хватает.</text></string>
+
+	<string id="ui_mcm_iqm_faction_colors"><text>Цвета группировок</text></string>
+	<string id="ui_mcm_iqm_faction_colors_desc"><text>Окрашивать карточку (линию-указку, боковую полосу, текст заголовка и точку у головы) в цвет группировки NPC вместо стандартного золотого акцента. Цвета совпадают с палитрой группировок сайта GAMMA DB. NPC без группировки (например, зомби, мутанты) сохраняют золотой акцент.</text></string>
+
+	<string id="ui_mcm_iqm_faction_icons"><text>Эмблемы группировок</text></string>
+	<string id="ui_mcm_iqm_faction_icons_desc"><text>Показывать эмблему группировки NPC на карточках состояния (сдача задания, «нужен проводник», наёмный напарник) перед текстом. Сервисные карточки и карточки важных персонажей вместо этого сохраняют значок роли (торговец, медик, проводник и т.д.). Эмблемы — это собственные нашивки группировок из КПК (из G.A.M.M.A. UI, поэтому они совпадают с экраном отношений группировок и любым установленным HD-модом нашивок). NPC без группировки эмблему не получают.</text></string>
+
+	<string id="ui_mcm_iqm_short_ranks"><text>Сокращать звания NPC</text></string>
+	<string id="ui_mcm_iqm_short_ranks_desc"><text>Сокращать длинное воинское звание в начале имени NPC, чтобы имя помещалось на карточке: «Senior Sergeant Abdurakhmanov» становится «Snr Sgt Abdurakhmanov». Сокращается только звание в начале; фамилия не меняется. В основном касается сталкеров Долга и военных. Пока распознаются только английские названия званий.</text></string>
+
+	<string id="ui_mcm_iqm_role_style"><text>Стиль сервисных карточек</text></string>
+	<string id="ui_mcm_iqm_role_style_desc"><text>Как рисуются сервисные карточки и карточки важных персонажей (торговец, техник, бармен, медик, проводник, ВИП-персона). «Значок»: компактная плашка только со значком роли. «Текст + значок»: полная карточка с заголовком, именем и значком. «Только текст»: полная карточка без значка. Значки поставляются вместе с модом, так что опция работает сама по себе.</text></string>
+	<string id="ui_mcm_lst_iqm_style_text"><text>Только текст</text></string>
+	<string id="ui_mcm_lst_iqm_style_mixed"><text>Текст + значок</text></string>
+	<string id="ui_mcm_lst_iqm_style_chip"><text>Значок</text></string>
+
+	<string id="ui_mcm_iqm_show_node"><text>Точка у головы</text></string>
+	<string id="ui_mcm_iqm_show_node_desc"><text>Рисовать маленькую точку у головы NPC, откуда начинается линия-указка. Выключите, чтобы остались только линия и карточка.</text></string>
+
+	<string id="ui_mcm_iqm_node_pulse"><text>Пульсация свечения точки</text></string>
+	<string id="ui_mcm_iqm_node_pulse_desc"><text>Мягкое «дыхание» ореола вокруг точки у головы (медленная, едва заметная пульсация), привлекающее взгляд к цели. Сама точка остаётся неизменной. Выключите для полностью статичного свечения.</text></string>
+
+	<string id="ui_mcm_iqm_sound_alert"><text>Сигнал КПК при обнаружении</text></string>
+	<string id="ui_mcm_iqm_sound_alert_desc"><text>Проигрывать тихий сигнал КПК, когда карточка NPC впервые попадает в поле зрения. Задержка повторного срабатывания для каждого NPC не даёт коротким взглядам или NPC, мелькнувшему за укрытием, вызывать сигнал заново.</text></string>
+
+	<string id="ui_mcm_iqm_sound_vol"><text>Громкость сигнала КПК</text></string>
+	<string id="ui_mcm_iqm_sound_vol_desc"><text>Громкость сигнала КПК при обнаружении (0 = тишина, 1 = максимум). Действует только при включённом «Сигнале КПК при обнаружении».</text></string>
+
+	<string id="ui_mcm_iqm_appear_dist"><text>Дистанция появления (м)</text></string>
+	<string id="ui_mcm_iqm_appear_dist_desc"><text>С какого расстояния карточка начинает проявляться при вашем приближении. Дальше этого она скрыта.</text></string>
+
+	<string id="ui_mcm_iqm_full_dist"><text>Дистанция полной непрозрачности (м)</text></string>
+	<string id="ui_mcm_iqm_full_dist_desc"><text>В этом радиусе карточка полностью непрозрачна. Между ним и дистанцией появления она плавно проявляется. Держите значение ниже дистанции появления.</text></string>
+
+	<string id="ui_mcm_iqm_los_check"><text>Проверка прямой видимости</text></string>
+	<string id="ui_mcm_iqm_los_check_desc"><text>Скрывать карточку, когда NPC находится за стеной или другим укрытием, вместо показа сквозь них. Требуется общая утилита demonized_geometry_ray (входит во многие моды GAMMA, включая оба аддона Catspaw); без неё настройка не действует.</text></string>
+
+	<string id="ui_mcm_iqm_los_rate"><text>Частота проверки видимости (мс)</text></string>
+	<string id="ui_mcm_iqm_los_rate_desc"><text>Как часто перепроверяется прямая видимость каждого NPC. Меньше — быстрее реагирует на уход за укрытие, но дороже по производительности; больше — дешевле, но скрывает медленнее. По умолчанию 150.</text></string>
+
+	<string id="ui_mcm_iqm_los_grace"><text>Задержка скрытия (мс)</text></string>
+	<string id="ui_mcm_iqm_los_grace_desc"><text>Как долго карточка остаётся видимой после того, как NPC скрылся за укрытием, — защита от мерцания при коротких или частичных перекрытиях (дверной проём, проходящий объект). Больше — стабильнее, но карточка дольше видна сквозь укрытие; 0 скрывает сразу при потере видимости. По умолчанию 250.</text></string>
+
+	<string id="ui_mcm_iqm_head_lift"><text>Вертикальное смещение якоря (м)</text></string>
+	<string id="ui_mcm_iqm_head_lift_desc"><text>Сдвиг точки вверх (+) или вниз (-) от кости левого плеча NPC. По умолчанию (0) она сидит прямо на плече у шеи; отрицательное значение опускает её к левой части торса.</text></string>
+
+	<string id="ui_mcm_iqm_head_side"><text>Горизонтальное смещение якоря (м)</text></string>
+	<string id="ui_mcm_iqm_head_side_desc"><text>Ручной сдвиг вбок вдоль оси тела NPC: вправо (+) или влево (-) от него. Следует за поворотом NPC. Добавляется поверх автоматического размещения на плече ниже.</text></string>
+
+	<string id="ui_mcm_iqm_auto_side"><text>Автовыбор плеча (без пересечения тела)</text></string>
+	<string id="ui_mcm_iqm_auto_side_desc"><text>Автоматически размещать точку на том плече, которое на экране обращено к карточке, чтобы линия-указка шла к ближнему плечу, а не пересекала тело NPC. Оба плеча проверяются на экране и выбирается то, что ближе к карточке, поэтому работает при любом ракурсе камеры и повороте NPC. Выключите, чтобы размещать точку только ручным смещением выше.</text></string>
+
+	<string id="ui_mcm_iqm_side_amt"><text>Смещение на плечо (м)</text></string>
+	<string id="ui_mcm_iqm_side_amt_desc"><text>Насколько далеко на плечо автоматика сдвигает точку (примерно половина ширины торса). Используется только при включённом автовыборе плеча.</text></string>
+
+	<string id="ui_mcm_iqm_card_off_x"><text>Смещение карточки по X (пикс.)</text></string>
+	<string id="ui_mcm_iqm_card_off_x_desc"><text>Горизонтальное расстояние от головы до карточки. У края экрана карточка автоматически переходит на другую сторону.</text></string>
+
+	<string id="ui_mcm_iqm_card_off_y"><text>Смещение карточки по Y (пикс.)</text></string>
+	<string id="ui_mcm_iqm_card_off_y_desc"><text>Насколько высоко над головой висит карточка.</text></string>
+
+	<string id="ui_mcm_iqm_line_thick"><text>Толщина линии-указки (пикс.)</text></string>
+	<string id="ui_mcm_iqm_line_thick_desc"><text>Толщина диагональной линии, соединяющей голову с карточкой.</text></string>
+
+	<string id="ui_mcm_iqm_line_a"><text>Непрозрачность линии-указки</text></string>
+	<string id="ui_mcm_iqm_line_a_desc"><text>Непрозрачность линии при полной видимости (0 = невидима, 255 = сплошная).</text></string>
+
+	<string id="ui_mcm_iqm_card_a"><text>Непрозрачность карточки</text></string>
+	<string id="ui_mcm_iqm_card_a_desc"><text>Непрозрачность тёмной подложки карточки при полной видимости (0 = невидима, 255 = сплошная).</text></string>
+
+	<string id="ui_mcm_iqm_node_size"><text>Размер точки у головы (пикс.)</text></string>
+	<string id="ui_mcm_iqm_node_size_desc"><text>Полный размер круглой точки у головы NPC — достигается в пределах дистанции полной непрозрачности. Игнорируется, если «Точка у головы» выключена.</text></string>
+
+	<string id="ui_mcm_iqm_node_min"><text>Мин. размер точки (вдали)</text></string>
+	<string id="ui_mcm_iqm_node_min_desc"><text>До какой доли полного размера точка уменьшается на дистанции появления. По мере приближения она плавно растёт до полного размера. 1.0 = без масштабирования по дистанции.</text></string>
+
+	<string id="ui_mcm_iqm_smoothing"><text>Сглаживание</text></string>
+	<string id="ui_mcm_iqm_smoothing_desc"><text>Как быстро карточка следует за головой NPC. 1 = мгновенно (дёргается), меньше — плавнее, но с запаздыванием. Не зависит от частоты кадров. По умолчанию 0.35.</text></string>
+
+	<string id="ui_mcm_iqm_snap_dist"><text>Дистанция скачка (пикс.)</text></string>
+	<string id="ui_mcm_iqm_snap_dist_desc"><text>Перемещения больше этого значения выполняются мгновенно, а не плавно, чтобы карточка не скользила через весь экран, когда голова NPC впервые появляется или резко смещается.</text></string>
+
+	<string id="ui_mcm_iqm_col_a"><text>Цвет акцента: альфа</text></string>
+	<string id="ui_mcm_iqm_col_a_desc"><text>Общая альфа акцента (линия / боковая полоса / заголовок / точка).</text></string>
+	<string id="ui_mcm_iqm_col_r"><text>Цвет акцента: красный</text></string>
+	<string id="ui_mcm_iqm_col_r_desc"><text>Красная составляющая цвета акцента (0-255).</text></string>
+	<string id="ui_mcm_iqm_col_g"><text>Цвет акцента: зелёный</text></string>
+	<string id="ui_mcm_iqm_col_g_desc"><text>Зелёная составляющая цвета акцента (0-255).</text></string>
+	<string id="ui_mcm_iqm_col_b"><text>Цвет акцента: синий</text></string>
+	<string id="ui_mcm_iqm_col_b_desc"><text>Синяя составляющая цвета акцента (0-255). Значения по умолчанию дают мягкое приглушённое золото (224, 196, 122).</text></string>
+
+	<string id="ui_mcm_iqm_debug_log"><text>Диагностический лог</text></string>
+	<string id="ui_mcm_iqm_debug_log_desc"><text>Писать диагностические строки IQM (проверки видимости, переполнение слотов карточек, воспроизведение звука, координаты слотов) в консоль/лог. Для поиска неисправностей; по умолчанию выключено.</text></string>
+
+</string_table>
