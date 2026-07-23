@@ -78,6 +78,13 @@ local next_scan  = 0
 local smooth_tau = 38.7   -- derived from C.smoothing in read_config (0 = instant)
 local SNAP2      = 260 * 260
 
+-- Render-path config mirrors, refreshed in read_config: these are read per
+-- tracked NPC per frame, so they live in locals instead of hashing into C
+-- each time. appear2 is the squared range gate (compared against
+-- distance_to_sqr, so the out-of-range case never pays the sqrt).
+local appear_d, appear2, full_d = 16, 16 * 16, 9
+local node_min, auto_side, side_amt = 0.5, true, 0.18
+
 local UI_KX       = 1     -- aspect-correction the engine applies to rotated (heading) statics
 local _ui_w       = 0     -- last screen width UI_KX was computed for (recompute only on change)
 local LINE_HALO   = 2     -- px added to the leader line thickness for its dark outline
@@ -151,6 +158,14 @@ local function read_config()
 	local sm = C.smoothing or 0.35
 	if sm >= 1 then smooth_tau = 0 else smooth_tau = -16.67 / math.log(1 - sm) end
 	local sd = C.snap_dist or 260; SNAP2 = sd * sd
+
+	-- refresh the per-frame config mirrors (see their declaration)
+	appear_d  = C.appear_dist or 16
+	appear2   = appear_d * appear_d
+	full_d    = C.full_dist or 9
+	node_min  = C.node_min or 0.5
+	auto_side = C.auto_side and true or false
+	side_amt  = C.side_amt or 0.18
 
 	-- kx = (h/w) / (UI_BASE_HEIGHT/UI_BASE_WIDTH) = (h/w) / (768/1024). The engine
 	-- scales rotated-static X by this; we invert it so the leader line lines up.
@@ -438,8 +453,7 @@ local function scan_ctx()
 	local actor = db.actor
 	_scan_ctx.actor   = actor
 	_scan_ctx.apos    = actor:position()
-	local ad = C.appear_dist or 16
-	_scan_ctx.appear2 = ad * ad
+	_scan_ctx.appear2 = appear2   -- the read_config mirror of C.appear_dist, squared
 	_scan_ctx.friend  = game_object.friend
 	_scan_ctx.actor_comm = char_comm(actor):sub(7)   -- bare community, reused by is_enemy_to_actor
 	return _scan_ctx
@@ -538,20 +552,24 @@ end
 -- when present (they ARE the exact gate: not a lone squad, actor strong enough), else
 -- falls back to axr_companions.can_join_actor. Wrapped whole in pcall; these are
 -- third-party mod functions we call once per candidate.
+-- The predicate body is a named function (not a closure built per call) so the
+-- pcall wrapper allocates nothing per candidate.
+local function npc_recruitable_impl(obj)
+	local irc = individually_recruitable_companions
+	if irc and irc.not_a_one_man_squad then
+		if not irc.not_a_one_man_squad(db.actor, obj) then return false end
+		if irc.get_is_actor_stronger_if_script_is_available
+		   and not irc.get_is_actor_stronger_if_script_is_available(db.actor, obj) then return false end
+		return true
+	end
+	if axr_companions and axr_companions.can_join_actor then
+		return axr_companions.can_join_actor(obj) and true or false
+	end
+	return false
+end
+
 local function npc_recruitable(obj)
-	local ok, res = pcall(function()
-		local irc = individually_recruitable_companions
-		if irc and irc.not_a_one_man_squad then
-			if not irc.not_a_one_man_squad(db.actor, obj) then return false end
-			if irc.get_is_actor_stronger_if_script_is_available
-			   and not irc.get_is_actor_stronger_if_script_is_available(db.actor, obj) then return false end
-			return true
-		end
-		if axr_companions and axr_companions.can_join_actor then
-			return axr_companions.can_join_actor(obj) and true or false
-		end
-		return false
-	end)
+	local ok, res = pcall(npc_recruitable_impl, obj)
 	return ok and res
 end
 
@@ -786,6 +804,28 @@ end
 --   `fallback_pos` is the already-computed anchor (chest/shoulder); the head bone is
 --   fetched here rather than by the caller so that per-frame pcall only happens on the
 --   frames we actually cast (most frames return the cached result and touch nothing).
+-- One geometry_ray is built lazily and reused for every cast: range and flags never
+-- change, and the per-NPC ignore object is retargeted through the underlying engine
+-- ray_pick (gr.ray:set_ignore_object, the same call the wrapper's own constructor
+-- makes; geometry_ray:get reads no other per-call state). That drops the wrapper
+-- table, args table and ray_pick construction from every cast. _los_dir is the
+-- direction scratch, safe to reuse for the same reason _w2u/_sv are.
+local _los_ray = nil
+local _los_dir = vector()
+local function los_cast(obj, pos, dir)
+	local gr = _los_ray
+	if not gr then
+		gr = demonized_geometry_ray.geometry_ray({
+			ray_range = 1000,
+			flags     = 3,     -- 1 Objects + 2 Statics (walls, props)
+		})
+		_los_ray = gr
+	end
+	gr.ray:set_ignore_object(obj)   -- don't let the NPC's own body block the ray
+	local res = gr:get(pos, dir)
+	return res and res.distance
+end
+
 local function has_los(id, obj, fallback_pos, tg)
 	if not C.los_check then
 		if DEBUG then printf("[IQM-LOS] id=%s SHOW: los_check is OFF", id) end
@@ -802,28 +842,21 @@ local function has_los(id, obj, fallback_pos, tg)
 	-- Sample the head (usually visible) rather than the chest anchor, which often sits
 	-- behind waist-high cover and would falsely hide a plainly-visible NPC. Only reached
 	-- on a cast frame, so the pcall/bone lookup cost is paid at los_rate, not every frame.
+	-- bone_position returns a fresh vector, and nothing below mutates pos, so it's used
+	-- directly (no defensive copy).
 	local pos = fallback_pos
 	local okp, hp = pcall(obj.bone_position, obj, "bip01_head")
-	if okp and hp then pos = vector():set(hp) end
+	if okp and hp then pos = hp end
 	local cam  = device().cam_pos
 	local dist = pos:distance_to(cam)
-	local dir  = vector():set(cam):sub(pos):normalize()
+	local dir  = _los_dir:set(cam):sub(pos):normalize()
 
 	-- Cast from the NPC anchor toward the camera. A large range (as Catspaw's marker LOS
 	-- uses) makes a clear shot report a hit well BEYOND the NPC (or nothing), while a wall
 	-- in between reports a hit noticeably CLOSER than the NPC. Wrapped in pcall so a ray
 	-- failure can't silently leave the card showing through walls.
-	local hit
-	local ok = pcall(function()
-		local ray = demonized_geometry_ray.geometry_ray({
-			ray_range     = 1000,
-			ignore_object = obj,   -- don't let the NPC's own body block the ray
-			flags         = 3,     -- 1 Objects + 2 Statics (walls, props)
-		})
-		local res = ray and ray:get(pos, dir)
-		if res then hit = res.distance end
-	end)
-	if hit == nil then hit = 1000 end       -- no hit / ray failed => treat as clear
+	local ok, hit = pcall(los_cast, obj, pos, dir)
+	if not ok or hit == nil then hit = 1000 end   -- no hit / ray failed => treat as clear
 	local clear = (dist - hit) < 0.5        -- occluded if something's hit closer than the sample point
 
 	if DEBUG then
@@ -876,18 +909,17 @@ end
 --   alpha_for_dist: solid within full_dist, fading to 0 at appear_dist, gone beyond.
 --   node_scale_for_dist: node_min of full size at appear_dist, growing to 1 within full_dist.
 local function alpha_for_dist(d)
-	if d <= C.full_dist then return 255 end
-	if d >= C.appear_dist then return 0 end
-	local span = max(0.1, C.appear_dist - C.full_dist)
-	return floor(((C.appear_dist - d) / span) * 255)
+	if d <= full_d then return 255 end
+	if d >= appear_d then return 0 end
+	local span = max(0.1, appear_d - full_d)
+	return floor(((appear_d - d) / span) * 255)
 end
 
 local function node_scale_for_dist(d)
-	local nmin = C.node_min or 0.5
-	if d <= C.full_dist then return 1 end
-	if d >= C.appear_dist then return nmin end
-	local span = max(0.1, C.appear_dist - C.full_dist)
-	return nmin + (1 - nmin) * ((C.appear_dist - d) / span)
+	if d <= full_d then return 1 end
+	if d >= appear_d then return node_min end
+	local span = max(0.1, appear_d - full_d)
+	return node_min + (1 - node_min) * ((appear_d - d) / span)
 end
 
 -- Header text is fixed per role, so translate once and cache (game.translate_string is a
@@ -1065,17 +1097,21 @@ local function render(tg)
 		local obj = get_obj(id)
 		local hx, hy, vis, dist
 		if obj and obj:alive() then
-			dist = obj:position():distance_to(apos)   -- one distance, shared by fade + node size
 			-- Beyond appear_dist the card's alpha is 0 anyway (alpha_for_dist), so an
 			-- out-of-range tracked NPC (e.g. a quest target far across the map) would only
 			-- produce an invisible card. Skip the anchor / shoulder / projection / LOS work
-			-- entirely for it; it resumes the moment the NPC comes back within range.
-			if dist < C.appear_dist then
+			-- entirely for it; it resumes the moment the NPC comes back within range. The
+			-- gate compares squared distances, so the (common) out-of-range case never
+			-- pays the sqrt; the real distance (shared by fade + node size) is only taken
+			-- once in range.
+			local d2 = obj:position():distance_to_sqr(apos)
+			if d2 < appear2 then
+				dist = sqrt(d2)
 				local wpos, rux, ruz = anchor_world_pos(obj)
 				-- auto shoulder side: recompute which shoulder only every SIDE_RATE ms (two extra
 				-- projections) and reuse the sign in between; then offset the anchor onto it in place.
-				local amt = C.side_amt or 0.18
-				if C.auto_side and amt > 0 and not (rux == 0 and ruz == 0) then
+				local amt = side_amt
+				if auto_side and amt > 0 and not (rux == 0 and ruz == 0) then
 					if f.side_sign == nil or tg >= (f.side_next or 0) then
 						f.side_sign = shoulder_sign(wpos, rux, ruz, amt)
 						f.side_next = tg + SIDE_RATE
@@ -1182,6 +1218,11 @@ end
 function IqmCards:hide_slot(i)
 	local s = self.slots[i]
 	if not s then return end
+	-- Tracked-but-invisible cards (out of range / occluded / PDA open) hit this
+	-- every frame; once hidden, the 13 Show(false) calls below are pure waste, so
+	-- they're skipped until draw_slot shows the slot again.
+	if s.hidden then return end
+	s.hidden = true
 	s.shadow:Show(false)
 	s.plate:Show(false)
 	s.chip:Show(false)
@@ -1200,6 +1241,7 @@ end
 function IqmCards:draw_slot(i, hx, hy, header, name, a, cfg, nscale, lift, icon, chip, cr, cg, cb, icon_tinted, tg)
 	local s = self.slots[i]
 	if not s then return end
+	s.hidden = false
 	a = floor(a)
 	if a > 255 then a = 255 end
 	nscale = nscale or 1
