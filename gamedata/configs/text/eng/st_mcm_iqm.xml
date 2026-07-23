@@ -19,6 +19,26 @@
 	<string id="st_iqm_hdr_barman"><text>BARKEEP</text></string>
 	<string id="st_iqm_hdr_medic"><text>MEDIC</text></string>
 	<string id="st_iqm_hdr_important"><text>VIP</text></string>
+	<string id="st_iqm_hdr_work"><text>HIRING</text></string>
+	<!-- Job-kind refinements for the HIRING card, classified from the offered
+	     task's status_functor (see iqm_taskwork.classify). Unclassified offers
+	     fall back to the plain header above. -->
+	<string id="st_iqm_hdr_work_fetch"><text>HIRING: SUPPLIES</text></string>
+	<string id="st_iqm_hdr_work_hunt"><text>HIRING: MUTANT HUNT</text></string>
+	<string id="st_iqm_hdr_work_assault"><text>HIRING: ASSAULT</text></string>
+	<string id="st_iqm_hdr_work_bounty"><text>HIRING: BOUNTY</text></string>
+	<string id="st_iqm_hdr_work_rescue"><text>HIRING: RESCUE</text></string>
+	<string id="st_iqm_hdr_work_courier"><text>HIRING: DELIVERY</text></string>
+	<string id="st_iqm_hdr_work_artifact"><text>HIRING: ARTIFACT</text></string>
+	<string id="st_iqm_hdr_work_escort"><text>HIRING: ESCORT</text></string>
+	<string id="st_iqm_hdr_work_repairs"><text>HIRING: TOOLS</text></string>
+	<string id="st_iqm_hdr_work_gear"><text>HIRING: GEAR</text></string>
+	<string id="st_iqm_hdr_work_parts"><text>HIRING: MUTANT PARTS</text></string>
+	<string id="st_iqm_hdr_work_patches"><text>HIRING: PATCHES</text></string>
+	<string id="st_iqm_hdr_work_recover"><text>HIRING: RECOVERY</text></string>
+	<string id="st_iqm_hdr_work_money"><text>HIRING: FUNDS</text></string>
+	<string id="st_iqm_hdr_work_survey"><text>HIRING: SURVEY</text></string>
+	<string id="st_iqm_hdr_work_special"><text>HIRING: SPECIAL</text></string>
 
 	<string id="ui_mcm_iqm_enabled"><text>Enable markers</text></string>
 	<string id="ui_mcm_iqm_enabled_desc"><text>Master on/off switch for the floating quest marker cards.</text></string>
@@ -40,6 +60,9 @@
 
 	<string id="ui_mcm_iqm_mark_important"><text>Card important characters</text></string>
 	<string id="ui_mcm_iqm_mark_important_desc"><text>Show a card ("VIP" plus a star glyph) over story and faction important characters, the ones your PDA marks with the Important Character or quest-NPC icon. The Service card style option below can switch it to an icon-only chip or plain text. Off by default, since busy hubs already show plenty of cards.</text></string>
+
+	<string id="ui_mcm_iqm_mark_work"><text>Card NPCs with work available (Experimental)</text></string>
+	<string id="ui_mcm_iqm_mark_work_desc"><text>EXPERIMENTAL: this option queries the game's task system, a heavy lookup the base game only runs when a dialogue or the PDA taskboard opens. The checks are cached and strictly rationed, but if you notice stutter around camps, turn this off. Shows a card ("HIRING", plus the job kind when known, such as "HIRING: BOUNTY" or "HIRING: MUTANT HUNT") over any friendly stalker who would actually offer you a task if you asked. The card matches the dialogue exactly: no card means "Nothing at the moment", a card means a job is on offer. It also hides while you already hold the maximum number of tasks from that NPC. Answers come from the task system's own per-NPC memory (refreshed every 1.5 in-game hours); NPCs not yet in it are checked one at a time on a slow budget (see "Actively check for work" on the Advanced tab).</text></string>
 
 	<string id="ui_mcm_iqm_faction_colors"><text>Use faction colours</text></string>
 	<string id="ui_mcm_iqm_faction_colors_desc"><text>Tint each card (the leader line, edge bar, header text and head node) with the NPC's faction colour instead of the default gold accent. Colours match the faction palette used by the GAMMA DB site. NPCs of a factionless community (e.g. zombies, monsters) keep the gold accent.</text></string>
@@ -130,6 +153,9 @@
 	<string id="ui_mcm_iqm_col_g_desc"><text>Green component of the accent colour (0-255).</text></string>
 	<string id="ui_mcm_iqm_col_b"><text>Accent colour: blue</text></string>
 	<string id="ui_mcm_iqm_col_b_desc"><text>Blue component of the accent colour (0-255). Defaults give a soft desaturated gold (224, 196, 122).</text></string>
+
+	<string id="ui_mcm_iqm_work_probe"><text>Actively check for work</text></string>
+	<string id="ui_mcm_iqm_work_probe_desc"><text>Let the work detector query the task system for NPCs it hasn't seen an answer for yet (at most one NPC every 0.3 s, nearest first). This does exactly what opening the NPC's dialogue does, including rolling whether they have a task this cycle, just a little earlier: their offered task is decided when the card appears rather than when you talk. Turn off to make the detector purely passive. Cards then only appear for NPCs whose work status the game has already determined, e.g. you talked to them within the last 1.5 in-game hours, or the PDA job scan covered them.</text></string>
 
 	<string id="ui_mcm_iqm_debug_log"><text>Diagnostic logging</text></string>
 	<string id="ui_mcm_iqm_debug_log_desc"><text>Write IQM diagnostic lines (line-of-sight checks, card-slot overflow, sound playback, per-slot coords) to the console/log. For troubleshooting; off by default.</text></string>

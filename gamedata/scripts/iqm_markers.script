@@ -16,8 +16,12 @@ DEFAULTS = {
 	mark_guiders = true,   -- card guide NPCs (the fast-travel service, PDA "Guide" icon)
 	mark_traders = true,   -- card service NPCs: traders / technicians / barkeeps / medics
 	mark_important = false, -- card story/faction important characters (PDA "Important Character"); off by default (hubs get busy)
+	mark_work    = false,  -- EXPERIMENTAL, off by default: card NPCs with a task to give right now ("HIRING", plus the job kind when known).
+	                       -- The one role not read from a cheap engine registry: it queries the task system itself
+	                       -- (heavy; cached + rationed in iqm_taskwork.script, but a perf impact can't be ruled out on every setup)
+	work_probe   = true,   -- actively check unvisited NPCs for work (rationed; same effect as opening their dialog). Advanced tab.
 	faction_colors = true,  -- tint each card (accent/line/node/glow/header) with the NPC's faction colour instead of the gold accent
-	faction_icons  = true,  -- show the NPC's faction emblem on state cards (turn-in / guide / companion); ambient cards keep their role glyph
+	faction_icons  = true,  -- show the NPC's faction emblem on state cards (turn-in / guide / companion) and hiring cards; other ambient cards keep their role glyph
 	short_ranks  = true,   -- abbreviate a leading military rank in the NPC's name ("Senior Sergeant Ivanov" -> "Snr Sgt Ivanov")
 	show_node    = true,   -- draw the little dot at the head where the line starts
 	node_pulse   = true,   -- gently breathe the node's glow halo to draw the eye
@@ -61,7 +65,7 @@ DEFAULTS = {
 CORE_KEYS = {
 	enabled = true, mark_targets = true, mark_guides = true,
 	mark_companions = true, mark_guiders = true,
-	mark_traders = true, mark_important = true,
+	mark_traders = true, mark_important = true, mark_work = true,
 	faction_colors = true, faction_icons = true,
 	appear_dist = true, los_check = true, sound_alert = true,
 }
@@ -98,6 +102,10 @@ local GetARGB, time_global, get_obj = GetARGB, time_global, nil  -- get_obj boun
 -- on_game_start alongside get_obj, since these script/engine globals aren't all
 -- guaranteed to exist when this file is first parsed.
 local map_has_spot, char_comm, factions_enemies = nil, nil, nil
+-- iqm_taskwork entry points (has_work per scanned NPC, probe_tick per frame,
+-- work_kind per work card per update), bound in on_game_start like the rest
+-- so a missing module just no-ops.
+local tw_has_work, tw_tick, tw_kind = nil, nil, nil
 
 -- Reusable scratch vector2s: SetWndPos/SetWndSize consume their argument immediately, so
 -- one pair per purpose can be :set() and handed over instead of allocating a fresh vector2
@@ -150,6 +158,11 @@ local function read_config()
 	local w = dev and dev.width or 0
 	local h = dev and dev.height or 0
 	UI_KX = (w > 0 and h > 0) and ((h / w) / (768 / 1024)) or 1
+
+	-- push the work-detector's knobs (it keeps no config of its own)
+	if iqm_taskwork and iqm_taskwork.configure then
+		iqm_taskwork.configure(C.work_probe, C.appear_dist, DEBUG)
+	end
 end
 
 -- --------------------------------------------------------------------------
@@ -163,7 +176,8 @@ local ROLE_PRIO = {
 	target = 1,                           -- the current objective NPC (turn-in / talk-to / delivery)
 	guide  = 2,                           -- the "Need a guide?" job offer
 	companion = 3,                        -- recruitable right now
-	guider = 4, trader = 4, mechanic = 4, barman = 4, medic = 4, important = 4,
+	work   = 4,                           -- has a task to give right now (iqm_taskwork)
+	guider = 5, trader = 5, mechanic = 5, barman = 5, medic = 5, important = 5,
 }
 local CHIRP_ROLES = { target = true, guide = true, companion = true }
 
@@ -174,11 +188,15 @@ local function want(desired, id, role)
 	desired[id] = role
 end
 
--- Slot-claim order: lower ROLE_PRIO first, stable id tiebreak. Module-level (not a
--- per-scan closure) so table.sort doesn't allocate a new function each scan.
+-- Slot-claim order: lower ROLE_PRIO first, then nearer NPCs first (in ~4 m bands,
+-- so ordinary drift doesn't reshuffle the carded set every scan), stable id
+-- tiebreak. Distance matters now that mark_work can produce more candidates than
+-- card slots in a busy camp. Module-level (not a per-scan closure) so table.sort
+-- doesn't allocate a new function each scan.
 local function slot_order_cmp(a, b)
 	local pa, pb = ROLE_PRIO[a.role] or 9, ROLE_PRIO[b.role] or 9
 	if pa ~= pb then return pa < pb end
+	if a.band ~= b.band then return a.band < b.band end
 	return a.id < b.id
 end
 
@@ -719,20 +737,36 @@ local function extras_scan_one(id, ctx)
 		-- (service_role) and prefer it, gated by that role's own option. service_role
 		-- resolves the exact type (incl. the mechanic/barman/medic split), so it's used
 		-- directly. A genuine service spot (role set and not "important") keeps the fast
-		-- path below unchanged.
+		-- path unchanged. The role is resolved even when its card option is off (`out`
+		-- carries the gated result) because the work check below needs to know a
+		-- technician when it sees one, option or no option.
+		local out, mech
 		if role == nil or role == "important" then
 			local sr = service_role(obj, cls)
-			if sr and C[SERVICE_OPT[sr]] then return sr end
+			if sr then
+				mech = (sr == "mechanic")
+				if C[SERVICE_OPT[sr]] then out = sr end
+			end
 		end
-		if role and C[opt] then
-			return (role == "trader") and refine_trader(id, obj) or role
+		if out == nil and role then
+			local r = (role == "trader") and refine_trader(id, obj) or role
+			mech = mech or (r == "mechanic")
+			if C[opt] then out = r end
 		end
+		-- "Has a task to give right now" outranks the ambient service/VIP card (you can
+		-- see WHO the NPC is any time; that they have work for you is the actionable
+		-- fact). iqm_taskwork answers from the engine's own per-NPC verdict cache and
+		-- rations the expensive cold checks; see that file for the full story.
+		if C.mark_work and tw_has_work and tw_has_work(id, obj, mech) then
+			return "work"
+		end
+		return out
 	end
 end
 
 -- Once-per-pass gate: skip the whole scan when every role option is off.
 local function extras_enabled()
-	return C.mark_guiders or C.mark_traders or C.mark_important
+	return C.mark_guiders or C.mark_traders or C.mark_important or C.mark_work
 end
 
 local extras_scanner = make_scanner(EXTRA_SCAN, extras_scan_one, extras_enabled)
@@ -862,12 +896,30 @@ local HDR_KEYS = {
 	target = "st_iqm_hdr_target",  guide  = "st_iqm_hdr_guide",   companion = "st_iqm_hdr_companion",
 	guider = "st_iqm_hdr_guider",  trader = "st_iqm_hdr_trader", mechanic = "st_iqm_hdr_mechanic",
 	barman = "st_iqm_hdr_barman",  medic = "st_iqm_hdr_medic",   important = "st_iqm_hdr_important",
+	work   = "st_iqm_hdr_work",
 }
-local function header_for(role)
-	local h = _hdr_cache[role]
+-- "work" cards refine the plain HIRING header with the classified job kind
+-- (iqm_taskwork.work_kind, read per entry in update()). Unlisted kinds fall
+-- back to the plain header.
+local WORK_HDR = {
+	fetch   = "st_iqm_hdr_work_fetch",   hunt    = "st_iqm_hdr_work_hunt",
+	assault = "st_iqm_hdr_work_assault", bounty  = "st_iqm_hdr_work_bounty",
+	rescue  = "st_iqm_hdr_work_rescue",  courier = "st_iqm_hdr_work_courier",
+	artifact = "st_iqm_hdr_work_artifact", escort = "st_iqm_hdr_work_escort",
+	repairs = "st_iqm_hdr_work_repairs",
+	gear    = "st_iqm_hdr_work_gear",    parts   = "st_iqm_hdr_work_parts",
+	patches = "st_iqm_hdr_work_patches", recover = "st_iqm_hdr_work_recover",
+	money   = "st_iqm_hdr_work_money",   survey  = "st_iqm_hdr_work_survey",
+	special = "st_iqm_hdr_work_special",
+}
+-- `key` overrides the role's default header string id (work-kind refinement);
+-- translations cache by string id either way.
+local function header_for(role, key)
+	key = key or HDR_KEYS[role] or "st_iqm_hdr_target"
+	local h = _hdr_cache[key]
 	if not h then
-		h = game.translate_string(HDR_KEYS[role] or "st_iqm_hdr_target")
-		_hdr_cache[role] = h
+		h = game.translate_string(key)
+		_hdr_cache[key] = h
 	end
 	return h
 end
@@ -878,6 +930,7 @@ local ROLE_ICONS = {
 	trader = "iqm_role_trader", mechanic = "iqm_role_mechanic",
 	barman = "iqm_role_barman", medic    = "iqm_role_medic",
 	guider = "iqm_role_guide",  important = "iqm_role_important",
+	work   = "iqm_role_work",
 }
 local function icon_for(role)
 	if (C.role_style or 1) == 0 then return end   -- text-only style
@@ -1069,7 +1122,7 @@ local function render(tg)
 			if not t.name then t.name = name_from_obj(obj) end   -- name is stable: resolve once per NPC
 			local rx, ry = smooth_point(id, hx, hy, tg)
 			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
-			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role), t.name, f.a, C, node_scale_for_dist(dist), lift,
+			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role, t.hkey), t.name, f.a, C, node_scale_for_dist(dist), lift,
 			                t.icon, t.chip, t.cr, t.cg, t.cb, t.icon_tinted, tg)
 		end
 	end
@@ -1407,7 +1460,7 @@ end
 local DBG_ROLES = {
 	target = true, guide = true, companion = true,
 	guider = true, trader = true, mechanic = true, barman = true,
-	medic = true, important = true,
+	medic = true, important = true, work = true,
 }
 
 function debug_card(role)
@@ -1467,7 +1520,12 @@ local function inject_f7_actions()
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide NPC",    functor = { debug_card, "guider" },    hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Trader",       functor = { debug_card_service },      hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Important",    functor = { debug_card, "important" }, hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Has-Work",     functor = { debug_card, "work" },      hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Clear Pinned Cards",   functor = { debug_clear },             hide_ui = 2 })
+	-- taskwork cache/queue snapshot, for checking what the work detector believes
+	ui_debug_launcher.inject("target", { name = "IQM: Task-Work Dump", hide_ui = 0, functor = { function()
+		if iqm_taskwork and iqm_taskwork.debug_dump then iqm_taskwork.debug_dump(dbg_out) end
+	end } })
 end
 
 -- --------------------------------------------------------------------------
@@ -1506,11 +1564,28 @@ local function update()
 	end
 
 	-- objectives claim card slots first, ambient roles last: claim in ROLE_PRIO
-	-- order (stable id tiebreak) so a full slate of objectives is never crowded
-	-- out by nearby recruitables or service NPCs.
+	-- order, nearest first within a priority (banded; see slot_order_cmp), so a
+	-- full slate of objectives is never crowded out by nearby recruitables or
+	-- service NPCs, and a saturated camp cards the closest work-havers.
 	local order = {}
-	for id, role in pairs(desired) do order[#order + 1] = { id = id, role = role } end
+	local apos = db.actor:position()
+	for id, role in pairs(desired) do
+		local obj  = get_obj(id)
+		local band = obj and floor(sqrt(obj:position():distance_to_sqr(apos)) * 0.25) or 999
+		order[#order + 1] = { id = id, role = role, band = band, obj = obj }
+	end
 	table.sort(order, slot_order_cmp)
+	-- Only the top MAX_CARDS ranked are entitled to a slot. Without this, an
+	-- already-tracked ambient card kept its slot while a better-ranked newcomer
+	-- (even a fresh quest target) was skipped; mark_work makes saturation common
+	-- enough that below-the-line entries must yield their slots first.
+	for i = MAX_CARDS + 1, #order do
+		local id = order[i].id
+		if tracked[id] then remove_entry(id) end
+	end
+	if #order > MAX_CARDS then
+		for i = #order, MAX_CARDS + 1, -1 do order[i] = nil end
+	end
 	-- resolve the glyph + chip flag once here (role is stable for a tracked entry's
 	-- life), so the per-frame render() path reads a field instead of recomputing.
 	for _, e in ipairs(order) do
@@ -1522,13 +1597,17 @@ local function update()
 			t.chip        = (C.role_style or 1) == 2
 			t.icon_tinted = true                       -- role glyphs tint to the accent colour
 
+			-- work cards refine HIRING with the job kind. Re-read each pass (unlike the
+			-- role, the pinned task and with it the kind can change when the verdict
+			-- refreshes); nil for other roles and for unclassified offers.
+			t.hkey = (e.role == "work" and tw_kind) and WORK_HDR[tw_kind(e.id)] or nil
+
 			-- Faction lookup, resolved once per NPC (community is stable for its life)
 			-- and cached on the entry, so the per-frame draw path stays lookup-free. The
 			-- tracked set is wiped on any option change (clear_all), so toggling either
 			-- faction option re-resolves cleanly.
 			if (C.faction_colors or C.faction_icons) and t.fcomm == nil then
-				local obj = get_obj(e.id)
-				t.fcomm = (obj and char_comm(obj)) or false
+				t.fcomm = (e.obj and char_comm(e.obj)) or false
 			end
 			local frgb = t.fcomm and FACTION_RGB[t.fcomm]
 
@@ -1539,10 +1618,12 @@ local function update()
 				t.cr, t.cg, t.cb = C.col_r, C.col_g, C.col_b
 			end
 
-			-- faction_icons: only on STATE cards (no role glyph there). The emblem carries
-			-- its own colours, so it's drawn untinted; and it stays a full text card (never
-			-- an icon-only chip, which would hide the objective NPC's name).
-			if C.faction_icons and not ricon and t.fcomm then
+			-- faction_icons: on STATE cards (no role glyph there) and on work cards,
+			-- where WHO is hiring beats the generic briefcase (the header already says
+			-- it's work; the glyph stays as the fallback when no emblem exists). The
+			-- emblem carries its own colours, so it's drawn untinted; and it stays a
+			-- full text card (never an icon-only chip, which would hide the NPC's name).
+			if C.faction_icons and (not ricon or e.role == "work") and t.fcomm then
 				local ftex = FACTION_TEX[t.fcomm]
 				if ftex then t.icon = ftex; t.icon_tinted = false; t.chip = false end
 			end
@@ -1571,6 +1652,13 @@ local function actor_on_update()
 	if C.enabled then
 		if scanner_tick(companion_scanner, tg) then next_scan = 0 end
 		if scanner_tick(extras_scanner, tg)    then next_scan = 0 end
+		-- cold task-probes prefer frames where neither scanner is mid-pass (so the
+		-- budgeted costs don't stack), but the module fires an overdue probe on a
+		-- busy frame anyway: a hard idle-frames-only rule starves the queue when
+		-- db.storage is large enough that scan passes tile the frames.
+		if tw_tick then
+			tw_tick(tg, companion_scanner.ids == nil and extras_scanner.ids == nil)
+		end
 	end
 	if tg >= next_scan then
 		next_scan = tg + SCAN_INTERVAL
@@ -1588,6 +1676,7 @@ function on_option_change()
 	next_scan = 0
 	scanner_reset(companion_scanner)   -- rescan from scratch so toggles apply without the throttle lag
 	scanner_reset(extras_scanner)
+	if iqm_taskwork and iqm_taskwork.reset then iqm_taskwork.reset() end
 end
 
 function on_game_start()
@@ -1595,6 +1684,9 @@ function on_game_start()
 	map_has_spot = level.map_has_object_spot     -- per-NPC in spot_role (extras scan)
 	char_comm    = character_community           -- per-NPC in is_enemy_to_actor
 	factions_enemies = game_relations.is_factions_enemies
+	if iqm_taskwork then                         -- work detection (soft: absent module just means no work cards)
+		tw_has_work, tw_tick, tw_kind = iqm_taskwork.has_work, iqm_taskwork.probe_tick, iqm_taskwork.work_kind
+	end
 	read_config()
 	inject_f7_actions()            -- add the pin actions to the F7 debugger's Target tab
 	RegisterScriptCallback("actor_on_update", actor_on_update)

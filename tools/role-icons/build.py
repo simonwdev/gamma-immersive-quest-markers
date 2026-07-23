@@ -24,7 +24,7 @@ OUT_DDS = os.path.normpath(os.path.join(
     HERE, "..", "..", "gamedata", "textures", "ui", "iqm_roles.dds"))
 
 # grid cell order (row-major). Matches iqm_role_<name> texture ids.
-SRCS = ["trader", "mechanic", "barman", "medic", "guide", "important"]
+SRCS = ["trader", "mechanic", "barman", "medic", "guide", "important", "work"]
 CELL, COLS, ROWS, TARGET = 128, 4, 2, 98
 W, H = CELL * COLS, CELL * ROWS
 

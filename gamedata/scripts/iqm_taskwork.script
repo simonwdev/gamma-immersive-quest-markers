@@ -1,0 +1,627 @@
+-- ======================================================================
+--  Immersive Quest Markers: "work available" (task giver) detection
+-- ======================================================================
+-- EXPERIMENTAL. Unlike every other IQM role (read from cheap engine
+-- registries), this one queries the task system itself: the heavy lookup
+-- the base game only runs at dialog / PDA-taskboard time. Everything below
+-- exists to contain that cost (caches, free rides, a rationed probe
+-- queue), but a performance impact can't be ruled out on every setup;
+-- the mark_work MCM option is labelled Experimental for that reason, and
+-- turning it off disables all of this.
+--
+-- Answers "would this NPC's dialog offer me a task right now?" cheaply
+-- enough to drive world markers (the mark_work role in iqm_markers).
+--
+-- The authoritative source is axr_task_manager.get_first_available_task,
+-- the exact function the task dialogs call. Cold, it is EXPENSIVE: it
+-- walks every task section in the game (1000+ in GAMMA) and parses +
+-- evaluates a precondition condlist per candidate, which is why the base
+-- game only ever calls it at dialog / PDA-taskboard time. But it caches
+-- its verdict per NPC in actor pstor (drx_sl_npc_stored_task_<id> and
+-- ..._time_<id>) with a 5400 game-second freshness window, and consults
+-- that cache before scanning. This module splits along that line:
+--
+-- GAMMA CAVEAT: the Tasks QoL Pack replaces get_first_available_task with
+-- a monkey whose COLD path is broken (bare CFG_CACHE/skipped_tasks reads
+-- resolve nil in the monkey file's namespace, so any call that reaches the
+-- task walk throws). Nothing in GAMMA notices because work offers flow
+-- through the PDA taskboard (generate_available_tasks + the dyn_quest_rand
+-- pin) instead of the dialog cache. So the cold probe carries two vehicles:
+-- the dialog call for setups where it works, and the taskboard generator as
+-- the fallback the first time the dialog call throws (see probe()).
+--
+--   * WARM (the NPC was checked < 1.5 game-hours ago, by us or by any
+--     dialog): two pstor reads answer the question read-only. Only the
+--     stored task's own precondition is re-evaluated (one condlist), on
+--     a slow per-NPC throttle, so a task whose conditions lapse drops
+--     its marker without a rescan.
+--   * COLD (never checked / stale): the id goes on a probe queue that
+--     runs the real call for ONE NPC at a time, nearest first, on an
+--     adaptive interval (each probe is timed; spacing = avg cost x
+--     PROBE_BUDGET, clamped to [PROBE_INTERVAL, PROBE_MAX]), so the cost
+--     trickles out instead of landing as a burst and self-limits to ~2%
+--     of wall time even where one probe is expensive. The
+--     call itself then warms the engine's own cache for the next 1.5
+--     game-hours, so steady state issues ~no probes at all.
+--
+-- Probing is the same thing opening the NPC's dialog would do (roll the
+-- 25% no-task dice, pin the offered task in pstor), just slightly
+-- earlier, so the marker matches the dialog EXACTLY by construction.
+-- The "active checking" MCM toggle (work_probe) disables cold probes
+-- for purists who don't want tasks pre-rolled: warm reads still work,
+-- so NPCs the player has actually talked to keep live markers.
+--
+-- Consumed by iqm_markers (extras scan -> has_work, per-frame ->
+-- probe_tick, read_config -> configure, on_option_change -> reset).
+-- Public and self-contained on purpose, Catspaw-taskmonitor style, so
+-- other mods can read has_work too. Soft dependencies throughout: every
+-- entry point no-ops if the task system isn't around.
+
+local FRESH_SECS     = 5400   -- game-seconds the engine's stored-task verdict stays valid (axr_task_manager's own window)
+local PROBE_INTERVAL = 311    -- ms FLOOR between cold probes (one full task-table scan each, so strictly rationed).
+                              -- Deliberately odd so it drifts across the scanners' 2000/3000 ms cadences
+                              -- instead of beating with them (the Catspaw-taskmonitor trick).
+local PROBE_MAX      = 3000   -- ms ceiling for the adaptive spacing (see probe_tick)
+local PROBE_BUDGET   = 50     -- next delay = avg probe cost x this. The knob is a budget statement:
+                              -- probing may cost at most ~1/50th (~2%) of wall time on ANY setup; a probe
+                              -- that takes 20ms on a weak CPU spaces itself to 1000ms instead of stuttering
+                              -- at the floor rate. Fast setups never leave the floor (6ms x 50 < 311).
+local REVAL_MS       = 10000  -- ms between re-evaluations of a stored task's precondition condlist, per NPC
+
+-- Hot globals localised (has_work runs per scanned NPC; probe_tick every frame;
+-- starts_with runs once per task section, 1000+ of them, on every cold variant decision).
+local pairs, tostring = pairs, tostring
+local time_global     = time_global
+local starts_with     = starts_with
+local os_clock        = os.clock
+local get_obj         = nil    -- level.object_by_id, bound on the first queue drain (level.* isn't ready at parse time)
+
+local DEBUG    = false
+local probing  = true    -- mirrors MCM work_probe ("active checking")
+local max_d2   = 16 * 16 -- probe range gate, mirrors appear_dist (squared)
+
+local state    = {}      -- [id] = { work, kind, prereq_ok/val_next/val_for, tb_ok/tb_next/tb_for,
+                         --          mech/mech_time, kt/kv (cached pstor key strings) }
+local queue    = {}      -- ids awaiting a cold probe (array; popped nearest-first)
+local queued   = {}      -- [id] = mech flag (dedupe + "also check mechanic tasks")
+local ordered  = {}      -- [id] = { use = bool, pfx = "<prefix>" } probe-variant decision (see use_ordered)
+local next_probe = 0
+local probe_cost = nil   -- EMA of recent probe costs in ms; drives the adaptive spacing (see probe_tick)
+
+local _pr = { false }    -- scratch arg for has_completed_task_prerequisites (reads p[1] only)
+
+-- has_work runs once per scanned NPC per pass, so per-call constants are
+-- memoized here: the task-manager singleton (stable for the VM's life), and
+-- the game-time CTime keyed to the time_global ms, so at most one userdata is
+-- allocated per frame slice instead of one per NPC.
+local tm = nil
+local gt_memo, gt_for = nil, -1
+
+local function dbg(fmt, ...)
+	if DEBUG then printf("[IQM-WORK] " .. fmt, ...) end
+end
+
+-- The task system is a soft dependency: everything no-ops without it. Script
+-- modules can't appear or vanish mid-session, so the first verdict is memoized
+-- (has_work runs per scanned NPC; six global checks each time would be waste).
+local sys_ok = nil
+
+-- Latched true the first time get_first_available_task throws (the broken
+-- GAMMA monkey; see the header). From then on probes use the taskboard
+-- generator instead. A fact about the loaded scripts, so it survives reset().
+local gfat_dead = false
+
+local function task_system_ok()
+	if sys_ok == nil then
+		sys_ok = (axr_task_manager ~= nil
+		   and axr_task_manager.get_first_available_task ~= nil
+		   and task_manager ~= nil and task_manager.get_task_manager ~= nil
+		   and xr_conditions ~= nil and xr_conditions.has_completed_task_prerequisites ~= nil)
+		   and true or false
+	end
+	return sys_ok
+end
+
+-- --------------------------------------------------------------------------
+-- Probe-variant decision (ordered vs sim)
+-- --------------------------------------------------------------------------
+-- get_first_available_task has two dialog-facing variants sharing ONE pstor
+-- slot per NPC: "ordered" (is_sim=nil; dedicated task families, i.e. logic
+-- task_section or sections named after the NPC) and "sim" (is_sim=true; the
+-- generic simulation_task_ pool every stalker draws from, filtered by
+-- sim_communities). Probing the WRONG variant can store a wrong nil verdict
+-- and suppress the NPC's real dialog offer for 1.5 game-hours, so this must
+-- mirror which variant the NPC's own dialog would run: derive the ordered
+-- prefix exactly as the game does (axr_task_manager.script get_first_available_task),
+-- and use the ordered variant only when at least one task section actually
+-- carries it (a cheap walk of the section names; no ini reads, no condlists).
+-- The decision (and the prefix, reused by the task-limit check) is cached
+-- per id: a dedicated task family is a fact of the NPC's setup, not state.
+local function use_ordered(id, obj)
+	local o = ordered[id]
+	if o then return o.use, o.pfx end
+
+	local sec
+	local st = db.storage[id]
+	if st and st.ini and st.section_logic then
+		sec = st.ini:r_string_ex(st.section_logic, "task_section")
+		if sec then sec = sec .. "_task_" end
+	end
+	if not sec then
+		local nsec = obj:section()
+		sec = (nsec ~= "m_trader") and (nsec .. "_task_") or (obj:name() .. "_task_")
+	end
+
+	local use = false
+	local cache = axr_task_manager.CFG_CACHE
+	if cache then
+		for task_id in pairs(cache) do
+			if starts_with(task_id, sec) then use = true; break end
+		end
+	end
+	o = { use = use, pfx = sec }
+	ordered[id] = o
+	if DEBUG then   -- gate here so the tostring arg isn't evaluated when logging is off
+		dbg("variant id=%s prefix=%s ordered=%s", id, sec, tostring(use))
+	end
+	return use, sec
+end
+
+-- --------------------------------------------------------------------------
+-- Job-kind classification
+-- --------------------------------------------------------------------------
+-- A positive verdict always traces to a concrete task section (the stored /
+-- taskboard-pinned id), and the section's status_functor names the job's
+-- mechanics: actor_has_fetch_item is a fetch job, bounty_task a hit,
+-- hostage_task a rescue, and the assault/bounty functors carry
+-- status_functor_params that say whether the targets are mutants or humans.
+-- Generic fetch jobs split further by the fetch_func category argument
+-- (setup_fetch_task(<pstor>:<category>:<min>:<max>)): artefacts, mutant
+-- parts/meat/hides, faction patches, weapons/kits/utility gear, or plain
+-- provisions. That lets the card advertise WHAT kind of work, not just that
+-- there is some. Two-three ini reads per task id, once ever (sections are
+-- static); unknown shapes classify to nil and the card falls back to the
+-- plain header.
+local kinds = {}   -- [task_id] = kind string, or false = classified as "no specific kind"
+
+-- setup_fetch_task category -> kind. Second colon-field of the fetch_func
+-- call, whatever the functor is named (the lostzone/generic wrappers keep the
+-- same argument shape); no/unknown category reads as plain supplies.
+local function fetch_kind(ini, task_id)
+	local ff = ini:r_string_ex(task_id, "fetch_func") or ""
+	local _, cat = ff:match("%(([^:%)]*):([^:%)]*)")
+	if not cat then return "fetch" end
+	if cat:find("artefact") then return "artifact" end
+	if cat:find("mutant")   then return "parts" end
+	if cat:find("patch")    then return "patches" end
+	if cat:find("weapon") or cat:find("upgrade") or cat:find("repair")
+	   or cat:find("util") or cat:find("junk") or cat:find("kits") then
+		return "gear"
+	end
+	return "fetch"   -- supplies / food / medical / drugs / anything new
+end
+
+-- status_functor -> kind for the shapes that map 1:1 (the conditional ones
+-- stay in classify's chain: fetch, assault/bounty, escort, storyline).
+-- "recover" gathers every find-the-thing shape: drx_sl quest items/stashes,
+-- NTA intel stashes, fate ("Lost Signal") searches, Sakharov's tracking
+-- device. "survey" is the science work (anomaly measurements, scanner
+-- placements). multifetch is the mechanics' repair-parts family, so it reads
+-- as TOOLS like the rest of their jobs.
+local SF_KIND = {
+	drx_sl_retrieve_item_task_status = "recover",
+	drx_sl_quest_item_task_status    = "recover",
+	nta_stash_task_status_functor    = "recover",
+	fate_task                        = "recover",
+	recover_mutant_data_status       = "recover",
+	drx_sl_money_task_status         = "money",
+	dominance_task_status_functor    = "assault",
+	hostage_task                     = "rescue",
+	delivery_task                    = "courier",
+	intercept_artifact_task_status_functor = "artifact",
+	hidden_threat_functor_status     = "hunt",
+	chimera_scan_status              = "hunt",
+	measure_task                     = "survey",
+	anomaly_scanner_task_status      = "survey",
+	task_type_ecolog_gathered_tissue_samples = "parts",
+	actor_has_fetch_weapon_warfare   = "gear",
+	multifetch_status_functor        = "repairs",
+}
+
+local function classify(task_id)
+	local k = kinds[task_id]
+	if k ~= nil then return k or nil end
+	local ini = task_manager.task_ini
+	local sf  = ini:r_string_ex(task_id, "status_functor") or ""
+	k = SF_KIND[sf] or false
+	if k == false then
+		if sf == "actor_has_fetch_item" then
+			k = fetch_kind(ini, task_id)
+		elseif sf == "assault_task_status_functor" or sf == "bounty_task" then
+			local sp = ini:r_string_ex(task_id, "status_functor_params") or ""
+			if sp:find("monster", 1, true) then
+				k = "hunt"
+			else
+				k = (sf == "bounty_task") and "bounty" or "assault"
+			end
+		elseif (ini:r_string_ex(task_id, "title_functor") or "") == "general_escort_task" then
+			k = "escort"
+		elseif ini.r_bool_ex and ini:r_bool_ex(task_id, "storyline", false) then
+			-- unknown shape but flagged as a unique story task (the LostZone
+			-- treasure hunts, faction one-offs like the Duty spy quest): worth
+			-- advertising as special rather than generic HIRING
+			k = "special"
+		end
+	end
+	kinds[task_id] = k
+	return k or nil
+end
+
+-- --------------------------------------------------------------------------
+-- Task-limit gate
+-- --------------------------------------------------------------------------
+-- The dialog hides the work option once you already hold the per-NPC task
+-- limit (dialogs.has_tasks_by_npc -> generate_ongoing_tasks(npc, nil) ->
+-- count >= gameplay/general/max_tasks). generate_ongoing_tasks walks the
+-- whole task table; its survivors are by definition tasks the actor HOLDS,
+-- so the same count comes out of walking tm.task_info (a handful of
+-- entries) with the identical predicate. Mirrors the is_sim=nil call the
+-- dialog gate makes, including the warfare-trader giver-id branch.
+-- The limit only changes when the player edits gameplay options, so the
+-- pcall + ui_options read is refreshed on a slow TTL, not per verdict.
+local limit_val, limit_next = 2, 0
+local function task_limit(tg)
+	if tg < limit_next then return limit_val end
+	limit_next = tg + 5000
+	if dialogs and dialogs.get_npc_task_limit then
+		local ok, n = pcall(dialogs.get_npc_task_limit)
+		if ok and n then limit_val = n end
+	end
+	return limit_val
+end
+
+local function at_task_limit(id, obj, tg, info)
+	local _, sec = use_ordered(id, obj)
+	local cfg  = axr_task_manager.CFG_CACHE or {}
+	local by_giver = _G.WARFARE and warfare and warfare.is_warfare_trader
+	                 and warfare.is_warfare_trader(obj)
+	local n, limit = 0, task_limit(tg)
+	for task_id, t in pairs(info) do
+		if starts_with(task_id, sec)
+		   and (not by_giver or t.task_giver_id == id) then
+			local cc = cfg[task_id]
+			local can_cancel = cc and cc.can_cancel
+			if (can_cancel == nil or can_cancel == true)
+			   and db.actor:get_task(task_id, true)
+			   and t.stage and t.stage < ((cc and cc.stage_complete) or 255)
+			   and t.status ~= "fail" and t.status ~= "completed" then
+				n = n + 1
+				if n >= limit then return true end
+			end
+		end
+	end
+	return false
+end
+
+-- --------------------------------------------------------------------------
+-- Warm path (read the engine's own stored-task verdict; no scanning)
+-- --------------------------------------------------------------------------
+-- Returns true/false when the engine's per-NPC cache is fresh, nil when cold
+-- (never checked or past the 5400 game-second window -> needs a probe).
+-- Mirrors the cache-check block at the top of get_first_available_task: a
+-- stored nil means "rolled no task this cycle", a stored task still counts
+-- only while the actor doesn't hold it and its precondition holds. That
+-- precondition is a condlist evaluation, so it's re-checked per NPC at most
+-- every REVAL_MS instead of every pass (task taken/completed is caught every
+-- pass by the cheap task_info check; only external condition flips wait out
+-- the throttle). `gt` is the game time and `info` the task_info table, both
+-- resolved once per has_work call; the two pstor key strings are built once
+-- per NPC and kept on its state entry (they'd otherwise be fresh garbage
+-- every pass).
+local function warm_state(id, s, tg, gt, info)
+	local kt = s.kt
+	if not kt then
+		kt   = "drx_sl_npc_stored_task_time_" .. id
+		s.kt = kt
+		s.kv = "drx_sl_npc_stored_task_" .. id
+	end
+	local t = load_ctime(db.actor, kt)
+	if not (t and gt:diffSec(t) < FRESH_SECS) then return nil end
+
+	local stored = load_var(db.actor, s.kv, nil)
+	if not stored then return false end
+	if info[stored] ~= nil then return false end
+
+	-- keyed to the stored task: a dialog can re-pin a different task once the
+	-- window lapses, and the old task's verdict must not answer for the new one
+	if s.val_for == stored and s.val_next and tg < s.val_next then return s.prereq_ok, stored end
+	_pr[1] = stored
+	s.prereq_ok = xr_conditions.has_completed_task_prerequisites(nil, nil, _pr) and true or false
+	s.val_next  = tg + REVAL_MS
+	s.val_for   = stored
+	return s.prereq_ok, stored   -- the task id behind a true verdict (kind classification)
+end
+
+-- --------------------------------------------------------------------------
+-- Taskboard verdict (free ride)
+-- --------------------------------------------------------------------------
+-- The PDA taskboard path (axr_task_manager.generate_available_tasks) keeps a
+-- pin of its own, separate from the dialog's pstor verdict: for sim NPCs,
+-- db.storage[id].dyn_quest_rand holds the one task the board offers for the
+-- NPC's whole online life ("nil" when the board rolled no quests for them).
+-- If the player has browsed the taskboard, the answer is therefore already
+-- sitting in memory, so read it before spending a probe. Only a POSITIVE pin
+-- counts: an absent/empty pin says nothing about what the dialog would offer
+-- (the two paths roll independently), so everything else falls through to the
+-- warm/cold logic. The pinned task is re-validated the way the board itself
+-- would (actor already holds it / precondition lapsed -> not offered), with
+-- the condlist on the same slow per-NPC throttle as the stored task's.
+local function taskboard_state(id, s, tg, info)
+	local st = db.storage[id]
+	local dq = st and st.dyn_quest_rand
+	if not dq or dq == "nil" then return nil end
+	if info[dq] ~= nil then return nil end
+	if not (s.tb_for == dq and s.tb_next and tg < s.tb_next) then
+		_pr[1] = dq
+		s.tb_ok   = xr_conditions.has_completed_task_prerequisites(nil, nil, _pr) and true or false
+		s.tb_next = tg + REVAL_MS
+		s.tb_for  = dq
+	end
+	if s.tb_ok then return true, dq end   -- dq = the pinned task id (kind classification)
+	return nil
+end
+
+-- --------------------------------------------------------------------------
+-- Mechanic tasks
+-- --------------------------------------------------------------------------
+-- Technicians offer their own task family through drx_sl_get_mechanic_task,
+-- which has NO engine-side cache (every call is a full task-table scan). So
+-- their verdict lives in our own state with the same freshness window, and
+-- is only ever computed on the rationed cold path (see probe).
+local function mech_state(s, gt)
+	if s.mech_time and gt:diffSec(s.mech_time) < FRESH_SECS then
+		return s.mech
+	end
+	return nil
+end
+
+-- --------------------------------------------------------------------------
+-- Taskboard-generator verdict (the gfat_dead probe path; see probe)
+-- --------------------------------------------------------------------------
+-- Module-side cache of the generate_available_tasks probe result, same
+-- freshness window as the engine's own verdicts. Positive sim verdicts are
+-- normally short-circuited earlier by taskboard_state (the probe pinned
+-- dyn_quest_rand); this answers for ordered families, and it is the only
+-- cache that can hold a NEGATIVE (a pin can't say "asked, nothing on offer").
+local function gen_state(s, gt)
+	if s.gen_time and gt:diffSec(s.gen_time) < FRESH_SECS then
+		return s.gen, s.gen_src
+	end
+	return nil
+end
+
+-- --------------------------------------------------------------------------
+-- Cold probe queue
+-- --------------------------------------------------------------------------
+local function enqueue(id, mech)
+	local q = queued[id]
+	if q ~= nil then
+		if mech and not q then queued[id] = true end   -- upgrade: also check mechanic tasks
+		return
+	end
+	queued[id] = mech or false
+	queue[#queue + 1] = id
+end
+
+-- The real thing: task-system calls for one NPC (obj: the live object,
+-- already validated by probe_tick's drain walk this frame). pcall-guarded:
+-- preconditions dispatch into arbitrary mod condlist functors, and a broken
+-- one should cost us the probe, not the update loop.
+--
+-- Two vehicles, matching how the installed pack actually offers work:
+--   * get_first_available_task: the dialog cache. On success it warms the
+--     engine's own pstor verdict, which warm_state reads on the next pass.
+--   * generate_available_tasks: the PDA-taskboard path, used from the first
+--     time the dialog call throws (gfat_dead; see the header for the broken
+--     monkey). Verdict = an offer left in available_tasks[id] (the sim
+--     variant also sets the dyn_quest_rand pin, which taskboard_state reads
+--     on later passes). This path writes no engine pstor, so the verdict is
+--     cached module-side (s.gen*) with the same freshness window. Caching
+--     the negatives is also what stops a no-work NPC from being re-enqueued
+--     and re-probed every PROBE_INTERVAL.
+local function probe(id, mech, obj)
+	local s = state[id]
+	if not s then s = {}; state[id] = s end
+	local gt = game.get_game_time()
+
+	local use = use_ordered(id, obj)
+	if not gfat_dead then
+		-- pcall gets the function + args directly (no wrapper closure to allocate)
+		local ok, err = pcall(axr_task_manager.get_first_available_task, obj, nil, (not use) and true or nil)
+		s.prereq_ok, s.val_next, s.val_for = nil, nil, nil
+		if not ok then
+			gfat_dead = true
+			dbg("get_first_available_task is broken (%s); probing via generate_available_tasks", tostring(err))
+		end
+	end
+	if gfat_dead and axr_task_manager.generate_available_tasks then
+		-- Mirror the taskboard's own variant rule (pda_taskboard /
+		-- ui_pda_taskboard_tab.trigger_generate_available_tasks): the sim pool is
+		-- rolled ONLY for sim_* sections; everyone else gets just their dedicated
+		-- task family. An NPC with neither (named story characters like ah_sarik)
+		-- is a clean negative with NO call at all: pre-rolling the sim pool for
+		-- them carded NPCs whose own dialog/board offers nothing. (The board also
+		-- force-sims a handful of named bar/mil guards via a private list we can't
+		-- read; those few card only after the player's own board visit pins them.)
+		local sim = obj:section():find("sim_") and true or nil
+		if sim or use then
+			local ok, err = pcall(axr_task_manager.generate_available_tasks, obj, sim)
+			if not ok then dbg("probe id=%s generate FAILED: %s", id, tostring(err)) end
+			local avail  = ok and axr_task_manager.available_tasks
+			local offers = avail and avail[id]
+			s.gen_src = offers and offers[1]
+			s.gen     = s.gen_src ~= nil
+		else
+			s.gen, s.gen_src = false, nil
+		end
+		s.gen_time = gt
+	end
+
+	if mech then
+		local okm, mt = pcall(axr_task_manager.drx_sl_get_mechanic_task, obj)
+		s.mech      = okm and mt ~= nil
+		s.mech_time = gt
+	end
+	if DEBUG then   -- gate here so obj:name()/tostring aren't evaluated when logging is off
+		dbg("probe id=%s [%s] ordered=%s mech=%s gen=%s", id, obj:name(), tostring(use), tostring(mech), tostring(s.gen))
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- Public API
+-- --------------------------------------------------------------------------
+
+-- Live options, pushed by iqm_markers.read_config (single source of truth for
+-- config stays over there).
+function configure(work_probe, appear_dist, debug_log)
+	probing = work_probe and true or false
+	local ad = appear_dist or 16
+	max_d2 = ad * ad
+	DEBUG  = debug_log and true or false
+end
+
+-- Does this NPC have work to give right now? Called from the extras scan for
+-- every in-range candidate (already class/alive/enemy-gated there), so one
+-- call per NPC per ~2s pass, amortized over frames by the scanner. `is_mech`
+-- routes technicians through the mechanic-task check too. Returns true/false
+-- (last known verdict while a probe is still queued), nil when the task
+-- system is absent.
+function has_work(id, obj, is_mech)
+	if not (db.actor and task_system_ok()) then return nil end
+	local tg = time_global()
+	if not tm then tm = task_manager.get_task_manager() end
+	local info = tm.task_info   -- resolved once, shared by every check below
+	local s = state[id]
+	if not s then s = {}; state[id] = s end
+
+	-- a taskboard-pinned offer answers instantly and costs nothing (no probe needed)
+	local work, src = taskboard_state(id, s, tg, info)   -- src: the task id behind a true verdict
+	if work then
+		s.kind = classify(src)
+	else
+		local gt = (gt_for == tg) and gt_memo         -- one CTime per frame slice, shared across NPCs
+		if not gt then gt = game.get_game_time(); gt_memo, gt_for = gt, tg end
+		work, src = warm_state(id, s, tg, gt, info)
+		if work == nil then work, src = gen_state(s, gt) end   -- taskboard-generator probe verdict
+		if work == nil then
+			if probing then enqueue(id, is_mech) end
+			work = s.work or false                    -- last known while cold (verdict AND kind)
+		elseif work then
+			s.kind = classify(src)
+		elseif is_mech then
+			local mw = mech_state(s, gt)
+			if mw == nil then
+				if probing then enqueue(id, true) end -- dynamic verdict fresh, mechanic one stale
+				mw = s.mech or false
+			end
+			work = mw
+			if work then s.kind = "repairs" end       -- mechanic jobs are always the parts/tools family
+		end
+	end
+
+	if work and at_task_limit(id, obj, tg, info) then work = false end
+	s.work = work
+	return work
+end
+
+-- The classified job kind behind this NPC's current positive verdict
+-- ("fetch"/"hunt"/"assault"/"bounty"/"rescue"/"courier"/"artifact"/"escort"/
+-- "repairs"), or nil for a plain/unclassified offer (or no offer). Drives the
+-- card-header refinement in iqm_markers.
+function work_kind(id)
+	local s = state[id]
+	return (s and s.work and s.kind) or nil
+end
+
+-- Drain the probe queue: one cold probe at a time, nearest candidate first
+-- (the giver you're walking toward resolves before the camp edge does), on an
+-- ADAPTIVE interval: each probe is timed and the next is scheduled at
+-- avg_cost x PROBE_BUDGET, clamped to [PROBE_INTERVAL, PROBE_MAX]. A probe's
+-- body is one un-sliceable call into the task system, so its per-hit spike
+-- can't be amortised; its share of frame time can be, and this self-tunes
+-- that share to ~2% on any machine (weak CPUs trade marker latency for
+-- smoothness; fast ones never leave the floor). Dead/offline/out-of-range
+-- entries are dropped; the extras scan re-queues them if they come back.
+-- Called every frame from actor_on_update; the early-outs make the idle frame
+-- cost a few compares.
+--
+-- `idle` (optional) hints that no amortized scanner is mid-pass this frame.
+-- Probes PREFER idle frames so the budgeted costs don't stack, but an overdue
+-- probe (waited 2x its interval) fires regardless: with a big db.storage the
+-- scan passes can tile the frames end to end, and a hard "idle frames only"
+-- rule starves the queue completely, leaving cards to appear only from dialog
+-- or PDA-taskboard warm data (the exact bug this guard fixes).
+function probe_tick(tg, idle)
+	if not probing then return end
+	if tg < next_probe then return end
+	if idle == false and tg < next_probe + PROBE_INTERVAL then return end
+	local n = #queue
+	if n == 0 then return end
+	local actor = db.actor
+	if not actor then return end
+
+	if not get_obj then get_obj = level.object_by_id end
+	local apos = actor:position()
+	local best_d, best_i, best_obj
+	local i = 1
+	while i <= n do
+		local id  = queue[i]
+		local obj = get_obj(id)
+		local d = obj and obj:alive() and obj:position():distance_to_sqr(apos)
+		if not d or d > max_d2 then
+			queued[id] = nil                       -- gone or wandered out of range: drop
+			queue[i] = queue[n]; queue[n] = nil; n = n - 1
+		else
+			if not best_d or d < best_d then best_d, best_i, best_obj = d, i, obj end
+			i = i + 1
+		end
+	end
+	if not best_i then return end
+
+	local id = queue[best_i]
+	queue[best_i] = queue[n]; queue[n] = nil
+	local mech = queued[id]
+	queued[id] = nil
+
+	local t0 = os_clock()
+	probe(id, mech, best_obj)
+	local cost = (os_clock() - t0) * 1000
+	-- EMA over the last few probes (0.25 weight ~ a 4-probe window), so one
+	-- pathological condlist doesn't park the interval at the ceiling
+	probe_cost = probe_cost and (probe_cost * 0.75 + cost * 0.25) or cost
+	local d = probe_cost * PROBE_BUDGET
+	if d < PROBE_INTERVAL then d = PROBE_INTERVAL elseif d > PROBE_MAX then d = PROBE_MAX end
+	next_probe = tg + d
+	dbg("probe cost=%.2fms avg=%.2fms next=+%dms", cost, probe_cost, d)
+end
+
+-- Full reset (option change / fresh game session). The engine's own pstor
+-- verdicts are game state and stay; only our derived caches go.
+function reset()
+	state, queue, queued, ordered, kinds = {}, {}, {}, {}, {}
+	next_probe, limit_next = 0, 0   -- limit too, so an options change re-reads it promptly
+end
+
+-- Snapshot for the F7 debugger / console.
+function debug_dump(out)
+	out = out or printf
+	local ns, nq = 0, #queue
+	for _ in pairs(state) do ns = ns + 1 end
+	out("-IQM-WORK: probing=%s gfat_dead=%s tracked=%s queued=%s avg_probe_ms=%s",
+		tostring(probing), tostring(gfat_dead), ns, nq, probe_cost and string.format("%.2f", probe_cost) or "n/a")
+	for id, s in pairs(state) do
+		out("-IQM-WORK: id=%s work=%s prereq_ok=%s gen=%s gen_src=%s mech=%s queued=%s",
+			id, tostring(s.work), tostring(s.prereq_ok), tostring(s.gen), tostring(s.gen_src),
+			tostring(s.mech), tostring(queued[id] ~= nil))
+	end
+end

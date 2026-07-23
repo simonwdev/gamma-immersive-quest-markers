@@ -19,6 +19,25 @@
 	<string id="st_iqm_hdr_barman"><text>БАРМЕН</text></string>
 	<string id="st_iqm_hdr_medic"><text>МЕДИК</text></string>
 	<string id="st_iqm_hdr_important"><text>ВИП-ПЕРСОНА</text></string>
+	<string id="st_iqm_hdr_work"><text>ЕСТЬ РАБОТА</text></string>
+	<!-- Job-kind refinements for the hiring card (see iqm_taskwork.classify);
+	     unclassified offers fall back to the plain header above. -->
+	<string id="st_iqm_hdr_work_fetch"><text>РАБОТА: ПРИПАСЫ</text></string>
+	<string id="st_iqm_hdr_work_hunt"><text>РАБОТА: ОХОТА</text></string>
+	<string id="st_iqm_hdr_work_assault"><text>РАБОТА: ШТУРМ</text></string>
+	<string id="st_iqm_hdr_work_bounty"><text>РАБОТА: ЗАКАЗ</text></string>
+	<string id="st_iqm_hdr_work_rescue"><text>РАБОТА: СПАСЕНИЕ</text></string>
+	<string id="st_iqm_hdr_work_courier"><text>РАБОТА: ДОСТАВКА</text></string>
+	<string id="st_iqm_hdr_work_artifact"><text>РАБОТА: АРТЕФАКТ</text></string>
+	<string id="st_iqm_hdr_work_escort"><text>РАБОТА: ЭСКОРТ</text></string>
+	<string id="st_iqm_hdr_work_repairs"><text>РАБОТА: ИНСТРУМЕНТЫ</text></string>
+	<string id="st_iqm_hdr_work_gear"><text>РАБОТА: СНАРЯЖЕНИЕ</text></string>
+	<string id="st_iqm_hdr_work_parts"><text>РАБОТА: ЧАСТИ МУТАНТОВ</text></string>
+	<string id="st_iqm_hdr_work_patches"><text>РАБОТА: НАШИВКИ</text></string>
+	<string id="st_iqm_hdr_work_recover"><text>РАБОТА: ПОИСК</text></string>
+	<string id="st_iqm_hdr_work_money"><text>РАБОТА: ДЕНЬГИ</text></string>
+	<string id="st_iqm_hdr_work_survey"><text>РАБОТА: ЗАМЕРЫ</text></string>
+	<string id="st_iqm_hdr_work_special"><text>РАБОТА: ОСОБОЕ ДЕЛО</text></string>
 
 	<string id="ui_mcm_iqm_enabled"><text>Включить маркеры</text></string>
 	<string id="ui_mcm_iqm_enabled_desc"><text>Главный переключатель плавающих карточек-маркеров заданий.</text></string>
@@ -40,6 +59,9 @@
 
 	<string id="ui_mcm_iqm_mark_important"><text>Карточки над важными персонажами</text></string>
 	<string id="ui_mcm_iqm_mark_important_desc"><text>Показывать карточку («ВИП-ПЕРСОНА» плюс звезда) над сюжетными и важными для группировок персонажами — теми, кого КПК отмечает значком важного или квестового персонажа. Опция «Стиль сервисных карточек» ниже может переключить её на компактный значок или простой текст. По умолчанию выключено: в оживлённых лагерях карточек и так хватает.</text></string>
+
+	<string id="ui_mcm_iqm_mark_work"><text>Карточки для NPC с работой (экспериментально)</text></string>
+	<string id="ui_mcm_iqm_mark_work_desc"><text>ЭКСПЕРИМЕНТАЛЬНО: эта функция опрашивает систему заданий игры — тяжёлый запрос, который сама игра выполняет только при открытии диалога или доски заданий КПК. Проверки кэшируются и строго ограничены, но влияние на производительность нельзя исключить на любой конфигурации — отключите опцию, если заметите подтормаживания у лагерей. Показывать карточку («ЕСТЬ РАБОТА») над любым дружелюбным сталкером, который действительно предложит вам задание, если спросить. Ответ даёт собственная система заданий игры, поэтому карточка в точности совпадает с диалогом: нет карточки — «пока ничего нет», есть карточка — работа предлагается. Карточка скрывается, пока у вас уже взято максимально допустимое число заданий у этого NPC. Ответы читаются из памяти системы заданий по каждому NPC (обновляется каждые 1,5 игровых часа); ещё не проверенные NPC опрашиваются по одному со строгим лимитом, поэтому людные лагеря не вызывают подтормаживаний (см. «Активная проверка работы» на вкладке «Дополнительно»).</text></string>
 
 	<string id="ui_mcm_iqm_faction_colors"><text>Цвета группировок</text></string>
 	<string id="ui_mcm_iqm_faction_colors_desc"><text>Окрашивать карточку (линию-указку, боковую полосу, текст заголовка и точку у головы) в цвет группировки NPC вместо стандартного золотого акцента. Цвета совпадают с палитрой группировок сайта GAMMA DB. NPC без группировки (например, зомби, мутанты) сохраняют золотой акцент.</text></string>
@@ -131,6 +153,8 @@
 	<string id="ui_mcm_iqm_col_b"><text>Цвет акцента: синий</text></string>
 	<string id="ui_mcm_iqm_col_b_desc"><text>Синяя составляющая цвета акцента (0-255). Значения по умолчанию дают мягкое приглушённое золото (224, 196, 122).</text></string>
 
+	<string id="ui_mcm_iqm_work_probe"><text>Активная проверка работы</text></string>
+	<string id="ui_mcm_iqm_work_probe_desc"><text>Разрешить детектору опрашивать систему заданий по NPC, для которых ответа ещё нет (не чаще одного NPC каждые 0,3 с, ближайшие — первыми). Это ровно то же самое, что открыть диалог с NPC, включая розыгрыш того, есть ли у него задание в этом цикле, просто чуть раньше: предлагаемое задание определяется в момент появления карточки, а не в момент разговора. Отключите, чтобы детектор был полностью пассивным: карточки будут появляться только у NPC, чей статус работы игра уже определила (например, вы говорили с ними в последние 1,5 игровых часа или видели их на доске заданий КПК).</text></string>
 	<string id="ui_mcm_iqm_debug_log"><text>Диагностический лог</text></string>
 	<string id="ui_mcm_iqm_debug_log_desc"><text>Писать диагностические строки IQM (проверки видимости, переполнение слотов карточек, воспроизведение звука, координаты слотов) в консоль/лог. Для поиска неисправностей; по умолчанию выключено.</text></string>
 

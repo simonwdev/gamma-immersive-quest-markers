@@ -26,6 +26,7 @@ function on_mcm_load()
 				{ id = "mark_guiders",    type = "check", val = 1, def = d.mark_guiders },
 				{ id = "mark_traders",    type = "check", val = 1, def = d.mark_traders },
 				{ id = "mark_important",  type = "check", val = 1, def = d.mark_important },
+				{ id = "mark_work",       type = "check", val = 1, def = d.mark_work },
 				{ id = "faction_colors",  type = "check", val = 1, def = d.faction_colors },
 				{ id = "faction_icons",   type = "check", val = 1, def = d.faction_icons },
 				{ id = "appear_dist",     type = "track", val = 2, min = 2, max = 60, step = 1, def = d.appear_dist },
@@ -35,6 +36,8 @@ function on_mcm_load()
 
 			{ id = "advanced", sh = true, text = "ui_mcm_iqm_tab_advanced", gr = {
 				{ id = "title_adv",    type = "slide", text = "ui_mcm_iqm_tab_advanced", size = {512, 50}, spacing = 20 },
+
+				{ id = "work_probe",   type = "check", val = 1,                                     def = d.work_probe },
 
 				{ id = "show_node",    type = "check", val = 1,                                     def = d.show_node },
 				{ id = "node_pulse",   type = "check", val = 1,                                     def = d.node_pulse },
