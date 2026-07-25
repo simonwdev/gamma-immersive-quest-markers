@@ -113,6 +113,10 @@ local map_has_spot, char_comm, factions_enemies = nil, nil, nil
 -- work_kind per work card per update), bound in on_game_start like the rest
 -- so a missing module just no-ops.
 local tw_has_work, tw_tick, tw_kind = nil, nil, nil
+-- HUD-visibility globals, also bound in on_game_start: main_hud_shown() is base
+-- _g.script (the check the rest of GAMMA's HUD mods use) and axr_main carries the
+-- live zoom flags. Both are read once per frame in hud_is_shown().
+local hud_shown_fn, axr = nil, nil
 
 -- Reusable scratch vector2s: SetWndPos/SetWndSize consume their argument immediately, so
 -- one pair per purpose can be :set() and handed over instead of allocating a fresh vector2
@@ -1083,12 +1087,46 @@ local function pda_is_open()
 	return shown or false
 end
 
+-- True while the main HUD is on screen. Anything that takes the HUD away -- the
+-- console `hud_draw 0`, _g.show_indicators(false) / level.hide_indicators_safe(),
+-- an open inventory, an NPC dialog, or any script UI registered with Register_UI --
+-- has to take the cards with it, so a mod hiding the HUD is respected without IQM
+-- knowing that mod exists. main_hud_shown() is base _g.script and is the same gate
+-- the rest of GAMMA's HUD mods (compass, subtitles, status icons, hudmarks) use.
+--
+-- The one clause we deliberately override: main_hud_shown() also reports false while
+-- a scope or the binoculars are zoomed. These cards are world-space labels pinned to
+-- NPCs, and glassing a distant stalker is exactly when you want to read one, so the
+-- zoom is allowed back in -- the same carve-out Catspaw's hudmarks make. A HUD that
+-- is genuinely hidden still wins: the two causes that can coexist with a zoom
+-- (hud_draw and hide_indicators) are re-tested by hand. The rest can't -- opening the
+-- inventory / PDA / a dialog drops the zoom first.
+--
+-- Don't be tempted to cache hud_draw off the on_console_execute callback: that callback
+-- only fires from _g.exec_console_cmd(), so it misses both a player typing in the
+-- console and mods that call get_console():execute() directly (GAMMA's Seraphim
+-- death-save in perk_based_artefacts does exactly that). A stale cache would leave
+-- cards floating over a blacked-out screen. Base main_hud_shown() queries live for the
+-- same reason.
+local function hud_is_shown()
+	-- Zoom tested first: main_hud_shown() queries hud_draw (a console-map lookup, ~530
+	-- entries compared by xr_strcmp) BEFORE its own two zoom clauses, so asking it while
+	-- zoomed pays for that lookup and then always answers false. Branching here keeps the
+	-- frame at one console query instead of two, in the middle of aiming.
+	if axr.binoc_is_zoomed or axr.scoped_weapon_is_zoomed then
+		return _HUD_STATE and get_console_cmd(1, "hud_draw")
+	end
+	return hud_shown_fn()
+end
+
 local function render(tg)
 	if not CARDS then return end
 	if next(tracked) == nil then return end   -- nothing to draw: skip the PDA/device work entirely
-	-- hide everything while the PDA is up; keep per-NPC state so closing it resumes
-	-- cleanly (no re-chirp, no replayed entrance).
-	if pda_is_open() then
+	-- hide everything while the PDA is up or the main HUD is hidden; keep per-NPC state
+	-- so coming back resumes cleanly (no re-chirp, no replayed entrance). The PDA is
+	-- checked separately because it hides the indicators engine-side, which never
+	-- reaches the Lua state main_hud_shown() reads.
+	if pda_is_open() or (not hud_is_shown()) then
 		for _, t in pairs(tracked) do CARDS:hide_slot(t.slot) end
 		return
 	end
@@ -1736,6 +1774,8 @@ function on_game_start()
 	map_has_spot = level.map_has_object_spot     -- per-NPC in spot_role (extras scan)
 	char_comm    = character_community           -- per-NPC in is_enemy_to_actor
 	factions_enemies = game_relations.is_factions_enemies
+	hud_shown_fn = main_hud_shown or function() return true end  -- base _g.script; fallback binds the guard once instead of per frame
+	axr          = axr_main or {}                -- holds the live binoc/scope zoom flags
 	if iqm_taskwork then                         -- work detection (soft: absent module just means no work cards)
 		tw_has_work, tw_tick, tw_kind = iqm_taskwork.has_work, iqm_taskwork.probe_tick, iqm_taskwork.work_kind
 	end
