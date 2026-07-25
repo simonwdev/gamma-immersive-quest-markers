@@ -307,13 +307,23 @@ local function collect_desired()
 	-- out an NPC you're already walking with). Soft dependency: guarded so it no-ops
 	-- without the guide-job system (tasks_guide, ships with GAMMA). is_markable_npc
 	-- filters out the case where that NPC is offline / off-level.
+	--
+	-- get_comm_id is pcall'd because the saved squad_id can go stale: if that squad
+	-- was released, the alife id gets recycled to some unrelated object, and most
+	-- tasks_guide copies do a bare `squad:commander_id()` (nil method on a non-squad
+	-- -> hard CTD). tasks_guide itself only ever calls it on a known-live squad, so
+	-- it never trips there; we're reading persisted offer state on a timer, so we
+	-- can. A stale offer simply means no card.
 	if C.mark_guides and tasks_guide and tasks_guide.get_comm_id and alife_storage_manager then
 		local ok, jg = pcall(function() return alife_storage_manager.get_state().jobs_guide end)
 		if ok and jg then
 			local g = jg.guid
-			local id = g and g.squad_id and tasks_guide.get_comm_id(g.squad_id)
-			if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
-				want(desired, id, "guide")
+			local sid = g and g.squad_id
+			if sid then
+				local okc, id = pcall(tasks_guide.get_comm_id, sid)
+				if okc and id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+					want(desired, id, "guide")
+				end
 			end
 		end
 	end
