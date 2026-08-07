@@ -613,7 +613,7 @@ local paid_ok = false   -- set per pass by companions_available()
 -- is_non_story is inlined rather than called so a momentarily unresolved squad (an
 -- NPC mid-spawn) can be left uncached instead of pinning a wrong "story NPC" verdict
 -- for the session; the function is those same two lines plus that nil check.
-local recruit_static = {}   -- [id] = { story_ok = bool, paid_faction = bool }
+local recruit_static = {}   -- [id] = { story_ok = bool, paid_faction = bool, paid_tier = bool }
 
 local function static_facts(actor, obj, id)
 	local f = recruit_static[id]
@@ -621,10 +621,39 @@ local function static_facts(actor, obj, id)
 	local squad = get_object_squad(obj)
 	if not squad then return nil end            -- no squad: neither dialog applies, and don't cache it
 	local txr = txr_paid_companions
+	-- paid_tier mirrors the rand table in txr_paid_companions.is_squad_competent: a
+	-- squad whose section is neither veteran nor advanced gets rand = 0, so its
+	-- `math.random(1,100) <= rand` can never pass and it latches can_work = "false"
+	-- forever. Those squads always answer "Sorry, we have other jobs already", so
+	-- there is nothing to card. Read-only, and it runs BEFORE paid_competent below
+	-- precisely so the writing call is never made for a squad whose answer is already
+	-- knowable. Plain finds, like the original's magic-free string.find.
+	local sec = squad:section_name() or ""
 	f = { story_ok     = get_object_story_id(squad.id) == nil,
-	      paid_faction = (txr and txr.is_paid_companion_faction(actor, obj)) and true or false }
+	      paid_faction = (txr and txr.is_paid_companion_faction(actor, obj)) and true or false,
+	      paid_tier    = (sec:find("veteran", 1, true) or sec:find("advanced", 1, true)) and true or false }
 	recruit_static[id] = f
 	return f
+end
+
+-- The last paid gate, and the only one that isn't a pure question.
+-- is_squad_competent is a PHRASE-level precondition (dialogs.xml phrase 1 vs the
+-- "Sorry, we have other jobs already" phrase 2), so it isn't in either paid dialog's
+-- <precondition> list, but it is what decides whether an offer exists at all. It also
+-- WRITES: the first call rolls the squad's chance, pins can_work, and pins the price
+-- multiplier, permanently. Asking is therefore the same thing opening the dialog
+-- would do, just slightly earlier - and idempotent afterwards, which is what lets the
+-- card match the dialogue exactly, including a refusal's card disappearing.
+-- The verdict is latched game-side, so ours is memoized alongside the static facts.
+-- Called LAST, after every other gate including the tier filter, so the dice are only
+-- ever rolled for a squad whose card would otherwise be about to appear: one you are
+-- within appear_dist of, on-screen, and about to talk to.
+local function paid_competent(actor, obj, f)
+	if f.competent == nil then
+		local txr = txr_paid_companions
+		f.competent = (txr and txr.is_squad_competent(actor, obj)) and true or false
+	end
+	return f.competent
 end
 
 -- Per-NPC recruit predicate: returns the card role the NPC's own dialog would offer
@@ -664,11 +693,12 @@ local function npc_recruitable_impl(obj, rel, ctx)
 	-- check this before anything else)
 	if not axr_companions.allow_simulation_squads_as_companions then return nil end
 
-	-- the two per-NPC constants (memoized): the squad must not be a story squad, and
-	-- only some communities sell escort duty
+	-- the per-NPC constants (memoized): the squad must not be a story squad, and the
+	-- paid offer needs both a community that sells escort duty and a squad tier that
+	-- can actually accept it
 	local f = static_facts(actor, obj, obj:id())
 	if not (f and f.story_ok) then return nil end
-	if paid and not f.paid_faction then
+	if paid and not (f.paid_faction and f.paid_tier) then
 		paid = false
 		if not free then return nil end
 	end
@@ -693,7 +723,7 @@ local function npc_recruitable_impl(obj, rel, ctx)
 			return "companion"
 		end
 	end
-	if paid then return "hire" end
+	if paid and paid_competent(actor, obj, f) then return "hire" end
 	return nil
 end
 
