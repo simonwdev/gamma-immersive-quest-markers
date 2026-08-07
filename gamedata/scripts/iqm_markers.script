@@ -12,7 +12,8 @@ DEFAULTS = {
 	enabled      = true,   -- master on/off
 	mark_targets = true,   -- card the current objective NPC (turn-in / go-talk-to)
 	mark_guides  = true,   -- card the stalker currently looking for a guide ("Need a guide?" job)
-	mark_companions = true, -- card nearby friendly stalkers you could recruit as a companion right now
+	mark_companions = true, -- card nearby friendly stalkers you could recruit as a companion right now (the free "come with me" dialog)
+	mark_hires   = true,   -- card nearby neutral stalkers you could pay for escort duty right now (the paid-companion dialog)
 	mark_guiders = true,   -- card guide NPCs (the fast-travel service, PDA "Guide" icon)
 	mark_traders = true,   -- card service NPCs: traders / technicians / barkeeps / medics
 	mark_important = false, -- card story/faction important characters (PDA "Important Character"); off by default (hubs get busy)
@@ -21,7 +22,7 @@ DEFAULTS = {
 	                       -- (heavy; cached + rationed in iqm_taskwork.script, but a perf impact can't be ruled out on every setup)
 	work_probe   = true,   -- actively check unvisited NPCs for work (rationed; same effect as opening their dialog). Advanced tab.
 	faction_colors = true,  -- tint each card (accent/line/node/glow/header) with the NPC's faction colour instead of the gold accent
-	faction_icons  = true,  -- show the NPC's faction emblem on state cards (turn-in / guide / companion) and hiring cards; other ambient cards keep their role glyph
+	faction_icons  = true,  -- show the NPC's faction emblem on state cards (turn-in / guide / companion / paid escort) and hiring cards; other ambient cards keep their role glyph
 	short_ranks  = true,   -- abbreviate a leading military rank in the NPC's name ("Senior Sergeant Ivanov" -> "Snr Sgt Ivanov")
 	show_node    = true,   -- draw the little dot at the head where the line starts
 	node_pulse   = true,   -- gently breathe the node's glow halo to draw the eye
@@ -64,7 +65,7 @@ DEFAULTS = {
 -- (this table is the source of truth for which tab a key belongs to).
 CORE_KEYS = {
 	enabled = true, mark_targets = true, mark_guides = true,
-	mark_companions = true, mark_guiders = true,
+	mark_companions = true, mark_hires = true, mark_guiders = true,
 	mark_traders = true, mark_important = true, mark_work = true,
 	faction_colors = true, faction_icons = true,
 	appear_dist = true, los_check = true, sound_alert = true,
@@ -194,11 +195,12 @@ end
 local ROLE_PRIO = {
 	target = 1,                           -- the current objective NPC (turn-in / talk-to / delivery)
 	guide  = 2,                           -- the "Need a guide?" job offer
-	companion = 3,                        -- recruitable right now
-	work   = 4,                           -- has a task to give right now (iqm_taskwork)
-	guider = 5, trader = 5, mechanic = 5, barman = 5, medic = 5, important = 5,
+	companion = 3,                        -- recruitable right now, for free (the friendly "come with me" dialog)
+	hire   = 4,                           -- hireable right now, for money (the paid-escort dialog)
+	work   = 5,                           -- has a task to give right now (iqm_taskwork)
+	guider = 6, trader = 6, mechanic = 6, barman = 6, medic = 6, important = 6,
 }
-local CHIRP_ROLES = { target = true, guide = true, companion = true }
+local CHIRP_ROLES = { target = true, guide = true, companion = true, hire = true }
 
 -- Merge a role into the desired set; the more actionable (lower prio) role wins.
 local function want(desired, id, role)
@@ -453,10 +455,10 @@ local SIDE_RATE = 120   -- ms between auto-shoulder re-picks (reuse the sign in 
 -- (db.storage) doing real per-NPC work (recruit preconditions, PDA-spot queries,
 -- projections). Done in a single frame on a 2-3s timer, that whole burst lands as a
 -- periodic hitch. This spreads one scan pass over several frames: snapshot the ids
--- once, process a bounded SCAN_BUDGET of them per frame into a scratch set, and
+-- once, process a bounded budget of them per frame into a scratch set, and
 -- publish it (swap into `live`) only when the pass finishes. Callers read `live`; it
 -- just refreshes a little later than before instead of all in one frame.
-local SCAN_BUDGET = 10          -- NPCs processed per scanner per frame
+local SCAN_BUDGET = 10          -- default NPCs processed per scanner per frame (overridable per scanner)
 local EMPTY       = {}          -- shared read-only "nothing found" set (never mutated)
 
 -- Per-frame scan context (actor pos / ranges), rebuilt only on frames that actually
@@ -469,6 +471,7 @@ local function scan_ctx()
 	_scan_ctx.apos    = actor:position()
 	_scan_ctx.appear2 = appear2   -- the read_config mirror of C.appear_dist, squared
 	_scan_ctx.friend  = game_object.friend
+	_scan_ctx.neutral = game_object.neutral   -- the paid-escort dialog's relation (see npc_recruitable_impl)
 	_scan_ctx.actor_comm = char_comm(actor):sub(7)   -- bare community, reused by is_enemy_to_actor
 	return _scan_ctx
 end
@@ -477,8 +480,13 @@ end
 -- value to store for that id (any non-nil) or nil to skip it. pre_pass() is an optional
 -- cheap gate run once per pass; when it returns false the pass is skipped entirely
 -- (feature off / system absent / no room) and an empty set is published.
-local function make_scanner(interval, scan_one, pre_pass)
+-- `budget` (optional) overrides SCAN_BUDGET for this scanner: the per-NPC costs
+-- differ by an order of magnitude between scans (a PDA map-spot query vs a chain of
+-- recruit preconditions that each resolve the NPC's squad), so a single shared
+-- budget either starves the cheap scan or spikes the expensive one.
+local function make_scanner(interval, scan_one, pre_pass, budget)
 	return { interval = interval, scan_one = scan_one, pre_pass = pre_pass,
+	         budget = budget or SCAN_BUDGET,
 	         live = EMPTY, next_due = 0, ids = nil, cursor = 0, partial = nil }
 end
 
@@ -486,7 +494,7 @@ local function scanner_reset(sc)
 	sc.live, sc.next_due, sc.ids, sc.cursor, sc.partial = EMPTY, 0, nil, 0, nil
 end
 
--- Advance one scanner by up to SCAN_BUDGET NPCs; call every frame. Returns true on the
+-- Advance one scanner by up to its budget of NPCs; call every frame. Returns true on the
 -- frame a pass completes (a fresh set was just published), so the caller can merge it
 -- promptly instead of waiting out the update throttle.
 local function scanner_tick(sc, tg)
@@ -507,7 +515,7 @@ local function scanner_tick(sc, tg)
 	local ids, one, partial = sc.ids, sc.scan_one, sc.partial
 	local n    = #ids
 	local i    = sc.cursor
-	local stop = i + SCAN_BUDGET
+	local stop = i + sc.budget
 	if stop > n then stop = n end
 	local ctx  = scan_ctx()
 	while i < stop do
@@ -527,8 +535,16 @@ local function scanner_tick(sc, tg)
 end
 
 -- --------------------------------------------------------------------------
--- Recruitable-companion detection (option: mark_companions)
+-- Recruitable-companion detection (options: mark_companions, mark_hires)
 -- --------------------------------------------------------------------------
+-- Two different offers, two card roles. The FREE recruit ("come with me") and the
+-- PAID escort ("I can pay you to leave your squad") are separate dialogs with
+-- mutually exclusive relation gates: dialogs_axr_companion.is_actor_friend wants
+-- relation == friend, txr_paid_companions.is_actor_natural wants relation ==
+-- neutral (both only when axr_companions.allow_only_friends_as_companions is on;
+-- otherwise neither cares). So the same scan resolves both and returns which one
+-- the NPC qualifies for: "companion" or "hire".
+--
 -- Unlike quest targets / the guide NPC (resolved from saved state to specific ids,
 -- with no scanning), "can this stalker be recruited right now" is a live per-object
 -- predicate; there's no registry to read. We keep it cheap with three levers:
@@ -562,62 +578,181 @@ local function room_for_companion()
 	return true
 end
 
--- Per-NPC recruit predicate. Uses GAMMA's own "wanna join me?" dialog preconditions
--- when present (they ARE the exact gate: not a lone squad, actor strong enough), else
--- falls back to axr_companions.can_join_actor. Wrapped whole in pcall; these are
--- third-party mod functions we call once per candidate.
--- The predicate body is a named function (not a closure built per call) so the
--- pcall wrapper allocates nothing per candidate.
-local function npc_recruitable_impl(obj)
+-- Which squad shape can this NPC be taken in? Each of the two offers ships in two
+-- variants that differ only here:
+--   "solo"  - G_FLAT's Individually Recruitable Companions pulls ONE member out of a
+--             multi-member squad (not_a_one_man_squad), so it needs room for one; and
+--   "squad" - the base dialogs hire the WHOLE squad through its commander
+--             (xr_conditions.is_squad_commander), so they need room for all of it.
+-- Nil means neither variant's dialog would be offered at all. The solo variant is
+-- tried first: it's the one GAMMA installs.
+-- The solo variant's room check is deliberately NOT repeated here: IRC's
+-- is_room_for_one_in_actor_squad ignores its npc argument entirely (it compares the
+-- companion count against the cap), and the pre-pass gate below already ran exactly
+-- that function once for the whole pass. Only the base variant's room check is
+-- per-NPC, because that one counts the NPC's whole squad.
+local function squad_shape(actor, obj)
 	local irc = individually_recruitable_companions
-	if irc and irc.not_a_one_man_squad then
-		if not irc.not_a_one_man_squad(db.actor, obj) then return false end
-		if irc.get_is_actor_stronger_if_script_is_available
-		   and not irc.get_is_actor_stronger_if_script_is_available(db.actor, obj) then return false end
-		return true
+	if irc and irc.not_a_one_man_squad and irc.not_a_one_man_squad(actor, obj) then
+		return "solo"
 	end
-	if axr_companions and axr_companions.can_join_actor then
-		return axr_companions.can_join_actor(obj) and true or false
+	if xr_conditions.is_squad_commander(actor, obj)
+	   and dialogs_axr_companion.is_room_in_actor_squad(actor, obj) then
+		return "squad"
 	end
-	return false
+	return nil
 end
 
-local function npc_recruitable(obj)
-	local ok, res = pcall(npc_recruitable_impl, obj)
-	return ok and res
+local paid_ok = false   -- set per pass by companions_available()
+
+-- Facts that can't change for an NPC's life, memoized per id: whether its squad
+-- carries a story id (dialogs_axr_companion.is_non_story) and whether its community
+-- sells escort duty (txr_paid_companions.is_paid_companion_faction). While you stand
+-- in a camp the SAME handful of NPCs is re-tested every pass, and uncached each of
+-- these re-resolves the squad / re-reads the community string every 3 seconds.
+-- is_non_story is inlined rather than called so a momentarily unresolved squad (an
+-- NPC mid-spawn) can be left uncached instead of pinning a wrong "story NPC" verdict
+-- for the session; the function is those same two lines plus that nil check.
+local recruit_static = {}   -- [id] = { story_ok = bool, paid_faction = bool }
+
+local function static_facts(actor, obj, id)
+	local f = recruit_static[id]
+	if f then return f end
+	local squad = get_object_squad(obj)
+	if not squad then return nil end            -- no squad: neither dialog applies, and don't cache it
+	local txr = txr_paid_companions
+	f = { story_ok     = get_object_story_id(squad.id) == nil,
+	      paid_faction = (txr and txr.is_paid_companion_faction(actor, obj)) and true or false }
+	recruit_static[id] = f
+	return f
+end
+
+-- Per-NPC recruit predicate: returns the card role the NPC's own dialog would offer
+-- ("companion" free / "hire" paid), or nil. Mirrors the dialog preconditions exactly
+-- rather than approximating them. Free beats paid when both somehow apply
+-- (allow_only_friends off makes the relation gates non-exclusive) - no reason to
+-- advertise a price you needn't pay.
+--
+-- Ordered by cost, because this runs for every non-hostile stalker in range on every
+-- pass. Cheapest first: `rel` is already known from the scan's own gate, so it picks
+-- the branch WITHOUT calling either relation precondition (is_actor_friend /
+-- is_actor_natural each resolve the squad again, and friend/neutral are mutually
+-- exclusive, so at most one of them could ever have mattered); then the memoized
+-- per-NPC constants; then the squad-shape walk (get_squad_count iterates the squad's
+-- members), the most expensive call in the chain, run last and shared by both
+-- branches. `paid_ok` carries the two pass-invariant paid gates (Warfare, blacklisted
+-- map), resolved once in the pre-pass.
+--
+-- Wrapped whole in pcall; these are third-party mod functions called once per
+-- candidate. The body is a named function (not a closure built per call) so the
+-- pcall wrapper allocates nothing per candidate.
+local function npc_recruitable_impl(obj, rel, ctx)
+	local actor = db.actor
+	local dac   = dialogs_axr_companion
+	if not (dac and axr_companions) then return nil end
+
+	-- Which branch could this relation even reach? The two dialogs' relation gates
+	-- (is_actor_friend / is_actor_natural) are mutually exclusive while
+	-- allow_only_friends_as_companions is on, and ignore relation entirely when it
+	-- is off - so read that flag once instead of resolving the squad twice.
+	local any_rel = not axr_companions.allow_only_friends_as_companions
+	local free    = C.mark_companions and (any_rel or rel == ctx.friend)
+	local paid    = C.mark_hires and paid_ok and (any_rel or rel == ctx.neutral)
+	if not (free or paid) then return nil end
+
+	-- simulation squads must be recruitable at all (both relation preconditions
+	-- check this before anything else)
+	if not axr_companions.allow_simulation_squads_as_companions then return nil end
+
+	-- the two per-NPC constants (memoized): the squad must not be a story squad, and
+	-- only some communities sell escort duty
+	local f = static_facts(actor, obj, obj:id())
+	if not (f and f.story_ok) then return nil end
+	if paid and not f.paid_faction then
+		paid = false
+		if not free then return nil end
+	end
+
+	-- gates common to all four dialog variants
+	if not dac.is_not_hostage_task_giver(actor, obj) then return nil end
+	-- the stalker currently looking for a guide is off-limits to both offers; they
+	-- normally out-rank these roles anyway, but not when mark_guides is off
+	if tasks_guide and tasks_guide.not_prec_1
+	   and not tasks_guide.not_prec_1(actor, obj) then return nil end
+
+	local shape = squad_shape(actor, obj)
+	if not shape then return nil end
+
+	-- FREE: friendly recruit. The actor-strength check belongs to the solo variant
+	-- only (the base dialog has no such precondition).
+	if free then
+		local irc = individually_recruitable_companions
+		if shape ~= "solo"
+		   or not (irc and irc.get_is_actor_stronger_if_script_is_available)
+		   or irc.get_is_actor_stronger_if_script_is_available(actor, obj) then
+			return "companion"
+		end
+	end
+	if paid then return "hire" end
+	return nil
+end
+
+local function npc_recruitable(obj, rel, ctx)
+	local ok, res = pcall(npc_recruitable_impl, obj, rel, ctx)
+	return ok and res or nil
 end
 
 -- Per-NPC test for the recruitable scan: cheapest checks first (option 3's ordering),
--- the screen projection last. Returns true for a recruitable, on-screen, in-range
--- stalker, else nil.
+-- the screen projection last. Returns the card role ("companion"/"hire") for a
+-- recruitable, on-screen, in-range stalker, else nil. The relation pre-gate admits
+-- both branches' relations; npc_recruitable applies the exact per-branch one.
 local function companion_scan_one(id, ctx)
 	local obj = get_obj(id)
 	if obj and IsStalker(obj) and obj:alive()
 	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
-	   and obj:relation(ctx.actor) == ctx.friend
-	   and not obj:has_info("npcx_is_companion")
-	   and npc_recruitable(obj) then
-		local wp = anchor_world_pos(obj)                 -- option 3: keep only on-screen NPCs
-		if wp and project_world(wp) then return true end
+	   and not obj:has_info("npcx_is_companion") then
+		local rel = obj:relation(ctx.actor)
+		if rel ~= ctx.friend and rel ~= ctx.neutral then return end
+		local role = npc_recruitable(obj, rel, ctx)
+		if role then
+			local wp = anchor_world_pos(obj)             -- option 3: keep only on-screen NPCs
+			if wp and project_world(wp) then return role end
+		end
 	end
 end
 
--- Once-per-pass gate: skip the whole scan when the feature is off, the companion
--- system is absent, or the party is full (nobody recruitable anyway).
+-- Once-per-pass gate: skip the whole scan when both features are off, the companion
+-- system is absent, or the party is full (nobody recruitable anyway). Also resolves
+-- the paid branch's two pass-invariant preconditions here rather than per NPC:
+-- Warfare is a session constant and the dangerous-map blacklist a level one (and
+-- is_not_dangerous_map allocates a level-name string on every call). Under Warfare
+-- or on a blacklisted map the whole paid branch then costs nothing at all.
 local function companions_available()
-	if not C.mark_companions then return false end
+	if not (C.mark_companions or C.mark_hires) then return false end
 	if not (axr_companions or individually_recruitable_companions) then return false end
+	-- pcall'd like the per-NPC preconditions: is_not_dangerous_map reaches into
+	-- xr_effects.blacklisted_maps, and this one runs outside npc_recruitable's guard.
+	local txr = txr_paid_companions
+	if C.mark_hires and txr and dialogs.warfare_disabled(db.actor, db.actor) then
+		local ok, safe = pcall(txr.is_not_dangerous_map, db.actor, db.actor)
+		paid_ok = (ok and safe) and true or false
+	else
+		paid_ok = false
+	end
 	return room_for_companion()
 end
 
-local companion_scanner = make_scanner(COMPANION_SCAN, companion_scan_one, companions_available)
+-- Smaller per-frame budget than the default: each candidate here runs a chain of
+-- recruit preconditions (several squad resolutions and a squad-member walk), so ten
+-- of these in one frame is a far bigger slice than ten map-spot queries.
+local companion_scanner = make_scanner(COMPANION_SCAN, companion_scan_one, companions_available, 4)
 
--- Merge the recruitable ids (published by the amortized scanner) into the desired set.
--- Quest/guide roles already in `desired` win (never overwritten).
+-- Merge the recruitable ids (published by the amortized scanner) into the desired set,
+-- each with the role its own dialog offers. Quest/guide roles already in `desired` win
+-- (never overwritten).
 local function augment_companions(desired)
-	if not C.mark_companions then return end
-	for id in pairs(companion_scanner.live) do
-		want(desired, id, "companion")
+	for id, role in pairs(companion_scanner.live) do
+		want(desired, id, role)
 	end
 end
 
@@ -940,6 +1075,7 @@ end
 -- string-table lookup we were paying every frame). Cache cleared on config/language change.
 local HDR_KEYS = {
 	target = "st_iqm_hdr_target",  guide  = "st_iqm_hdr_guide",   companion = "st_iqm_hdr_companion",
+	hire   = "st_iqm_hdr_hire",
 	guider = "st_iqm_hdr_guider",  trader = "st_iqm_hdr_trader", mechanic = "st_iqm_hdr_mechanic",
 	barman = "st_iqm_hdr_barman",  medic = "st_iqm_hdr_medic",   important = "st_iqm_hdr_important",
 	work   = "st_iqm_hdr_work",
@@ -1548,7 +1684,7 @@ local function dbg_out(fmt, ...)
 end
 
 local DBG_ROLES = {
-	target = true, guide = true, companion = true,
+	target = true, guide = true, companion = true, hire = true,
 	guider = true, trader = true, mechanic = true, barman = true,
 	medic = true, important = true, work = true,
 }
@@ -1607,6 +1743,7 @@ local function inject_f7_actions()
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Quest Target", functor = { debug_card, "target" },    hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide",        functor = { debug_card, "guide" },     hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Companion",    functor = { debug_card, "companion" }, hide_ui = 2 })
+	ui_debug_launcher.inject("target", { name = "IQM: Card as Paid Escort",  functor = { debug_card, "hire" },      hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Guide NPC",    functor = { debug_card, "guider" },    hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Trader",       functor = { debug_card_service },      hide_ui = 2 })
 	ui_debug_launcher.inject("target", { name = "IQM: Card as Important",    functor = { debug_card, "important" }, hide_ui = 2 })
@@ -1766,6 +1903,7 @@ function on_option_change()
 	next_scan = 0
 	scanner_reset(companion_scanner)   -- rescan from scratch so toggles apply without the throttle lag
 	scanner_reset(extras_scanner)
+	recruit_static = {}                -- drop the memoized per-NPC recruit facts with them
 	if iqm_taskwork and iqm_taskwork.reset then iqm_taskwork.reset() end
 end
 

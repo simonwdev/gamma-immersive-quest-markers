@@ -13,6 +13,7 @@
 	<string id="st_iqm_hdr_target"><text>REPORT BACK</text></string>
 	<string id="st_iqm_hdr_guide"><text>LOOKING FOR GUIDE</text></string>
 	<string id="st_iqm_hdr_companion"><text>LOOKING FOR WORK</text></string>
+	<string id="st_iqm_hdr_hire"><text>FOR HIRE</text></string>
 	<string id="st_iqm_hdr_guider"><text>GUIDE</text></string>
 	<string id="st_iqm_hdr_trader"><text>TRADER</text></string>
 	<string id="st_iqm_hdr_mechanic"><text>TECHNICIAN</text></string>
@@ -50,7 +51,10 @@
 	<string id="ui_mcm_iqm_mark_guides_desc"><text>Show a card over the stalker who is currently looking for a guide to escort them (the "Need a guide?" job). Detected via the guide job's own dialogue condition, so it matches exactly when that action is available, and only one stalker offers it at a time. Requires the guide-job system (ships with GAMMA); without it this has no effect.</text></string>
 
 	<string id="ui_mcm_iqm_mark_companions"><text>Card recruitable companions</text></string>
-	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now: friendly, part of a squad, and within your companion limit. Detected without a full scan. A party-full check skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility check. Requires the companion system (ships with GAMMA); without it this has no effect.</text></string>
+	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now, for free: friendly, part of a squad, and within your companion limit. Detected without a full scan. A party-full check skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility checks, so the card matches exactly when that dialogue option is available. Requires the companion system (ships with GAMMA); without it this has no effect.</text></string>
+
+	<string id="ui_mcm_iqm_mark_hires"><text>Card stalkers you can hire</text></string>
+	<string id="ui_mcm_iqm_mark_hires_desc"><text>Show a card ("FOR HIRE") over nearby stalkers who would take money to leave their squad and work as your escort, the paid version of the companion dialogue. These are a different set of NPCs from the free recruits: hiring is for neutral stalkers, and only from the factions that sell escort duty (Loners, Freedom, Mercenaries, Bandits). It is also unavailable on the dangerous maps and under Warfare. Uses the same slow 3-second on-screen scan and the game's own dialogue conditions, so the card matches exactly when the offer is available. Requires the paid-companion system (ships with GAMMA); without it this has no effect.</text></string>
 
 	<string id="ui_mcm_iqm_mark_guiders"><text>Card guide NPCs</text></string>
 	<string id="ui_mcm_iqm_mark_guiders_desc"><text>Show a card ("GUIDE" plus the guide glyph) over NPCs offering fast-travel guide services, the ones your PDA marks with the Guide icon. The Service card style option below can switch it to an icon-only chip or plain text. Detected from the engine's own PDA map-spot registry, so it always matches the map legend.</text></string>
@@ -68,7 +72,7 @@
 	<string id="ui_mcm_iqm_faction_colors_desc"><text>Tint each card (the leader line, edge bar, header text and head node) with the NPC's faction colour instead of the default gold accent. Colours match the faction palette used by the GAMMA DB site. NPCs of a factionless community (e.g. zombies, monsters) keep the gold accent.</text></string>
 
 	<string id="ui_mcm_iqm_faction_icons"><text>Show faction emblems</text></string>
-	<string id="ui_mcm_iqm_faction_icons_desc"><text>Show the NPC's faction emblem on the state cards (quest turn-in, "needs a guide", recruitable companion), inlined before the text. Service and important-character cards keep their role glyph (trader, medic, guide, etc.) instead. The emblems are the game's own PDA faction patches (from G.A.M.M.A. UI, so they match the faction-relations screen and any HD patch mod you have installed). NPCs of a factionless community show no emblem.</text></string>
+	<string id="ui_mcm_iqm_faction_icons_desc"><text>Show the NPC's faction emblem on the state cards (quest turn-in, "needs a guide", recruitable companion, stalker for hire), inlined before the text. Service and important-character cards keep their role glyph (trader, medic, guide, etc.) instead. The emblems are the game's own PDA faction patches (from G.A.M.M.A. UI, so they match the faction-relations screen and any HD patch mod you have installed). NPCs of a factionless community show no emblem.</text></string>
 
 	<string id="ui_mcm_iqm_short_ranks"><text>Abbreviate NPC ranks</text></string>
 	<string id="ui_mcm_iqm_short_ranks_desc"><text>Shorten a long military rank at the start of an NPC's name so it fits the card: "Senior Sergeant Abdurakhmanov" becomes "Snr Sgt Abdurakhmanov". Only the leading rank is abbreviated; the surname is left alone. Mostly affects Duty and Military stalkers.</text></string>

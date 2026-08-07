@@ -23,6 +23,7 @@ function on_mcm_load()
 				{ id = "mark_targets",    type = "check", val = 1, def = d.mark_targets },
 				{ id = "mark_guides",     type = "check", val = 1, def = d.mark_guides },
 				{ id = "mark_companions", type = "check", val = 1, def = d.mark_companions },
+				{ id = "mark_hires",      type = "check", val = 1, def = d.mark_hires },
 				{ id = "mark_guiders",    type = "check", val = 1, def = d.mark_guiders },
 				{ id = "mark_traders",    type = "check", val = 1, def = d.mark_traders },
 				{ id = "mark_important",  type = "check", val = 1, def = d.mark_important },

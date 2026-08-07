@@ -16,7 +16,7 @@ Every external reference is either a base Anomaly script or existence-guarded wi
 |---|---|---|
 | MCM (`ui_mcm`) | In-game settings | Built-in defaults apply |
 | Demonized's Geometry Ray (`demonized_geometry_ray`) | Line-of-sight culling | LOS check skipped; cards show through walls |
-| Individually Recruitable Companions (`individually_recruitable_companions`, GAMMA) | Exact recruit-eligibility and party-size rules | Falls back to base `axr_companions` checks |
+| Individually Recruitable Companions (`individually_recruitable_companions`, GAMMA) | The "pull one member out of a squad" recruit/hire variants and their party-size rule | Only the base whole-squad-via-commander variants are detected |
 | Warfare (`warfare` + `_G.WARFARE`) | Mirrors the warfare-trader branch of the task-giver gate | Branch never taken |
 | GAMMA PDA Task Board | The work detector reads its pinned offers and mirrors its sim/ordered variant rule — via base `axr_task_manager` state only, no direct call | Vanilla dialog-cache path used instead |
 
@@ -24,7 +24,8 @@ Every external reference is either a base Anomaly script or existence-guarded wi
 - `axr_task_manager`, `task_manager`, `xr_conditions`, `dialogs` — the experimental `HIRING` detector; a one-time system check disables the feature if any are missing.
 - `tasks_guide` + `alife_storage_manager` — the `LOOKING FOR GUIDE` card; skipped if absent.
 - `task_functor` + `tasks_delivery` — resolving delivery-quest target NPCs; skipped if absent.
-- `axr_companions` — recruitable-companion cards; the whole scan no-ops without a companion system.
+- `axr_companions` + `dialogs_axr_companion` — `LOOKING FOR WORK` cards; the whole scan no-ops without a companion system.
+- `txr_paid_companions` — `FOR HIRE` cards (paid escort); that branch is skipped if absent.
 - `trader_autoinject` — refines a service NPC's role from its trade file; the service detector also has a self-contained fallback that reads the logic block's `trade=` field directly.
 - `ui_debug_launcher` — injects the "IQM: Card as…" test actions into the F7 debug menu; debug-only.
 - `game_relations` — faction-enemy check (core script, can't be absent).
@@ -46,7 +47,8 @@ Headers follow two grammars on purpose. State cards use verb phrases: they mark 
 State cards (headers are written as the NPC broadcasting their own status on their PDA):
 - **Quest objective**: the NPC the game is currently pointing you at. That covers a dynamic task (fetch/bounty) that has reached its hand-in stage, a storyline or mid-quest "go talk to X" step, and a delivery quest's "deliver to" NPC. Delivery targets are resolved directly from the delivery job's target functor (`task_functor.general_delivery`, ships with GAMMA), which the engine's own `current_target` can miss; they appear once you've travelled to that NPC's level and they're on-screen. All read `REPORT BACK`. Hostiles are never carded.
 - **"Needs a guide" stalker**: the stalker currently looking for a guide to escort them somewhere (the GAMMA guide job). The guide squad is read from the job's own saved state, so the card matches exactly when that job is available, and it disappears the moment you accept the escort. Header reads `LOOKING FOR GUIDE`. Soft dependency on `tasks_guide` (ships with GAMMA); skipped if absent.
-- **Recruitable companions**: nearby friendly stalkers you could hire as a companion right now. Header reads `LOOKING FOR WORK`. This scan is kept cheap: it skips entirely when your party is full, checks the cheapest conditions first per NPC, only keeps stalkers that project on-screen, and runs on a slow 3-second cadence with the result cached between scans. Eligibility uses GAMMA's actual recruit-dialog preconditions. Soft dependency on the companion system (ships with GAMMA); skipped if absent.
+- **Recruitable companions**: nearby friendly stalkers you could recruit as a companion right now, for free. Header reads `LOOKING FOR WORK`. This scan is kept cheap: it skips entirely when your party is full, checks the cheapest conditions first per NPC, only keeps stalkers that project on-screen, and runs on a slow 3-second cadence with the result cached between scans. Eligibility uses GAMMA's actual recruit-dialog preconditions. Soft dependency on the companion system (ships with GAMMA); skipped if absent.
+- **Stalkers for hire**: the paid half of the same dialog — stalkers who'd take money to leave their squad and work as your escort. Header reads `FOR HIRE`. Deliberately a separate card from the free recruit, because it is a disjoint set of NPCs: the free offer wants relation *friend*, the paid one wants relation *neutral*, and the paid one is limited to the communities that sell escort duty (Loners, Freedom, Mercenaries, Bandits), off the blacklisted maps, and outside Warfare. Both the individually-recruitable (pull one member out of a squad) and the base whole-squad-via-commander variants are covered. Resolved by the same 3-second scan, from the game's own dialog preconditions.
 
 Ambient role cards are detected from the engine's own PDA map-spot registry (the same source as the map legend icons), polled per NPC on a slow cadence:
 - **Guides**: NPCs offering fast-travel guide services (the PDA "Guide" icon). Header reads `GUIDE`.
@@ -61,7 +63,7 @@ With `HIRING` in the mix a busy camp can produce more candidates than the 8 card
 
 ## MCM (Options → Mod Configuration → Immersive Quest Markers)
 Split across two tabs. **Core** holds the everyday switches; **Advanced** holds fine tuning, styling, colour, motion and performance rates.
-- **Core:** enable · card quest targets · card the "needs a guide" stalker · card recruitable companions · card guide NPCs · card service NPCs (trader/technician/barkeep/medic) · card important characters · card NPCs with work available (experimental) · appear distance · line-of-sight check · PDA chirp on sighting.
+- **Core:** enable · card quest targets · card the "needs a guide" stalker · card recruitable companions · card stalkers you can hire · card guide NPCs · card service NPCs (trader/technician/barkeep/medic) · card important characters · card NPCs with work available (experimental) · appear distance · line-of-sight check · PDA chirp on sighting.
 - **Advanced (node):** show head node dot, pulse the node glow, node size, node min size (far).
 - **Advanced (sound):** PDA chirp volume.
 - **Advanced (cards):** service card style (icon chip / text + icon / text only).
@@ -76,11 +78,11 @@ Split across two tabs. **Core** holds the everyday switches; **Advanced** holds 
 ## Testing without quests
 A card can be forced onto the stalker under your crosshair, bypassing the task/guide/companion detection. Two ways:
 
-- **F7 debug menu → Target tab**: look at a stalker, press F7, and use the injected `IQM: Card as Quest Target / Guide / Companion / Guide NPC / Trader / Important / Has-Work` actions (plus `IQM: Clear Pinned Cards`, and `IQM: Task-Work Dump` to print the work detector's cache/queue state). The menu closes and the card appears immediately. `Card as Trader` cycles a random service glyph (trader / technician / barkeep / medic) each press, so all four can be previewed from one button.
+- **F7 debug menu → Target tab**: look at a stalker, press F7, and use the injected `IQM: Card as Quest Target / Guide / Companion / Paid Escort / Guide NPC / Trader / Important / Has-Work` actions (plus `IQM: Clear Pinned Cards`, and `IQM: Task-Work Dump` to print the work detector's cache/queue state). The menu closes and the card appears immediately. `Card as Trader` cycles a random service glyph (trader / technician / barkeep / medic) each press, so all four can be previewed from one button.
 - **Lua execute box / script console**:
 
   ```lua
-  iqm_markers.debug_card("target")     -- or "guide" / "companion" / "guider" / "trader" /
+  iqm_markers.debug_card("target")     -- or "guide" / "companion" / "hire" / "guider" / "trader" /
                                        -- "mechanic" / "barman" / "medic" / "important" / "work"
   ```
 
