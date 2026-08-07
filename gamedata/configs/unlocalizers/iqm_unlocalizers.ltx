@@ -1,0 +1,23 @@
+; Immersive Quest Markers unlocalizers
+;
+; Exposes the locals the FOR HIRE card needs to match the paid-escort dialogue
+; without calling into it. txr_paid_companions pins each squad's price multiplier
+; and hire verdict in `dialog_squad`, and the payment phrases the player actually
+; sees are gated on that multiplier times the base prices - all four of them file
+; locals, so there is no read-only way to know whether the offer dead-ends on cost.
+;
+;   dialog_squad  - [squad.id] = { money = <price multiplier>, can_work = "true"/"false" }
+;   money_1_base  - base price for the 24h hire (the multiplier is applied to it)
+;   money_2_base  - base price for the 48h hire
+;
+; Unlocalizing REQUIRES modded exes (themrdemonized / GAMMA ships them). Without
+; them this file is simply never read: iqm_markers checks for dialog_squad and
+; falls back to carding without the affordability check or the price, so nothing
+; breaks on bare Anomaly.
+;
+; Modded binaries: https://github.com/themrdemonized/xray-monolith
+
+[txr_paid_companions]
+dialog_squad
+money_1_base
+money_2_base

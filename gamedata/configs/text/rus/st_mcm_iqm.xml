@@ -14,6 +14,7 @@
 	<string id="st_iqm_hdr_guide"><text>хыс опнбндмхйю</text></string>
 	<string id="st_iqm_hdr_companion"><text>хыс пюанрс</text></string>
 	<string id="st_iqm_hdr_hire"><text>мюелмши</text></string>
+	<string id="st_iqm_hdr_hire_price"><text>мюелмши: %s RU</text></string>
 	<string id="st_iqm_hdr_guider"><text>опнбндмхй</text></string>
 	<string id="st_iqm_hdr_trader"><text>рнпцнбеж</text></string>
 	<string id="st_iqm_hdr_mechanic"><text>реумхй</text></string>

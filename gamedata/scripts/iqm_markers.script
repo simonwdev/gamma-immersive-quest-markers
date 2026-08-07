@@ -629,7 +629,8 @@ local function static_facts(actor, obj, id)
 	-- precisely so the writing call is never made for a squad whose answer is already
 	-- knowable. Plain finds, like the original's magic-free string.find.
 	local sec = squad:section_name() or ""
-	f = { story_ok     = get_object_story_id(squad.id) == nil,
+	f = { squad_id     = squad.id,                -- the dialog_squad key (see hire_price)
+	      story_ok     = get_object_story_id(squad.id) == nil,
 	      paid_faction = (txr and txr.is_paid_companion_faction(actor, obj)) and true or false,
 	      paid_tier    = (sec:find("veteran", 1, true) or sec:find("advanced", 1, true)) and true or false }
 	recruit_static[id] = f
@@ -654,6 +655,40 @@ local function paid_competent(actor, obj, f)
 		f.competent = (txr and txr.is_squad_competent(actor, obj)) and true or false
 	end
 	return f.competent
+end
+
+-- The paid dialogue's last gate, and the only one that moves with your wallet.
+-- txr_paid_companions pins a price multiplier per squad (dialog_squad[id].money,
+-- set by is_squad_competent) and gates the two payment phrases on
+-- have_guard_money_1/2. Can't afford the cheaper one and BOTH are hidden, leaving
+-- only "Actually... I changed my mind" - a dead end, so nothing to card.
+-- The multiplier and the base prices are all file locals;
+-- gamedata\configs\unlocalizers\iqm_unlocalizers.ltx exposes them, which needs the
+-- modded exes GAMMA ships. Without them dialog_squad is simply nil here, this
+-- returns nil, and the caller skips both the affordability gate and the price -
+-- i.e. exactly the behaviour before the unlocalizer existed.
+--
+-- The base game is inconsistent here and we mirror it deliberately:
+-- have_guard_money_1 TESTS the multiplier against a hardcoded 2000, while
+-- take_guard_money_1 CHARGES money_1_base (1500). So you need 2700 in your pocket
+-- to be offered a 2025 RU hire. Test what the dialogue tests, show what it charges.
+local HIRE_TEST_BASE = 2000   -- have_guard_money_1's hardcoded test base; NOT money_1_base
+
+-- Returns the 24h price shown on the card and the amount the dialogue demands you
+-- be carrying, or nil when the multiplier isn't readable.
+local function hire_price(squad_id)
+	local txr = txr_paid_companions
+	local ds  = txr and txr.dialog_squad                  -- nil without the unlocalizer
+	local e   = ds and squad_id and ds[squad_id]
+	local mult = e and e.money
+	if not mult then return nil end
+	return floor(mult * (txr.money_1_base or 1500)), mult * HIRE_TEST_BASE
+end
+
+-- The price the scan resolved for this NPC's squad, for the card header.
+local function hire_price_of(id)
+	local f = recruit_static[id]
+	return f and f.price
 end
 
 -- Per-NPC recruit predicate: returns the card role the NPC's own dialog would offer
@@ -723,7 +758,15 @@ local function npc_recruitable_impl(obj, rel, ctx)
 			return "companion"
 		end
 	end
-	if paid and paid_competent(actor, obj, f) then return "hire" end
+	if paid and paid_competent(actor, obj, f) then
+		-- affordability is the one paid gate that isn't static: re-checked every pass,
+		-- so the card appears the moment you can cover it and goes away when you can't
+		local price, need = hire_price(f.squad_id)
+		if price and mlr_utils and mlr_utils.have_money
+		   and not mlr_utils.have_money(need) then return nil end
+		f.price = price
+		return "hire"
+	end
 	return nil
 end
 
@@ -1372,7 +1415,7 @@ local function render(tg)
 			if not t.name then t.name = name_from_obj(obj) end   -- name is stable: resolve once per NPC
 			local rx, ry = smooth_point(id, hx, hy, tg)
 			local lift   = (1 - ease_out_quint(f.appear)) * APPEAR_LIFT
-			CARDS:draw_slot(t.slot, rx, ry, header_for(t.role, t.hkey), t.name, f.a, C, node_scale_for_dist(dist), lift,
+			CARDS:draw_slot(t.slot, rx, ry, t.htext or header_for(t.role, t.hkey), t.name, f.a, C, node_scale_for_dist(dist), lift,
 			                t.icon, t.chip, t.cr, t.cg, t.cb, t.icon_tinted, tg)
 		end
 	end
@@ -1858,6 +1901,18 @@ local function update()
 			-- role, the pinned task and with it the kind can change when the verdict
 			-- refreshes); nil for other roles and for unclassified offers.
 			t.hkey = (e.role == "work" and tw_kind) and WORK_HDR[tw_kind(e.id)] or nil
+
+			-- hire cards advertise the actual 24h price when it's readable (see
+			-- hire_price). Built here, once per pass, because unlike every other
+			-- header it isn't a fixed string the translation cache can hold; the
+			-- draw path just reads the field. Cleared for every other role, since a
+			-- debug pin can change a tracked entry's role under us.
+			if e.role == "hire" then
+				local p = hire_price_of(e.id)
+				t.htext = p and string.format(header_for("hire", "st_iqm_hdr_hire_price"), p) or nil
+			else
+				t.htext = nil
+			end
 
 			-- Faction lookup, resolved once per NPC (community is stable for its life)
 			-- and cached on the entry, so the per-frame draw path stays lookup-free. The
