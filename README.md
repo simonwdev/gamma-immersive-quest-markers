@@ -64,7 +64,8 @@ With `HIRING` in the mix a busy camp can produce more candidates than the 8 card
 
 ## MCM (Options → Mod Configuration → Immersive Quest Markers)
 Split across two tabs. **Core** holds the everyday switches; **Advanced** holds fine tuning, styling, colour, motion and performance rates.
-- **Core:** enable · card quest targets · card the "needs a guide" stalker · card recruitable companions · card stalkers you can hire · card guide NPCs · card service NPCs (trader/technician/barkeep/medic) · card important characters · card NPCs with work available (experimental) · appear distance · line-of-sight check · PDA chirp on sighting.
+- **Core:** enable · card quest targets · card the "needs a guide" stalker · card recruitable companions · card stalkers you can hire · card guide NPCs · card service NPCs (trader/technician/barkeep/medic) · card important characters · card NPCs with work available (experimental) · appear distance · line-of-sight check · PDA chirp on sighting · reveal hotkey (mode, key, modifier).
+- **Reveal hotkey:** with no key bound the cards show whenever they qualify, as before. Bind one to gate them instead, in any of MCM's standard activation modes — press, double-tap or long press to toggle them on and off — plus a fourth, *hold to show*: cards only while the key is physically down, so the world stays clean until you ask. An optional shift/ctrl/alt modifier is honoured, and the long-press time and double-tap window come from MCM's own Key Binds settings, so they match every other mod that uses them. Detection keeps running while the cards are hidden, so bringing them back is instant — no rescan, no repeated chirp, no replayed entrance. Needs MCM 1.6.0 or newer.
 - **Advanced (node):** show head node dot, pulse the node glow, node size, node min size (far).
 - **Advanced (sound):** PDA chirp volume.
 - **Advanced (cards):** service card style (icon chip / text + icon / text only).

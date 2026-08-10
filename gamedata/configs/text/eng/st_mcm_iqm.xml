@@ -57,7 +57,7 @@
 	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now, for free: friendly, part of a squad, and within your companion limit. Detected without a full scan. A party-full check skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility checks, so the card matches exactly when that dialogue option is available. Requires the companion system (ships with GAMMA); without it this has no effect.</text></string>
 
 	<string id="ui_mcm_iqm_mark_hires"><text>Card stalkers you can hire</text></string>
-	<string id="ui_mcm_iqm_mark_hires_desc"><text>Show a card ("FOR HIRE") over nearby stalkers who would take money to leave their squad and work as your escort, the paid version of the companion dialogue. These are a different set of NPCs from the free recruits: hiring is for neutral stalkers, and only from the factions that sell escort duty (Loners, Freedom, Mercenaries, Bandits). It is also unavailable on the dangerous maps and under Warfare, and only veteran and advanced squads take escort work at all — so this card is genuinely rare, and a stalker without one is not a detection failure. Because the game decides a squad's answer the first time it is asked, the card asks on your behalf when you are already next to them and on-screen, which is what lets it match the dialogue exactly (including the card clearing once a squad turns you down). Uses the same slow 3-second on-screen scan. Requires the paid-companion system (ships with GAMMA); without it this has no effect.</text></string>
+	<string id="ui_mcm_iqm_mark_hires_desc"><text>Show a card ("FOR HIRE") over nearby stalkers who would take money to leave their squad and work as your escort, the paid version of the companion dialogue. These are a different set of NPCs from the free recruits: hiring is for neutral stalkers, and only from the factions that sell escort duty (Loners, Freedom, Mercenaries, Bandits). It is also unavailable on the dangerous maps and under Warfare, and only veteran and advanced squads take escort work at all ï¿½ so this card is genuinely rare, and a stalker without one is not a detection failure. Because the game decides a squad's answer the first time it is asked, the card asks on your behalf when you are already next to them and on-screen, which is what lets it match the dialogue exactly (including the card clearing once a squad turns you down). Uses the same slow 3-second on-screen scan. Requires the paid-companion system (ships with GAMMA); without it this has no effect.</text></string>
 
 	<string id="ui_mcm_iqm_mark_guiders"><text>Card guide NPCs</text></string>
 	<string id="ui_mcm_iqm_mark_guiders_desc"><text>Show a card ("GUIDE" plus the guide glyph) over NPCs offering fast-travel guide services, the ones your PDA marks with the Guide icon. The Service card style option below can switch it to an icon-only chip or plain text. Detected from the engine's own PDA map-spot registry, so it always matches the map legend.</text></string>
@@ -85,6 +85,21 @@
 	<string id="ui_mcm_lst_iqm_style_text"><text>Text only</text></string>
 	<string id="ui_mcm_lst_iqm_style_mixed"><text>Text + icon</text></string>
 	<string id="ui_mcm_lst_iqm_style_chip"><text>Icon chip</text></string>
+
+	<!-- Reveal hotkey. The modifier values and the first three mode values are MCM's own
+	     "mcm_kb_mod_*" / "mcm_kb_mode_*" ids, so their labels come from MCM's string
+	     table and must not be repeated here. Only the captions and the fourth mode
+	     (hold-to-show, which MCM has no equivalent for) are ours. -->
+	<string id="ui_mcm_iqm_reveal_mode"><text>Reveal activation mode</text></string>
+	<string id="ui_mcm_iqm_reveal_mode_desc"><text>What the reveal key does. The first three flip the cards on and off with a simple press, a double tap or a long press; their tap window and press time are the shared ones from MCM's own Key Binds settings, so they match every other mod that uses them. "Hold to show" instead keeps the cards up only while the key is held down, so the world stays clean until you ask. Detection keeps running while the cards are hidden either way, so they reappear instantly with no rescan, and a card's chirp and entrance animation are not replayed. Has no effect until a key is bound above.</text></string>
+	<string id="ui_mcm_lst_iqm_reveal_hold"><text>Hold to show</text></string>
+
+	<!-- MCM copies every key_bind into its global "Key Binds" page, where this caption
+	     appears alongside every other mod's, so it names the mod as MCM's docs ask. -->
+	<string id="ui_mcm_iqm_reveal_key"><text>Reveal cards (Immersive Quest Markers)</text></string>
+	<string id="ui_mcm_iqm_reveal_key_desc"><text>The key that shows and hides the cards, using the activation mode below. Left unbound (the default) the cards are always shown whenever they qualify, which is the behaviour from before the hotkey existed.</text></string>
+
+	<string id="ui_mcm_iqm_reveal_no_mcm"><text>The reveal hotkey needs MCM 1.6.0 or newer. Update MCM to bind a key; until then the cards are always shown.</text></string>
 
 	<string id="ui_mcm_iqm_show_node"><text>Show head node dot</text></string>
 	<string id="ui_mcm_iqm_show_node_desc"><text>Draw the small dot at the NPC's head where the leader line begins. Turn off for just the line and card.</text></string>

@@ -31,6 +31,14 @@ DEFAULTS = {
 	role_style   = 1,      -- service/important card style: 0 text card, 1 text + glyph (default), 2 icon-only chip
 	debug_log    = false,  -- write IQM diagnostic lines to the console/log
 
+	-- Reveal hotkey. Values mirror MCM's own activation modes (mcm_kb_mode_*), so the
+	-- menu can use MCM's labels. The feature stays opt-in through the key, not the mode:
+	-- an unbound key (-1, the default) means the cards are always shown whatever the mode,
+	-- which is the pre-hotkey behaviour.
+	reveal_mode  = 0,      -- 0 press to toggle, 1 double-tap to toggle, 2 long-press to toggle, 3 hold to show
+	reveal_key   = -1,     -- DIK code of the reveal key; -1 = unbound (cards always shown)
+	reveal_mod   = 0,      -- required modifier: 0 none, 1 shift, 2 ctrl, 3 alt
+
 	appear_dist  = 16,     -- metres: card starts fading in at this range
 	full_dist    = 9,      -- metres: card is fully solid once you're this close
 	head_lift    = -0.02,  -- metres to nudge the anchor vertically (0 = on the left-shoulder bone; - drops toward mid-torso; + raises it)
@@ -69,6 +77,7 @@ CORE_KEYS = {
 	mark_traders = true, mark_important = true, mark_work = true,
 	faction_colors = true, faction_icons = true,
 	appear_dist = true, los_check = true, sound_alert = true,
+	reveal_mode = true, reveal_key = true, reveal_mod = true,
 }
 
 local C          = {}     -- live config (DEFAULTS overlaid with MCM values)
@@ -118,6 +127,13 @@ local tw_has_work, tw_tick, tw_kind = nil, nil, nil
 -- _g.script (the check the rest of GAMMA's HUD mods use) and axr_main carries the
 -- live zoom flags. Both are read once per frame in hud_is_shown().
 local hud_shown_fn, axr = nil, nil
+-- Reveal-hotkey state. key_state_fn is the engine's live physical-key poll
+-- (bound in on_game_start with the rest); mcm_keybinds is the MCM >= 1.6.0 keybind
+-- feature test every GAMMA mod uses -- ui_mcm.key_hold only exists from that version,
+-- and the modifier/mode helpers arrived with it.
+local key_state_fn  = nil
+local mcm_keybinds  = false
+local reveal_on     = true   -- toggle state (modes 0-2); hold-to-show (3) ignores it
 
 -- Reusable scratch vector2s: SetWndPos/SetWndSize consume their argument immediately, so
 -- one pair per purpose can be :set() and handed over instead of allocating a fresh vector2
@@ -1328,6 +1344,79 @@ local function hud_is_shown()
 	return hud_shown_fn()
 end
 
+-- --------------------------------------------------------------------------
+-- Reveal hotkey
+-- --------------------------------------------------------------------------
+-- Four modes (C.reveal_mode). 0/1/2 mirror MCM's own activation modes (press,
+-- double-tap, long-press) and all toggle, differing only in the gesture MCM detects.
+-- 3 is hold-to-show: the cards are up only while the key is physically down. MCM has
+-- no helper for that -- its key_hold is a long press that fires once, which is mode 2.
+-- "Always shown" is deliberately not a mode: an unbound key (-1) means always shown, so
+-- a half-configured menu can never leave you with no cards and no way to get them back.
+--
+-- Hold mode polls key_state() -- the engine's live physical key state -- rather than
+-- latching a flag off on_key_press/on_key_release. Those two callbacks are gated on
+-- KEYS_UNLOCK (bind_stalker_ext), which goes false the moment a scripted GUI opens, so
+-- a release pressed "through" a UI opening is simply never delivered and a latched flag
+-- would leave the cards stuck on until the key was pressed again. Polling is
+-- self-correcting, and we're already on a per-frame path, so it costs one engine call.
+-- on_key_hold is NOT KEYS_UNLOCK-gated, which is why the long-press mode can use it.
+local function reveal_visible()
+	local key = C.reveal_key or -1
+	if key < 0 then return true end
+
+	if (C.reveal_mode or 0) == 3 then
+		if not key_state_fn then return true end   -- no engine poll: don't hide with no way back
+		-- key_state is BOOL-typed in the engine, so it currently arrives as 0/1; the
+		-- "or 0" form also reads correctly if it is ever exported as a real boolean
+		-- (false would otherwise pass a bare ~= 0 test). Same guard MCM itself uses.
+		if (key_state_fn(key) or 0) == 0 then return false end
+		-- get_mod_key polls the modifier keys the same way; with old MCM (no keybind
+		-- support) there is no modifier option to honour, so the key alone is enough.
+		return (not mcm_keybinds) or ui_mcm.get_mod_key(C.reveal_mod or 0)
+	end
+	return reveal_on
+end
+
+local function toggle_reveal()
+	reveal_on = not reveal_on
+end
+
+-- All three modes filter for our key first, as MCM's tutorial requires -- the
+-- double_tap/key_hold timers are keyed on (id, key) and feeding them foreign keys
+-- would corrupt the timing state. simple_press gives the press mode exclusivity: it
+-- won't fire when the same key is being double-tapped or held, at the cost of one
+-- double-tap window of input delay.
+--
+-- Press and double-tap ride on_key_press; long-press needs on_key_hold, which fires
+-- every frame while the key is down. ui_mcm.key_hold returns true once the user's
+-- configured press time has elapsed (MCM Key Bind settings -- shared with every other
+-- mod, so a long press feels the same everywhere) and, with no repeat argument, not
+-- again until the key is released.
+local function on_key_press(key)
+	if key ~= (C.reveal_key or -1) then return end
+	local mode = C.reveal_mode or 0
+	if mode ~= 0 and mode ~= 1 then return end
+	if not mcm_keybinds then                    -- pre-1.6 MCM: no modifier/mode helpers
+		toggle_reveal()
+		return
+	end
+	if not ui_mcm.get_mod_key(C.reveal_mod or 0) then return end
+	if mode == 0 then
+		ui_mcm.simple_press("iqm_reveal", key, toggle_reveal)
+	elseif ui_mcm.double_tap("iqm_reveal", key) then
+		toggle_reveal()
+	end
+end
+
+local function on_key_hold(key)
+	if key ~= (C.reveal_key or -1) or (C.reveal_mode or 0) ~= 2 then return end
+	if not mcm_keybinds then return end         -- long press needs MCM's hold timer
+	if ui_mcm.get_mod_key(C.reveal_mod or 0) and ui_mcm.key_hold("iqm_reveal", key) then
+		toggle_reveal()
+	end
+end
+
 local function render(tg)
 	if not CARDS then return end
 	if next(tracked) == nil then return end   -- nothing to draw: skip the PDA/device work entirely
@@ -1335,7 +1424,11 @@ local function render(tg)
 	-- so coming back resumes cleanly (no re-chirp, no replayed entrance). The PDA is
 	-- checked separately because it hides the indicators engine-side, which never
 	-- reaches the Lua state main_hud_shown() reads.
-	if pda_is_open() or (not hud_is_shown()) then
+	-- The reveal hotkey rides the same path on purpose: keeping the tracked set alive
+	-- means letting go of the key and pressing it again resumes instantly, with no
+	-- rescan, no replayed entrance animation and no second chirp. (Gating update() or
+	-- C.enabled instead would clear_all() and pay a full rescan on every release.)
+	if pda_is_open() or (not hud_is_shown()) or (not reveal_visible()) then
 		for _, t in pairs(tracked) do CARDS:hide_slot(t.slot) end
 		return
 	end
@@ -1984,6 +2077,9 @@ end
 -- --------------------------------------------------------------------------
 function on_option_change()
 	read_config()
+	-- Re-arm the toggle: switching modes or rebinding the key while toggled off would
+	-- otherwise leave the cards hidden with no obvious way back.
+	reveal_on = true
 	clear_all()
 	next_scan = 0
 	scanner_reset(companion_scanner)   -- rescan from scratch so toggles apply without the throttle lag
@@ -1999,6 +2095,8 @@ function on_game_start()
 	factions_enemies = game_relations.is_factions_enemies
 	hud_shown_fn = main_hud_shown or function() return true end  -- base _g.script; fallback binds the guard once instead of per frame
 	axr          = axr_main or {}                -- holds the live binoc/scope zoom flags
+	key_state_fn = key_state                     -- engine live key poll, for the hold-to-show mode
+	mcm_keybinds = (ui_mcm and ui_mcm.key_hold) and true or false
 	if iqm_taskwork then                         -- work detection (soft: absent module just means no work cards)
 		tw_has_work, tw_tick, tw_kind = iqm_taskwork.has_work, iqm_taskwork.probe_tick, iqm_taskwork.work_kind
 	end
@@ -2006,4 +2104,6 @@ function on_game_start()
 	inject_f7_actions()            -- add the pin actions to the F7 debugger's Target tab
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("on_option_change", on_option_change)
+	RegisterScriptCallback("on_key_press", on_key_press)   -- reveal_mode 0/1 (press, double-tap)
+	RegisterScriptCallback("on_key_hold", on_key_hold)     -- reveal_mode 2 (long press)
 end

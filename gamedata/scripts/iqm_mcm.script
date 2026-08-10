@@ -7,7 +7,19 @@
 --  iqm_markers.DEFAULTS so there is a single source of truth.
 -- ======================================================================
 
+-- MCM >= 1.6.0 feature test: key_bind, the kb_mod_* option types and the
+-- double_tap/key_hold/get_mod_key helpers all arrived together, and ui_mcm.key_hold is
+-- the check every other GAMMA mod uses for them. On older MCM the key_bind row simply
+-- isn't drawn and ui_mcm.get returns nil for it, so iqm_markers falls back to its
+-- reveal_key default (-1, unbound) and the cards stay always-on.
+--
+-- Declared here (not inside on_mcm_load) so the precondition closures below capture it,
+-- but assigned in on_mcm_load: at chunk-parse time ui_mcm may not be loaded yet, while
+-- on_mcm_load is called by MCM itself and so is guaranteed to be late enough.
+local mcm_keybinds = nil
+
 function on_mcm_load()
+	mcm_keybinds = ui_mcm and ui_mcm.key_hold
 	local d = iqm_markers and iqm_markers.DEFAULTS or {}
 	-- Two subpages (tabs): "Core" (the everyday switches) and "Advanced" (fine tuning,
 	-- styling, colour, motion, perf rates). Which key sits on which tab is mirrored from
@@ -33,6 +45,45 @@ function on_mcm_load()
 				{ id = "appear_dist",     type = "track", val = 2, min = 2, max = 60, step = 1, def = d.appear_dist },
 				{ id = "los_check",       type = "check", val = 1,                              def = d.los_check },
 				{ id = "sound_alert",     type = "check", val = 1,                              def = d.sound_alert },
+
+				-- Reveal hotkey: the stock MCM trio (key_bind + kb_mod_radio modifier +
+				-- kb_mod_radio activation mode), the same shape Ammo Check and the rest of
+				-- GAMMA use. Every VALUE label is one of MCM's own string ids
+				-- ("mcm_kb_mod_*" / "mcm_kb_mode_*"), so this mod ships none of them --
+				-- ui_mcm's Register_List falls back to "ui_mcm_lst_<value>" out of MCM's
+				-- table. Only the three captions are ours.
+				--
+				-- Value 3, hold-to-show, is the one exception and the one label we still
+				-- ship: MCM has no equivalent (its mcm_kb_mode_hold is a long press that
+				-- fires once, which is value 2 here), and showing the cards only while the
+				-- key is physically down is a distinct behaviour worth keeping.
+				--
+				-- There is deliberately no "always" value: an unbound key already means
+				-- always shown (reveal_visible in iqm_markers returns true for key < 0), so
+				-- it would only duplicate it. The explicit hints on the modifier and mode
+				-- rows pull MCM's captions and keep the hint loop below from overwriting
+				-- them. All three rows need MCM >= 1.6.0; the precondition hides them on
+				-- older builds (where ui_mcm.kb_mod_radio is nil anyway) in favour of the
+				-- note underneath.
+				{ id = "reveal_key", type = "key_bind", val = 2, def = d.reveal_key,
+				  precondition = { function() return mcm_keybinds end } },
+				{ id = "reveal_mod", type = mcm_keybinds and ui_mcm.kb_mod_radio or "radio_h",
+				  val = 2, def = d.reveal_mod, hint = "mcm_kb_modifier",
+				  precondition = { function() return mcm_keybinds end }, content = {
+					{ 0, "mcm_kb_mod_none" },
+					{ 1, "mcm_kb_mod_shift" },
+					{ 2, "mcm_kb_mod_ctrl" },
+					{ 3, "mcm_kb_mod_alt" },
+				}},
+				{ id = "reveal_mode", type = "list", val = 2, def = d.reveal_mode,
+				  precondition = { function() return mcm_keybinds end }, content = {
+					{ 0, "mcm_kb_mode_press" },
+					{ 1, "mcm_kb_mode_dtap" },
+					{ 2, "mcm_kb_mode_hold" },
+					{ 3, "iqm_reveal_hold" },
+				}},
+				{ id = "reveal_no_mcm", type = "desc", text = "ui_mcm_iqm_reveal_no_mcm",
+				  clr = {255, 225, 175, 0}, precondition = { function() return not mcm_keybinds end } },
 			}},
 
 			{ id = "advanced", sh = true, text = "ui_mcm_iqm_tab_advanced", gr = {
