@@ -1,0 +1,1699 @@
+-- ======================================================================
+--  Immersive Quest Markers: WHO gets marked
+-- ======================================================================
+-- Everything that answers "which NPCs does the mod want on screen right now", and
+-- nothing that draws. Split out of iqm_core at R2.45 for the reason iqm_debug was
+-- split out at R2.44 and with the same stakes: that file was at 187 of the 198 locals
+-- a .script gets, and going over is a SYNTAX ERROR AT LOAD -- not a fault in one
+-- feature, but the cards, the markers and the route all failing to load together.
+--
+-- What lives here is the four detection paths, in the order the scan runs them:
+--   * quest targets and the guide job, read out of saved state (collect_desired);
+--   * the amortized scanner that spreads a whole-roster walk over frames;
+--   * the recruitable / hireable companion predicate; and
+--   * the service / guide / VIP classifier that reads the PDA map-spot registry.
+-- The product is one table -- [npc_id] = role -- and that table is the entire
+-- interface to the renderer. Nothing here knows what a card looks like.
+--
+-- ----------------------------------------------------------------------
+-- THE SEAM WITH iqm_core (read this before adding a cross-module read)
+--
+-- CONFIG IS PULLED, NEVER PUSHED. iqm_core owns the MCM read; at the end of its
+-- read_config it calls apply_config() below, and THIS file reaches over and takes
+-- what it needs. No payload table is marshalled, and the live config is not copied:
+-- `C` is bound to iqm_core' own table, which that module mutates in place and
+-- never rebinds, so the two can never drift. The derived scalars (appear2, extra2)
+-- ARE copied, because they are numbers rather than a table -- they are read per NPC
+-- per scan, and a namespace lookup on each one is exactly the cost the render-path
+-- mirrors in iqm_core exist to avoid.
+--
+-- NOTHING IS REFERENCED AT FILE SCOPE. Every cross-module name is bound in
+-- on_game_start or apply_config, both of which run long after every .script has
+-- loaded. iqm_util can be read at file scope because nothing reads iqm_util BACK;
+-- this file and iqm_core reference each other, and a file-scope read on both
+-- sides of that pair would make the load order decide which one sees a
+-- half-initialised namespace.
+--
+-- WHAT THIS FILE DOES NOT TOUCH: `tracked` and `FILT` are iqm_core' alone. The
+-- scan produces a desired set and hands it over; the bookkeeping that turns that
+-- into card slots, filter records and widgets is on the other side of the seam and
+-- stays there. Two modules writing one table through the namespace is the failure
+-- this split exists to avoid, not a shortcut it may take.
+-- ----------------------------------------------------------------------
+
+local floor = math.floor
+local pairs, ipairs = pairs, ipairs   -- iterators on the per-scan paths
+
+-- Live config, and the two range mirrors, all filled by apply_config below. `C`
+-- starts as an empty table rather than nil so a scan that somehow runs before the
+-- first read_config reads every option as "off" instead of erroring.
+local C = {}
+local appear2 = 16 * 16
+-- How far the EXTRAS scan (service + guide roles) will classify an NPC. Not the same
+-- question as appear2, and conflating the two is what R2.35 fixed: quest targets arrive
+-- from task_manager.task_info already identified, so they are tracked at any range and
+-- their marker reaches beacon_d. A service NPC has to be FOUND, because the engine binds
+-- map spots by id only (level.map_has_object_spot(id, spot)) and exposes no way to list
+-- everyone carrying one -- so the mod asks each NPC in turn, and that scan needs a limit.
+-- The limit used to be appear2, which was right while the scanner only fed cards (they
+-- fade to nothing at appear_dist) and quietly wrong once markers reached further: a
+-- trader 30 m away was never classified, so it could not be marked, whatever beacon_dist
+-- said. Now it is the wider of the two, which is the same max() the beacon gate already
+-- computes -- see the trim in extras_scan_one for what stops that widening costing.
+local extra2 = 60 * 60
+-- [role] = true when that role should be beaconed. Not this module's: it is rebuilt
+-- on every config change by whoever owns the marker switches, and bound here to that
+-- same table (mutated in place, never replaced) rather than copied. extras_scan_one's
+-- trim asks it whether a role past card range can still draw anything, so a copy
+-- would answer for the switches as they were at the last apply_config.
+local beacon_roles = {}
+
+-- Scan-path globals localised (called per-NPC on the throttled scans). Bound in
+-- on_game_start, since these script/engine globals aren't all guaranteed to exist
+-- when this file is first parsed.
+local get_obj, map_has_spot, char_comm, factions_enemies = nil, nil, nil, nil
+-- The whole-object spot query spot_role reads (one call per NPC instead of one per
+-- role). Bound the same way and for the same reason, with the added one that its
+-- ABSENCE is meaningful: an engine build without it leaves this nil and spot_role
+-- falls back to the per-spot loop.
+local map_get_spots = nil
+-- iqm_taskwork's per-scanned-NPC entry point, bound the same way so a missing module
+-- just no-ops.
+local tw_has_work = nil
+-- iqm_core' on-screen test for a candidate (see companion_scan_one). It owns the
+-- anchor bone walk and the projection; this only ever needs the yes/no.
+local on_screen = function() return true end
+
+-- --------------------------------------------------------------------------
+-- NPC selection
+-- --------------------------------------------------------------------------
+-- Card roles come in two grammars: STATE roles (something to act on right now;
+-- verb-phrase header, chirps on sighting) and AMBIENT roles (a standing fact
+-- about the NPC; noun header, role glyph, silent). Lower prio claims card
+-- slots first, and wins when one NPC qualifies for several roles.
+local ROLE_PRIO = {
+	target = 1,                           -- the current objective NPC (turn-in / talk-to)
+	-- The DELIVER-TO NPC (R2.55). Ties with `target` because it is the same standing --
+	-- the objective NPC of an active task -- and the tie is never contested: a task is at
+	-- its hand-in stage or it is not, and `want` keeps the incumbent on equal priority, so
+	-- whichever branch names the NPC first holds it. Kept a separate role rather than
+	-- folded into `target` because the two say DIFFERENT things: `target` reads REPORT
+	-- BACK and draws the hand-in diamond, which is exactly wrong while the package is
+	-- still in your pack.
+	delivery = 1,
+	guide  = 2,                           -- the "Need a guide?" job offer
+	companion = 3,                        -- recruitable right now, for free (the friendly "come with me" dialog)
+	hire   = 4,                           -- hireable right now, for money (the paid-escort dialog)
+	work   = 5,                           -- has a task to give right now (iqm_taskwork)
+	guider = 6, trader = 6, mechanic = 6, barman = 6, medic = 6, important = 6,
+}
+
+-- [id] = the best-priority role offered for this NPC that actually CARRIES A MARKER,
+-- which is not always the role that won the card. Wiped per pass by desired_set and
+-- published to iqm_core beside `desired`; see want_marker.
+local _mrole = {}
+
+--- Remember `role` as this NPC's MARKER role if it carries one and beats the incumbent.
+--
+--  WHY THE MARKER NEEDS ITS OWN ANSWER (R2.58). `desired` holds ONE role per NPC and
+--  `want` keeps the lowest ROLE_PRIO, which is right for the card: the most actionable
+--  fact is the one worth the words. It is wrong for the marker, because some of the roles
+--  that win that contest carry no marker at all -- `work`, `important`, and `delivery`,
+--  which has never been keyed in beacon_roles -- so a markerless winner used to take the
+--  marker away from a role the same NPC also qualified for and which would have drawn one.
+--
+--  Col Petrenko in Rostok is the case that found it: a trader (marker), with a task to
+--  give (`work`, prio 5), who is also the hand-in for an active task (`target`, prio 1).
+--  `target` won, `beacon_roles.target` was nil, and so he drew NOTHING through a wall --
+--  no card, because the wall is what the marker is for, and no marker, because the card's
+--  role had none to give. The map showed both his hand-in tag and his trader spot the
+--  whole time, since map spots stack per NPC and this set does not.
+--
+--  HE CAME BACK ONCE THIS WORKED, from the other side, and that is the R2.60 change rather
+--  than a change here. With the fall-through in place he drew his TRADER glyph through the
+--  wall while his card read REPORT BACK -- one man, two views, two answers -- because a
+--  hand-in he had not SELECTED still had no marker of its own to keep. The fall-through was
+--  right both times; what was wrong was `target` being markerless, and iqm_beacon's
+--  br.target now says so. This function needed no edit for it: give a role a marker and it
+--  stops being handed down, which is the property the keying below exists to have.
+--
+--  `delivery` (prio 1) is the remaining objective role with no marker, and it fails the
+--  same way on the same bodies -- a courier drop on a shopkeeper marks the shop. Deliberate
+--  for now: BEACON_ICON.delivery exists and keying br.delivery is the same one line, but it
+--  would put an envelope over every recipient in range, which nobody has asked for.
+--
+--  Keyed on `beacon_roles` -- iqm_beacon's live role gate, the same table the render path
+--  consults -- so a role whose marker switch is OFF is not recorded here either, and
+--  turning that switch off still takes its marker with it. Same comparator as `want` on
+--  purpose: with several markered roles offered, the marker follows the card's own notion
+--  of which is more actionable rather than inventing a second order.
+local function want_marker(id, role)
+	if not beacon_roles[role] then return end
+	local cur = _mrole[id]
+	if cur and ROLE_PRIO[cur] <= ROLE_PRIO[role] then return end
+	_mrole[id] = role
+end
+
+-- Merge a role into the desired set; the more actionable (lower prio) role wins.
+-- Every role offered here is also put to want_marker, INCLUDING the one that goes on to
+-- win the card: when the winner carries a marker the two agree and nothing changes, so
+-- the marker role is a complete answer on its own and iqm_core never has to fall back.
+local function want(desired, id, role)
+	want_marker(id, role)
+	local cur = desired[id]
+	if cur and ROLE_PRIO[cur] <= ROLE_PRIO[role] then return end
+	desired[id] = role
+end
+
+-- Slot-claim order: lower ROLE_PRIO first, then nearer NPCs first (in ~4 m bands,
+-- so ordinary drift doesn't reshuffle the carded set every scan), stable id
+-- tiebreak. Distance matters now that mark_work can produce more candidates than
+-- card slots in a busy camp. Module-level (not a per-scan closure) so table.sort
+-- doesn't allocate a new function each scan.
+local function slot_order_cmp(a, b)
+	-- FOCUS FIRST, ahead of the role (R2.59). It is the only key here that is about what
+	-- the player is doing rather than about what the NPC is, and that is precisely why it
+	-- outranks the rest: with focus on, a card they are not looking at has been asked not
+	-- to be on screen, so it cannot hold a slot against one they ARE looking at -- not
+	-- even a turn-in against a trader. The mode chooses which roles are subject to this at
+	-- all (an exempt role never carries fb = 1), so the ordering the modes actually ship
+	-- with still puts objectives first; what changes is that "first" is now within the set
+	-- the player asked to see.
+	--
+	-- `or 0` because the field is iqm_core's to set and only its card rank sets it: the
+	-- marker slots sort by ROLE_PRIO through their own insertion sort, and the harnesses
+	-- build entries by hand. Absent means entitled, which is what focus-off looks like.
+	local fa, fb = a.fb or 0, b.fb or 0
+	if fa ~= fb then return fa < fb end
+	local pa, pb = ROLE_PRIO[a.role] or 9, ROLE_PRIO[b.role] or 9
+	if pa ~= pb then return pa < pb end
+	if a.band ~= b.band then return a.band < b.band end
+	return a.id < b.id
+end
+
+-- Published to iqm_core, which ranks CARD slots with the same comparator and
+-- offers MARKER slots with the same table, so the two orderings agree by
+-- construction (R2.39; see beacon_offer). Both stay file locals here as well:
+-- they are read on this module's own scan path, where resolving them through a
+-- namespace would be a lookup per NPC per pass.
+role_prio = ROLE_PRIO
+order_cmp = slot_order_cmp
+
+--- PUBLISHED as of R2.48a: iqm_taskspot needs the same liveness test this scan uses, and
+--  a second opinion about what "active" means is the last thing this wants. Written as a
+--  NEGATIVE test on purpose -- not `status == "selected"`, which is what R2.48 first
+--  invented for the spot pass and which is not how the field behaves.
+local function is_task_active(task)
+	local state = task.last_check_task
+	if state == "complete" or state == "fail" or state == "reversed" then return false end
+	if task.stage == 255 then return false end
+	if task.status == "completed" or task.status == "fail" or task.status == "reversed" then return false end
+	return db.actor:get_task(task.id, true) ~= nil
+end
+task_active = is_task_active
+
+-- actor_comm (the actor's bare community, e.g. "stalker") is constant across a scan
+-- pass, so scan callers pass ctx.actor_comm to skip the per-NPC char_comm+:sub. Other
+-- callers omit it and pay the lookup (they run for a handful of quest targets, not the
+-- whole roster). The personal-relation check short-circuits first, so it's only reached
+-- for NPCs not already personally hostile.
+local function is_enemy_to_actor(obj, actor_comm)
+	if obj:relation(db.actor) == game_object.enemy then return true end
+	local comm = char_comm(obj)
+	if comm == "monster" then comm = "stalker" end
+	actor_comm = actor_comm or char_comm(db.actor):sub(7)
+	return factions_enemies(actor_comm, comm)
+end
+
+local stage_complete_cache = {}
+local function get_stage_complete(task_id)
+	local sc = stage_complete_cache[task_id]
+	if sc == nil then
+		sc = task_manager.task_ini:r_float_ex(task_id, "stage_complete") or false
+		stage_complete_cache[task_id] = sc
+	end
+	return sc or nil
+end
+
+--- Is this task's marker on the person you REPORT BACK to, rather than on the thing you
+--  still have to go and do?
+--
+--  `stage_complete` is the task's own declaration of which stage that is, and the task
+--  functors are written around it. The bounty one is the clearest example
+--  (tasks_bounty.script:228): at stage 1 it returns `task_giver_id`, at stage 0 the
+--  bounty's id out of `axr_task_manager.bounties_by_id`, and its sections declare
+--  `stage_complete = 1`. So this one test separates "walk back to the barman" from "hunt
+--  a live stalker who is moving", using config the game already ships. The 207 fetch and
+--  79 assault tasks in base Anomaly have the same shape.
+--
+--  FAILS OPEN: a task that declares no stage_complete counts as talk-to. That is right
+--  for the storyline "go and speak to X" tasks it mostly catches, and it is the one hole
+--  in using this as a difficulty gate -- a modded bounty that omits the key would be
+--  marked. Left as is rather than guessed at; the alternative (never mark an unknown
+--  task) would silently drop most of the storyline.
+--
+--  PUBLISHED as of R2.47, because it now gates the marker as well as the card. Kept a
+--  file local too, for the reason role_prio is: it runs per candidate on the scan path.
+local function target_is_talk_to(task)
+	local sc = get_stage_complete(task.id)
+	if not sc then return true end
+	return task.stage ~= nil and task.stage >= sc
+end
+talk_to = target_is_talk_to
+
+--- Is this task DONE and waiting to be handed in to whoever gave it?
+--
+--  Nearly the same question as target_is_talk_to above, and deliberately a stricter one.
+--  That test fails OPEN -- a task declaring no stage_complete counts as talk-to -- which is
+--  right when the answer only suppresses a marker, and wrong here, where it would paint the
+--  green "collect your pay" diamond on every task whose config we cannot read. So this one
+--  FAILS CLOSED, and adds the second half of the test: the marker has to be sitting on the
+--  GIVER, not merely at or past the hand-in stage.
+--
+--  Both halves are needed and neither is redundant. A task's target functor flips
+--  current_target from the objective to the giver at stage_complete, so a delivery still
+--  running (stage 1 of 2, target = the recipient, giver someone else) fails on the stage
+--  test, while a task whose objective happens to BE its giver -- "go and talk to X" -- fails
+--  on nothing and is correctly marked, because that genuinely is a walk-and-report.
+--
+--  WHY THIS EXISTS AT ALL, since the answer is not obvious from here: the green hand-in
+--  marker used to belong to gamma-active-task-ui-enhancements, which set its own
+--  atue_return_task_location and which this mod merely RE-TEXTURED (see the atue_ entries in
+--  modxml_n_iqm_map_icons). Uninstall that mod and the marker vanished entirely, because
+--  nothing here had ever decided which tasks deserved it -- we owned the picture and it
+--  owned the meaning. Verified against a live save at the time: three tasks at
+--  stage >= stage_complete with current_target == task_giver_id came back kind=nil and drew
+--  the plain white reticle. The predicate is ATUE's own, restated rather than borrowed.
+--
+--  NOT CACHED, and must never be: unlike every kind in kind_seen this is a property of the
+--  task's PROGRESS, not of its section. Latching it would freeze the diamond on for good.
+local function handin_state(task)
+	local sc = get_stage_complete(task.id)
+	if not sc then return false end
+	if not (task.stage and task.stage >= sc) then return false end
+	local giver = task.task_giver_id
+	return giver ~= nil and task.current_target ~= nil
+	       and tonumber(task.current_target) == tonumber(giver)
+end
+
+--- What KIND of job is this task -- "mutant", "bounty", "delivery", "open"/"waypoint", or
+--  nil for anything else?
+--
+--  Drives the skull and the coloured reticles: iqm_taskspot swaps the task's map location
+--  type on this answer, and iqm_beacon picks the marker's glyph and tint from it.
+--
+--  THE STATE-BACKED TESTS ARE NOT NAME LISTS, and that is the whole design. The obvious
+--  implementation is a set of task_functor names -- 42 sections in base Anomaly name
+--  general_bounty_task outright -- and it fails the same way the rejected
+--  beacon_handin blocklist did: GAMMA mods ship their own functors (tasks_big_game,
+--  tasks_mutant_limansk and six more), an unknown name has to default to "not a
+--  bounty", and so the list fails OPEN on exactly the modded tasks it exists to catch.
+--  The primary tests read STATE the game maintains for its own purposes instead:
+--
+--    * BOUNTY -- axr_task_manager.bounties_by_id, a task_id -> npc_id table that
+--      xr_effects.setup_bounty_task writes and the save carries
+--      (axr_task_manager.script:14,145). Anything built on the game's own bounty
+--      machinery registers there whoever wrote it, and nothing else does.
+--    * MUTANT -- the target's COMMUNITY against is_squad_monster (_g.script:2362) when the
+--      target is a squad, and its CLSID against IsMonster when the target is one creature.
+--      tasks_assault.script:174 makes the mutant/faction split with the first of those to
+--      pick its own news icon, so this is not a parallel guess at the answer, it is the
+--      same one. Reading the TARGET rather than the task is also what makes it survive a
+--      task script this mod has never heard of.
+--
+--  ...and then, ONLY where no state records the answer, what the task DECLARES itself to
+--  be (STATUS_KIND / TARGET_KIND below). Those two ARE name lists, and the argument for
+--  why a name list is admissible in that position and not in the primary one is written
+--  where they are declared. Read it before adding a third.
+--
+--  ORDER MATTERS ONLY TRIVIALLY among the primaries: a bounty target is a human by
+--  construction (tasks_bounty's faction_list is the ten human factions), so bounty and
+--  mutant can never both answer. Bounty is tested first because it is a hash lookup and
+--  the others resolve an alife object. HOSTAGE has to precede the mutant tests for a real
+--  reason rather than a cost one -- its target is a captive stalker, so nothing about the
+--  mutant tests would claim it, but the ordering is what documents that a rescue is a kind
+--  of job and not a kind of target.
+--
+--  GATED ON target_is_talk_to, so this goes nil the moment the objective is done and the
+--  marker moves to whoever you report back to. That is the "only when not
+--  completed/turn-in" half of the request, and putting it HERE rather than at the two
+--  call sites means there is one rule rather than two that can drift apart. It also
+--  means the revert is automatic: iqm_taskspot sees nil and puts the task's own type
+--  back, without needing to know why.
+--
+--  Squad, not object: these ids are alife ids and the objects are usually OFFLINE -- the
+--  task is issued for somewhere the player is not -- so alife_object is the right lookup
+--  and level.object_by_id would fail for nearly all of them.
+--
+--  THE TARGET IS OFTEN NOT THE SQUAD, which is what R2.48 got wrong and "Destroy the
+--  Mutant Lair" proved. assault_task_target_functor returns `var.smart_id` -- the SMART
+--  TERRAIN the mutants are sitting on, not the squad (tasks_assault.script:240) -- and a
+--  smart has no player_id, so the community test found nothing and every lair task stayed
+--  on the plain reticle. The squad it actually tracks is in the task's own stored var,
+--  under the task id, which is where setup_assault_task puts it (`:141`, `:525`). So the
+--  fallback reads that. Still not a name list: the var is keyed by task id, so any task
+--  built on the assault machinery is covered whoever wrote it.
+--
+--  CACHED, and asymmetrically, which the same functor forces. A POSITIVE answer is sticky
+--  -- a section's kind is a property of the section and cannot change under us. A NEGATIVE
+--  is re-tested on a throttle, because it is routinely just EARLY: setup_assault_task
+--  assigns squad_id a frame later through a CreateTimeEvent, and the status functor NILS
+--  var.squad_id every three seconds before re-scanning (`:313-316`). Caching a nil would
+--  freeze a lair task on the plain reticle for ever; not caching at all would flicker the
+--  spot back and forth in that three-second window, which is exactly what a sticky
+--  positive prevents.
+local KIND_RECHECK = 5000       -- ms between re-tests of a task that answered "neither"
+local kind_seen, kind_next = {}, {}
+
+local function squad_comm(id)
+	local sq = id and alife_object(id)
+	return sq and sq.player_id
+end
+
+--- Is this target a MONSTER IN ITS OWN RIGHT, rather than a squad of them?
+--
+--  squad_comm above reads player_id, and player_id lives on a SQUAD. A task that points at
+--  one creature hands back an alife object with no such field, so it reads as "not a
+--  mutant" -- and that single mismatch is the whole of the miss this fixes.
+--  tasks_recover_mutant_data.script:121 returns `M[task_id].mutant_id`, one monster's
+--  object id, and the same shape recurs across the research hunt, the chimera scan and the
+--  COFG / iTheon hunt tasks. Every one of them wore the plain reticle.
+--
+--  NOT A NAME LIST, for the same reason the two tests below are not: IsMonster is the
+--  ENGINE'S own class table (_g.script:2845), so it covers whatever creature any mod
+--  spawns. It takes a clsid directly, which is what makes it safe on a server object --
+--  and tasks_top_10 makes the mirror-image call on its own targets (IsStalker at `:18`),
+--  so this is the established way to ask the question rather than a new one.
+--
+--  It answers only for the stage that points at the creature. recover_mutant_data's stage 1
+--  points at the DEVICE dropped on the corpse, which is an item, not a monster -- so the
+--  pin goes back to the plain reticle exactly when the job stops being a hunt.
+local function target_is_monster(id)
+	local se = id and alife_object(id)
+	return (se and IsMonster and IsMonster(nil, se:clsid())) and true or false
+end
+
+--- The functors a task DECLARES, read out of task_manager.task_ini and cached per task.
+--
+--  Same source as get_stage_complete above, and the same standing: this is config the game
+--  ships and the game itself reads. tasks_assault.script:156 asks task_ini for
+--  `status_functor` and compares it against "hostage_task" to pick its own news copy, so
+--  the idiom is the game's rather than ours.
+--
+--  IT IS STILL A NAME LIST, and the header's objection to those has not been withdrawn.
+--  What makes these two acceptable is WHERE they are consulted: after the bounty registry
+--  and before nothing -- they can only ADD a kind, never remove one. A modded task whose
+--  functor is unlisted comes out exactly as classified as it was before this table
+--  existed, so the failure mode is the status quo rather than a wrong answer. That is the
+--  opposite of the rejected functor blocklist, which had to default to "not a bounty" and
+--  so failed open on the modded tasks it existed to catch.
+local functor_cache = {}
+local function task_functors(task_id)
+	local f = functor_cache[task_id]
+	if f == nil then
+		local ini = task_manager and task_manager.task_ini
+		f = ini and { status = ini:r_string_ex(task_id, "status_functor"),
+		              target = ini:r_string_ex(task_id, "target_functor"),
+		              -- ...and the COMMUNITY LIST, which is what decides an assault task's
+		              -- species. Read here rather than in a second ini call so a section is
+		              -- touched once; it is nil for every task that is not an assault.
+		              params = ini:r_string_ex(task_id, "status_functor_params") } or false
+		functor_cache[task_id] = f
+	end
+	return f or nil
+end
+
+-- RESCUE: a person being HELD. Eight sections in the pack declare this status functor and
+-- it is what implements the rescue (tasks_faction_control.script:34). All eight are
+-- "Search and Rescue" / "Rescue Missing Stalker" / "Extract Mercenary Prisoner" jobs.
+--
+-- IT ANSWERS "bounty" AS OF R2.55, and the kind `hostage` is gone with it. For four
+-- releases this had a mark of its own - the bounty reticle in azure, on the argument that a
+-- contract and a rescue are the same sentence about the objective differing only in the
+-- verb, so they should share a shape and split on hue. The verb is the part that turned out
+-- not to matter: getting the hostage back means killing whoever is holding them, so the
+-- player does the same thing on arrival either way, and a second colour was asking them to
+-- distinguish two marks that call for one preparation. One fewer word in the language.
+--
+-- What that costs, stated plainly: the map no longer says "someone is alive at this pin".
+-- Judged not worth a colour, because nothing the player DOES changes on knowing it.
+--
+-- Read from the declaration rather than from axr_task_manager.hostages_by_id, which sits
+-- next to bounties_by_id and looks like its twin and is NOT one: that table is keyed
+-- npc_id -> smart_id (axr_companions.script:805) and is written when a squad is captured,
+-- so it answers "is this NPC a hostage" and not "is this task a rescue" -- and it is empty
+-- for a task whose hostage has not been placed yet, which is most of the time the pin is up.
+--
+-- DELIVERY sits in the same table and is the strongest entry in it, because this is not
+-- our reading of the game's config -- it is the game's own. tasks_delivery builds its
+-- registry by walking task_ini for exactly this string
+-- (`task_manager.task_ini:section_for_each` ... `status_functor == "delivery_task"`,
+-- tasks_delivery.script:19-26) and `is_delivery_task` answers out of that list. So this
+-- line is not a name list standing in for a state test; it IS the state test, without the
+-- linear scan and without a soft dependency on the module being loaded.
+--
+-- THE ONE-OFF DEFENDS join it in R2.55b, and they are here rather than in the assault rule
+-- below because each is a SINGLE hand-written quest with its own functor and no community
+-- list to read. All three are fights against people: Defend the Pump Station, and NTA's Hold
+-- the Ground and No Step Back. A named functor with one user is the safest possible entry in
+-- a table like this -- there is nothing for it to over-reach onto.
+--
+-- faction_base_defense DELIBERATELY HAS NO ENTRY, and that is the interesting omission. It
+-- is "Defend the Base Against Mutants", so R2.55 hardcoded it to "mutant" -- but the census
+-- shows its species is genuinely runtime-dependent: task_functor.faction_base_defense_target
+-- probes for flesh/boar/dog story squads on most maps and ZOMBIED squads in the Yantar
+-- variant, and the section itself carries no community field at all. Hardcoding either
+-- answer is wrong half the time. Left out, its target resolves to the actual enemy squad and
+-- the runtime squad_comm test below answers correctly for both variants -- which is the
+-- whole reason those tests exist.
+local STATUS_KIND = { hostage_task = "bounty", delivery_task = "delivery",
+                      gd_task_status_functor = "bounty",
+                      hold_the_ground_task_status_functor = "bounty",
+                      no_step_back_task_status_functor = "bounty" }
+-- THE TOP 10 HIT LIST, the one bounty the registry cannot see. It keeps its own saved list
+-- of marks (tasks_top_10.script:15) and never calls setup_bounty_task, so
+-- bounties_by_id has no row for it. One vanilla task; worth the line because it is
+-- unmistakably a contract on a named man and reads as an ordinary side job without one.
+-- THE STASH TASKS, and this one is a kind about the GROUND that the engine query below
+-- cannot see. tasks_nta_stash spawns the quest item INSIDE a rolled stash and points the
+-- task at the ITEM (`alife_create_item(p[2], alife_object(stash_id)).id`, `:96`), while
+-- treasure_manager's stash mark sits on the STASH. Two object ids, one screen position --
+-- so asking "what else is drawn on my target" returns nothing, however plainly the pin is
+-- sitting on top of a stash icon. The three sections are the intel-documents and plans
+-- jobs whose objective text is "Search the stash".
+-- The DRX quest-item family needs no entry here: tasks_stash.script:159 returns the STASH
+-- id itself, so the general test at the bottom of task_kind sees the mark and answers.
+-- THE BARRIER DEFENCE is a fight against people too, and unlike faction_base_defense it is
+-- decidable: tasks_defense.script:489 picks barrier_monolith_squad or barrier_zombie_squad by
+-- section name, and Monolith and the zombied are both human communities. One functor, two
+-- sections, both bounty.
+local TARGET_KIND = { top_10_task_target_functor = "bounty",
+                      nta_stash_task_target_functor = "open",
+                      barrier_defense_target_functor = "bounty" }
+
+-- THE ASSAULT FAMILY (R2.55b), and this entry replaces a mistake worth recording because
+-- the mistake looked principled.
+--
+-- R2.55 mapped assault_task_status_functor straight to "bounty" and put it in a LATE table
+-- consulted after the mutant tests, reasoning that ordering would stop it stealing a mutant
+-- hunt's skull. That was wrong twice over. It shipped, and every mutant hunt in the game
+-- turned red.
+--
+--   * THE FUNCTOR IS NOT A KIND. tasks_assault runs the mutant hunts AND the faction
+--     fights -- it picks its own news icon by asking is_squad_monster (tasks_assault:174).
+--     "Destroy the Mutants" and "Defend Rostok" declare the SAME status functor. So the
+--     functor is not weak evidence for "human", it is no evidence at all, and 37 of the 88
+--     assault sections in this pack are mutant hunts.
+--   * ORDERING DOES NOT SUBSTITUTE FOR EVIDENCE. Every test above answers from PERMANENT
+--     state -- a saved registry, a config key. The mutant tests do not: squad_comm needs the
+--     squad alife-resolvable and load_var needs the task to have stored it, and both
+--     legitimately answer nil before that squad spawns. Being consulted afterwards therefore
+--     bought nothing: on the first tick the mutant tests had no evidence, the late table said
+--     "bounty", and kind_seen LATCHED it forever. Ordering protects against a test that would
+--     answer differently; it does nothing about a test whose evidence has not arrived. Note
+--     the general rule that falls out, since it applies to anything added below here: a
+--     positive-only cache must never be fed an answer derived from the ABSENCE of evidence.
+--
+-- WHAT REPLACES IT IS CONFIG, AND IT IS EXACT. status_functor_params is the community list,
+-- and it decides the species outright: with P[6] true the enemy set IS that list; with P[6]
+-- false the enemies are drawn from tasks_assault's factions_list, which holds the nine human
+-- factions and no monster communities (tasks_assault:37-47, :395-416). Squad acceptance is
+-- exact string equality on squad.player_id (:115, :138), so nothing downstream can widen the
+-- set. A census of the merged config confirms it: 88 sections, 37 mutant, 51 human, and NOT
+-- ONE mixing a monster token with a faction token.
+--
+-- WHICH MAKES THIS BETTER THAN WHAT IT FIXES, not merely safe. A mutant assault used to be
+-- found only by the runtime squad tests, so it wore the wrong pin until its squad spawned;
+-- now it is answered from the section the moment the task exists, with no dependency on
+-- spawn timing at all. The tokens are BEHAVIOUR classes (monster_predatory_night and so on),
+-- never species, so this says mutant-or-not and never which mutant -- which is all the map
+-- needs to say.
+local ASSAULT = "assault_task_status_functor"
+local function assault_kind(f)
+	if f.status ~= ASSAULT then return nil end
+	-- No is_squad_monster, no answer. Defaulting to "bounty" here would reintroduce exactly
+	-- the bug above -- an answer derived from a table we could not read, latched forever.
+	if not is_squad_monster then return nil end
+	local first = f.params and tostring(f.params):match("^%s*([%w_]+)")
+	if not first then return nil end
+	return is_squad_monster[first] and "mutant" or "bounty"
+end
+
+local WP_TASK = "task_placeable_waypoint"   -- tasks_placeable_waypoints.script:238
+local wp_target, wp_kind, wp_next = nil, nil, nil
+-- The general coverage answer, per task. Deliberately NOT kind_seen: everything cached
+-- there is a property of the JOB and cannot change, and this is a property of the GROUND.
+-- `open_tgt` is what makes a target change re-test at once rather than after the throttle.
+local open_kind, open_tgt = {}, {}
+
+--- Spot types that are THIS TASK'S OWN PRESENTATION rather than a mark the map was already
+--  drawing. Each sits on the task's target BECAUSE the task is there, so counting any of
+--  them makes bare ground look occupied and hollows a reticle over nothing.
+--
+--  paw_task_default is PAW's animated highlight, added on the line after its own task
+--  (tasks_placeable_waypoints.script:1547-1548), so it is on every placed waypoint.
+--
+--  THE TWO BLINKS ARE THE ENGINE'S NEW-TASK PULSE, and they were the R2.55c bug. A task's
+--  own "you just picked this up" highlight is a SEPARATE map location on the same object,
+--  so for the ~15 s it lives, every newly taken task looked covered and wore the hollow
+--  reticle. It was reported on placed waypoints -- drop one on empty ground and the cross
+--  shows for the 750 ms until the first sync, then vanishes -- but nothing about it was
+--  specific to waypoints: the same self-trigger reached every task the coverage test could
+--  answer for, and it healed itself once the pulse expired, which is exactly what made it
+--  read as intermittent and unreproducible. Both names were already known to this mod --
+--  modxml_n_iqm_map_icons retextures ui_storyline_task_blink_spot and
+--  ui_secondary_task_blink_spot to iqm_mapspot_blink -- which is worth noticing: the fact
+--  needed to see the bug was already written down two files away.
+--
+--  THE RULE FOR ADDING A FOURTH, since the list is otherwise just three names: the question
+--  is not "did another mod draw this", it is "is this mark here BECAUSE of this task". A
+--  mark that would still be on that object with the task cancelled is real coverage.
+local NOT_COVER = {
+	paw_task_default        = true,
+	ui_storyline_task_blink = true,
+	ui_secondary_task_blink = true,
+}
+
+--- Does object `id` already carry a map mark other than this task's own?
+--
+--  Three exclusions, and each is a way the answer would otherwise always be yes:
+--    * `own` is the task's OWN spot type, which change_map_location has just put on the
+--      object - counting it would make open ground look occupied;
+--    * NOT_COVER above - this task's own highlight and its new-task pulse;
+--    * anything of ours, so that once iqm_taskspot has moved the task onto iqm_task_open
+--      the test does not start reading its own output back.
+--
+--  Everything else counts, deliberately - a service badge, a stash, a level changer,
+--  another task's reticle, a PAW pin the player placed. The rule is "something is drawn
+--  here", not "something I recognise is drawn here".
+--
+--  One case it cannot see: a pin dropped on the target of ANOTHER side task, whose
+--  reticle is the same spot type as this task's own and so collapses onto one map location
+--  under SLocationKey. That is the least costly miss available - the mark underneath is an
+--  identical reticle, so hollow and solid look near enough the same there.
+--
+--  The OTHER case it cannot see is the one TARGET_KIND covers above: a mark drawn on a
+--  DIFFERENT object at the same place. This asks about an object, not about a position,
+--  and there is no positional query to ask instead.
+local function target_covered(id, own)
+	local list = level.map_get_object_spots_by_id and level.map_get_object_spots_by_id(id)
+	if type(list) ~= "table" then return false end
+	for _, s in pairs(list) do
+		local t = type(s) == "table" and s.spot_type
+		if t and t ~= own and not NOT_COVER[t]
+		   and not tostring(t):find("^iqm_") then
+			return true
+		end
+	end
+	return false
+end
+
+function task_kind(task)
+	if not (task and task.id) then return nil end
+	-- Once the marker is on the person you report back to, the KIND of job stops being the
+	-- question -- you are not hunting the mutant any more, you are walking to the barman. So
+	-- this returns before any of the job classification below, and the only answer it can
+	-- give is "handin". It stays nil for the fail-open half of talk_to (no stage_complete,
+	-- or a target that is not the giver), which is the behaviour every release before this
+	-- one had for ALL of these tasks.
+	if target_is_talk_to(task) then
+		return handin_state(task) and "handin" or nil
+	end
+	local id = task.id
+
+	-- PAW'S PLACED WAYPOINT, and it is neither a kind of job nor cached like one.
+	--
+	-- The `waypoint` kind exists only so iqm_taskspot can give this task a reticle with a
+	-- HOLE in it, and that is only wanted when there is something underneath to see. PAW
+	-- puts the task's spot and its own highlight on the same object
+	-- (tasks_placeable_waypoints.script:1547-48), so a waypoint dropped on a service NPC,
+	-- a stash or a level changer buries that mark under a solid crosshair - while one
+	-- dropped on open ground has nothing beneath it and wants the full reticle, because
+	-- an empty ring on empty ground is just a smaller marker.
+	--
+	-- SO THE TEST IS "IS ANYTHING ELSE DRAWN HERE", asked of the engine rather than
+	-- guessed from a list of interesting spot types. level.map_get_object_spots_by_id
+	-- returns EVERY map location on an object as {spot_type=, text=}
+	-- (level_script.cpp:485, bound at :2544), which is the difference between a rule that
+	-- covers whatever any mod happens to draw and one that covers the types we thought of.
+	--
+	-- NOT STICKY, and that is why this sits above kind_seen rather than in it. The other
+	-- two kinds are properties of the JOB and never change; this one is a property of the
+	-- GROUND, and the player moves the waypoint (func_wp_mov, :1531) without the task id
+	-- ever changing. Cached on the TARGET instead, and re-tested on the same slow timer as
+	-- everything else so that pinning an icon under an existing waypoint is picked up too.
+	if id == WP_TASK then
+		local tgt = task.current_target
+		local tg = time_global()
+		if tgt ~= wp_target or not wp_next or tg >= wp_next then
+			wp_target, wp_next = tgt, tg + KIND_RECHECK
+			wp_kind = (tgt and target_covered(tgt, task.spot)) and "waypoint" or nil
+		end
+		return wp_kind
+	end
+	local hit = kind_seen[id]
+	if hit then return hit end
+	local tgt = task.current_target
+	local tg = time_global()
+	-- Between rechecks, hand back the COVERAGE answer rather than nil. Every other kind
+	-- latches in kind_seen and so survives this early return by itself; `open` is re-derived
+	-- every pass, and returning nil here would flip the pin back to a solid reticle for the
+	-- whole of KIND_RECHECK. A target change re-tests immediately, for the same reason the
+	-- waypoint branch above does: the ground under the pin has moved.
+	if kind_next[id] and tg < kind_next[id] and open_tgt[id] == tgt then
+		return open_kind[id]
+	end
+	kind_next[id] = tg + KIND_RECHECK
+
+	if axr_task_manager and axr_task_manager.bounties_by_id
+	   and axr_task_manager.bounties_by_id[id] then
+		kind_seen[id] = "bounty"
+		return "bounty"
+	end
+
+	-- ...then what the task DECLARES it is, for the kinds no registry records. Cached
+	-- positively like the rest: a section's functors are a property of the section.
+	local f = task_functors(id)
+	local declared = f and (STATUS_KIND[f.status] or TARGET_KIND[f.target] or assault_kind(f))
+	if declared then
+		kind_seen[id] = declared
+		return declared
+	end
+
+	-- The mutant tests, all three of them guarded together rather than behind an early
+	-- return: without is_squad_monster the two community reads cannot run, but the class
+	-- test still can -- and, more to the point, the coverage test at the bottom must be
+	-- reached whatever happens up here.
+	if is_squad_monster then
+		-- the target itself, for a task that points straight at a squad...
+		local comm = squad_comm(tgt)
+		-- ...or the squad the task stored under its own id, for one that points at a smart
+		if not (comm and is_squad_monster[comm]) then
+			local var = db.actor and load_var(db.actor, id)
+			comm = type(var) == "table" and squad_comm(var.squad_id) or nil
+		end
+		if comm and is_squad_monster[comm] then
+			kind_seen[id] = "mutant"
+			return "mutant"
+		end
+	end
+	-- ...or the target IS the creature, for a task that hunts ONE of them rather than a
+	-- squad. Last of the three, because it resolves an alife object and the two cheaper
+	-- reads above answer for every task built on the squad machinery. See target_is_monster.
+	if target_is_monster(tgt) then
+		kind_seen[id] = "mutant"
+		return "mutant"
+	end
+
+	-- NOTHING SAID WHAT KIND OF JOB THIS IS -- so ask what is already DRAWN there. This is
+	-- the same question the waypoint branch above asks, generalised (R2.52) from "PAW put a
+	-- pin here" to "this pin is landing on top of something", because the two are the same
+	-- problem and only the first had been met. The DRX quest-item family is the case that
+	-- forced it: 21 sections that point straight at a stash the player has already found,
+	-- and the solid crosshair covers the stash icon completely.
+	--
+	-- LAST, and that ordering is the whole safety argument. Every kind above is about the
+	-- JOB and outranks this, so a bounty standing on a service badge stays a bounty; only a
+	-- task nothing else could name falls through to being dressed by its surroundings. It is
+	-- also the reason this needs no list of "interesting" targets - a wrong answer here can
+	-- only ever cost the middle of a reticle that had nothing else to say.
+	open_tgt[id] = tgt
+	open_kind[id] = (tgt and target_covered(tgt, task.spot)) and "open" or nil
+	return open_kind[id]
+end
+
+local function is_markable_npc(id)
+	local obj = id and level.object_by_id(id)
+	if not obj then return false end
+	if not (IsStalker(obj) or (obj:clsid() == clsid.script_trader)) then return false end
+	if not obj:alive() then return false end
+	return not is_enemy_to_actor(obj)
+end
+
+local function collect_desired()
+	local desired = {}
+
+	-- quest targets (from the task system)
+	local tm = task_manager and task_manager.get_task_manager and task_manager.get_task_manager()
+	local info = tm and tm.task_info
+	if info then
+		for _, task in pairs(info) do
+			if is_task_active(task) then
+				if C.mark_targets and task.current_target and target_is_talk_to(task) then
+					local id = tonumber(task.current_target)
+					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+						-- the current objective NPC: a dynamic task at its hand-in stage,
+						-- or a storyline / mid-quest talk-to step. All read REPORT BACK.
+						want(desired, id, "target")
+					end
+				end
+				-- delivery quests: card the "deliver to" NPC in its OWN role (R2.55).
+				-- It was `target` until then, which reads REPORT BACK over a hand-in
+				-- diamond -- the mark for a finished job -- while the delivery was still
+				-- outstanding. The map had already stopped saying that in R2.54, so the
+				-- two views disagreed, and the card's version was the wrong one.
+				--
+				-- Note this branch is NOT gated on target_is_talk_to, unlike the one
+				-- above, and that is correct rather than an oversight: is_delivery_task
+				-- plus general_delivery already answer "there is a person to take this
+				-- to", and a delivery never reaches its stage_complete of 2 anyway
+				-- (tasks_delivery.script:255-285 only ever flips 0 and 1; the quest
+				-- completes through dialog). Gating it would card nothing, ever.
+				--
+				-- The engine's own
+				-- current_target can miss these (delivery targets live on another map,
+				-- and only the *selected* task's target is refreshed), so we resolve it
+				-- straight from the delivery job's target functor, which returns the
+				-- deliver-to NPC once past the pickup stage. is_markable_npc filters out
+				-- the stage-0 pickup item automatically. Soft dependency on
+				-- tasks_delivery (ships with GAMMA); skipped if absent.
+				if C.mark_targets and tasks_delivery and task_functor
+				   and tasks_delivery.is_delivery_task and task_functor.general_delivery
+				   and tasks_delivery.is_delivery_task(task.id) then
+					local id = tonumber(task_functor.general_delivery(task.id, "target", nil, task))
+					if id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+						want(desired, id, "delivery")
+					end
+				end
+			end
+		end
+	end
+
+	-- guide-job NPC: the stalker currently LOOKING FOR a guide, one that wants you to
+	-- escort it somewhere ("Need a guide?" job, st_jg). Instead of scanning NPCs, we
+	-- read the guide system's own saved state (alife_storage_manager .jobs_guide) to
+	-- get the guide squad directly, then resolve its commander via the public
+	-- tasks_guide.get_comm_id, the same squad/commander its dialogue keys off, so
+	-- this matches exactly when the job is available. Only the pending offer (`guid`)
+	-- is carded: on acceptance tasks_guide moves the job into `curr_guid` and empties
+	-- `guid`, so the card disappears once you've taken the escort (no point calling
+	-- out an NPC you're already walking with). Soft dependency: guarded so it no-ops
+	-- without the guide-job system (tasks_guide, ships with GAMMA). is_markable_npc
+	-- filters out the case where that NPC is offline / off-level.
+	--
+	-- get_comm_id is pcall'd because the saved squad_id can go stale: if that squad
+	-- was released, the alife id gets recycled to some unrelated object, and most
+	-- tasks_guide copies do a bare `squad:commander_id()` (nil method on a non-squad
+	-- -> hard CTD). tasks_guide itself only ever calls it on a known-live squad, so
+	-- it never trips there; we're reading persisted offer state on a timer, so we
+	-- can. A stale offer simply means no card.
+	if C.mark_guides and tasks_guide and tasks_guide.get_comm_id and alife_storage_manager then
+		local ok, jg = pcall(function() return alife_storage_manager.get_state().jobs_guide end)
+		if ok and jg then
+			local g = jg.guid
+			local sid = g and g.squad_id
+			if sid then
+				local okc, id = pcall(tasks_guide.get_comm_id, sid)
+				if okc and id and id > 0 and id ~= AC_ID and is_markable_npc(id) then
+					want(desired, id, "guide")
+				end
+			end
+		end
+	end
+
+	return desired
+end
+-- --------------------------------------------------------------------------
+-- Amortized NPC scanner
+-- --------------------------------------------------------------------------
+-- The companion and service/important scans each walk the whole online-NPC table
+-- (db.storage) doing real per-NPC work (recruit preconditions, PDA-spot queries,
+-- projections). Done in a single frame on a 2-3s timer, that whole burst lands as a
+-- periodic hitch. This spreads one scan pass over several frames: snapshot the ids
+-- once, process a bounded budget of them per frame into a scratch set, and
+-- publish it (swap into `live`) only when the pass finishes. Callers read `live`; it
+-- just refreshes a little later than before instead of all in one frame.
+local SCAN_BUDGET = 10          -- default NPCs processed per scanner per frame (overridable per scanner)
+local EMPTY       = {}          -- shared read-only "nothing found" set (never mutated)
+
+-- Per-frame scan context (actor pos / ranges), rebuilt only on frames that actually
+-- process a slice. One reused table, so a scanning frame allocates nothing beyond the
+-- id snapshot and the result set.
+local _scan_ctx = {}
+local function scan_ctx()
+	local actor = db.actor
+	_scan_ctx.actor   = actor
+	_scan_ctx.apos    = actor:position()
+	_scan_ctx.appear2 = appear2   -- the read_config mirror of C.appear_dist, squared
+	_scan_ctx.extra2  = extra2    -- ...and how far the extras scan classifies (>= appear2)
+	_scan_ctx.friend  = game_object.friend
+	_scan_ctx.neutral = game_object.neutral   -- the paid-escort dialog's relation (see npc_recruitable_impl)
+	_scan_ctx.actor_comm = char_comm(actor):sub(7)   -- bare community, reused by is_enemy_to_actor
+	return _scan_ctx
+end
+
+-- interval: ms between the START of successive passes. scan_one(id, ctx) returns a
+-- value to store for that id (any non-nil) or nil to skip it. pre_pass() is an optional
+-- cheap gate run once per pass; when it returns false the pass is skipped entirely
+-- (feature off / system absent / no room) and an empty set is published.
+-- `budget` (optional) overrides SCAN_BUDGET for this scanner: the per-NPC costs
+-- differ by an order of magnitude between scans (a PDA map-spot query vs a chain of
+-- recruit preconditions that each resolve the NPC's squad), so a single shared
+-- budget either starves the cheap scan or spikes the expensive one.
+local function make_scanner(interval, scan_one, pre_pass, budget)
+	return { interval = interval, scan_one = scan_one, pre_pass = pre_pass,
+	         budget = budget or SCAN_BUDGET,
+	         -- `live2` is the SECOND value a scan_one may return: a role the published
+	         -- one displaced but that still has a marker to give (see extras_scan_one).
+	         -- Its own set rather than a richer `live` entry, so the common case -- one
+	         -- role, no collision -- allocates nothing extra and every existing reader
+	         -- of `live` is untouched. A scan_one returning one value leaves it EMPTY.
+	         live = EMPTY, live2 = EMPTY, next_due = 0, ids = nil, cursor = 0,
+	         partial = nil, partial2 = nil }
+end
+
+local function scanner_reset(sc)
+	sc.live, sc.live2, sc.next_due, sc.ids, sc.cursor = EMPTY, EMPTY, 0, nil, 0
+	sc.partial, sc.partial2 = nil, nil
+end
+
+-- Advance one scanner by up to its budget of NPCs; call every frame. Returns true on the
+-- frame a pass completes (a fresh set was just published), so the caller can merge it
+-- promptly instead of waiting out the update throttle.
+local function scanner_tick(sc, tg)
+	if not sc.ids then
+		if tg < sc.next_due then return false end            -- not due for a new pass yet
+		if sc.pre_pass and not sc.pre_pass() then            -- gated out: clear + reschedule
+			sc.next_due = tg + sc.interval
+			if sc.live ~= EMPTY then sc.live, sc.live2 = EMPTY, EMPTY; return true end
+			return false
+		end
+		local ids, n = {}, 0                                 -- snapshot the online ids once per pass
+		for id in pairs(db.storage) do
+			if id ~= AC_ID then n = n + 1; ids[n] = id end
+		end
+		sc.ids, sc.cursor, sc.partial, sc.partial2 = ids, 0, {}, {}
+	end
+
+	local ids, one, partial, partial2 = sc.ids, sc.scan_one, sc.partial, sc.partial2
+	local n    = #ids
+	local i    = sc.cursor
+	local stop = i + sc.budget
+	if stop > n then stop = n end
+	local ctx  = scan_ctx()
+	while i < stop do
+		i = i + 1
+		local id = ids[i]
+		local v, m = one(id, ctx)
+		if v ~= nil then
+			partial[id] = v
+			-- Only a role the published one is NOT is worth a second entry; `m == v` is a
+			-- scan_one saying "no collision here" the long way round.
+			if m ~= nil and m ~= v then partial2[id] = m end
+		end
+	end
+	sc.cursor = i
+
+	if i >= n then                                           -- pass complete: publish the fresh set
+		sc.live, sc.live2 = partial, partial2
+		sc.ids, sc.partial, sc.partial2 = nil, nil, nil
+		sc.next_due = tg + sc.interval
+		return true
+	end
+	return false
+end
+-- --------------------------------------------------------------------------
+-- Recruitable-companion detection (options: mark_companions, mark_hires)
+-- --------------------------------------------------------------------------
+-- Two different offers, two card roles. The FREE recruit ("come with me") and the
+-- PAID escort ("I can pay you to leave your squad") are separate dialogs with
+-- mutually exclusive relation gates: dialogs_axr_companion.is_actor_friend wants
+-- relation == friend, txr_paid_companions.is_actor_natural wants relation ==
+-- neutral (both only when axr_companions.allow_only_friends_as_companions is on;
+-- otherwise neither cares). So the same scan resolves both and returns which one
+-- the NPC qualifies for: "companion" or "hire".
+--
+-- Unlike quest targets / the guide NPC (resolved from saved state to specific ids,
+-- with no scanning), "can this stalker be recruited right now" is a live per-object
+-- predicate; there's no registry to read. We keep it cheap with three levers:
+--   1. a party-full early-out: one arithmetic check kills the whole scan when you
+--      can't recruit anyone anyway (full party, or the companion system is absent);
+--   2. cheapest-first short-circuits per NPC (is-stalker -> alive -> distance ->
+--      relation -> already-a-companion -> the recruit predicate), the expensive
+--      screen projection last. The class check must come first: db.storage also
+--      holds non-NPC objects (space restrictors etc.) whose class doesn't export
+--      alive(), and calling it on them throws; and
+--   3. a screen-space pre-gate: only NPCs that actually project on-screen are kept,
+--      so off-screen stalkers never eat one of the limited card slots.
+-- It iterates db.storage (the engine's existing table of ONLINE NPCs, not a level
+-- scan; near the actor that's a few dozen entries), spread across frames by the
+-- amortized scanner (see scanner_tick), one pass per COMPANION_SCAN. Soft dependency:
+-- no-ops without the companion system.
+local COMPANION_SCAN = 3000   -- ms between recruitable scans (rare state change -> slow cadence)
+
+-- Party-level gate: is there room for one more companion? Mirrors GAMMA's own
+-- is_room_for_one_in_actor_squad (patriarch/Catspaw-size aware) when present; falls
+-- back to the raw axr_companions capacity. Single check, run once per scan.
+local function room_for_companion()
+	local irc = individually_recruitable_companions
+	if irc and irc.is_room_for_one_in_actor_squad then
+		local ok, room = pcall(irc.is_room_for_one_in_actor_squad, db.actor, nil)
+		return (not ok) or room   -- if the check itself errors, don't block; per-NPC gate still applies
+	end
+	if axr_companions and axr_companions.get_companion_count and axr_companions.max_actor_squad_size then
+		return axr_companions.get_companion_count() < axr_companions.max_actor_squad_size
+	end
+	return true
+end
+
+-- Which squad shape can this NPC be taken in? Each of the two offers ships in two
+-- variants that differ only here:
+--   "solo"  - G_FLAT's Individually Recruitable Companions pulls ONE member out of a
+--             multi-member squad (not_a_one_man_squad), so it needs room for one; and
+--   "squad" - the base dialogs hire the WHOLE squad through its commander
+--             (xr_conditions.is_squad_commander), so they need room for all of it.
+-- Nil means neither variant's dialog would be offered at all. The solo variant is
+-- tried first: it's the one GAMMA installs.
+-- The solo variant's room check is deliberately NOT repeated here: IRC's
+-- is_room_for_one_in_actor_squad ignores its npc argument entirely (it compares the
+-- companion count against the cap), and the pre-pass gate below already ran exactly
+-- that function once for the whole pass. Only the base variant's room check is
+-- per-NPC, because that one counts the NPC's whole squad.
+local function squad_shape(actor, obj)
+	local irc = individually_recruitable_companions
+	if irc and irc.not_a_one_man_squad and irc.not_a_one_man_squad(actor, obj) then
+		return "solo"
+	end
+	if xr_conditions.is_squad_commander(actor, obj)
+	   and dialogs_axr_companion.is_room_in_actor_squad(actor, obj) then
+		return "squad"
+	end
+	return nil
+end
+
+local paid_ok = false   -- set per pass by companions_available()
+
+--- Does this NPC's character profile actually CARRY the recruit dialogue?
+--
+--  THE PRECONDITIONS ARE NOT THE OFFER, and mirroring them is not enough (R2.60). Every
+--  other gate in this section reproduces a `<precondition>` out of the recruit dialogue,
+--  on the stated ground that the card must match the dialogue exactly. That reasoning has
+--  a hole in it: a precondition only decides whether an ATTACHED dialogue is offered, and
+--  the dialogue is attached per PROFILE, by `<actor_dialog>` entries in the NPC's
+--  `specific_character` block. Generic stalkers get theirs from the shared include
+--  configs\gameplay\character_dialogs.xml, which lists friendly_companion_dialog and
+--  paid_companion_dialog among a dozen others. A hand-authored profile does not include
+--  that file and names its dialogues itself -- so it has no recruit dialogue at all, and
+--  not one precondition above ever runs.
+--
+--  The Bar's guide is the case that found it. guid_bar_stalker_navigator declares exactly
+--  meet_guid_bar / travel_guid_bar / meet_guid_bar_list / actor_break_dialog, so there is
+--  no "come with me" line on him at any range, in any state. Every squad-level gate we do
+--  check passed anyway -- his squad is non-story, he is friendly, there was room -- and so
+--  he was carded LOOKING FOR WORK for an offer that does not exist. Worse than a stray
+--  card, because ROLE_PRIO.companion is 3 and `guider` is 6: the phantom EVICTED the true
+--  GUIDE card, which is the one thing you walk up to a guide to see.
+--
+--  ASKS THE ENGINE, not the config. game_object:character_dialogs() returns the object's
+--  live actor-dialog list (CScriptGameObject::CharacterDialogs -> CInventoryOwner::Dialogs
+--  -> the same m_ActorDialogs vector the talk window walks in actor_communication.cpp:109).
+--  Reading it rather than the xml is what makes this survive the mods: the engine hands
+--  that vector to Lua at profile-load time and writes back whatever comes out
+--  (specific_character.cpp:130-154), which is how G_FLAT's Individually Recruitable
+--  Companions bolts its own variants on, and the list we read is the post-injection one.
+--
+--  ONLY THE BASE IDS ARE CHECKED, and that is deliberate rather than lazy. IRC adds
+--  friendly_companion_dialog_individually only `if dialog_list:has("friendly_companion_
+--  dialog")` and the paid one only off paid_companion_dialog, so the base id is present
+--  whenever either variant is -- necessary and sufficient for both, and it still answers
+--  correctly with IRC absent, where only the base whole-squad dialogue exists. Which of
+--  the two variants applies is squad_shape's question, not this one.
+local DLG_FREE, DLG_PAID = "friendly_companion_dialog", "paid_companion_dialog"
+
+local function profile_offers(obj)
+	local free, paid = false, false
+	if not obj.character_dialogs then return true, true end   -- older engine: no list to read, keep the old behaviour
+	for _, d in pairs(obj:character_dialogs()) do
+		if d == DLG_FREE then free = true elseif d == DLG_PAID then paid = true end
+	end
+	return free, paid
+end
+
+-- Facts that can't change for an NPC's life, memoized per id: whether its squad
+-- carries a story id (dialogs_axr_companion.is_non_story), whether its community
+-- sells escort duty (txr_paid_companions.is_paid_companion_faction), and whether its
+-- profile carries each recruit dialogue at all (profile_offers). While you stand
+-- in a camp the SAME handful of NPCs is re-tested every pass, and uncached each of
+-- these re-resolves the squad / re-reads the community string every 3 seconds.
+-- is_non_story is inlined rather than called so a momentarily unresolved squad (an
+-- NPC mid-spawn) can be left uncached instead of pinning a wrong "story NPC" verdict
+-- for the session; the function is those same two lines plus that nil check.
+-- The dialogue list belongs here for a stronger reason than cost: it is per-PROFILE
+-- shared data the engine parses once per profile id per process
+-- (CSharedClass::load_shared), so it cannot change for this NPC while the game runs.
+local recruit_static = {}   -- [id] = { story_ok, paid_faction, paid_tier, dlg_free, dlg_paid }
+
+local function static_facts(actor, obj, id)
+	local f = recruit_static[id]
+	if f then return f end
+	local squad = get_object_squad(obj)
+	if not squad then return nil end            -- no squad: neither dialog applies, and don't cache it
+	local txr = txr_paid_companions
+	local dlg_free, dlg_paid = profile_offers(obj)
+	-- paid_tier mirrors the rand table in txr_paid_companions.is_squad_competent: a
+	-- squad whose section is neither veteran nor advanced gets rand = 0, so its
+	-- `math.random(1,100) <= rand` can never pass and it latches can_work = "false"
+	-- forever. Those squads always answer "Sorry, we have other jobs already", so
+	-- there is nothing to card. Read-only, and it runs BEFORE paid_competent below
+	-- precisely so the writing call is never made for a squad whose answer is already
+	-- knowable. Plain finds, like the original's magic-free string.find.
+	local sec = squad:section_name() or ""
+	f = { squad_id     = squad.id,                -- the dialog_squad key (see hire_price)
+	      story_ok     = get_object_story_id(squad.id) == nil,
+	      paid_faction = (txr and txr.is_paid_companion_faction(actor, obj)) and true or false,
+	      paid_tier    = (sec:find("veteran", 1, true) or sec:find("advanced", 1, true)) and true or false,
+	      dlg_free     = dlg_free,                -- profile carries the recruit dialogue at all
+	      dlg_paid     = dlg_paid }
+	recruit_static[id] = f
+	return f
+end
+
+-- The last paid gate, and the only one that isn't a pure question.
+-- is_squad_competent is a PHRASE-level precondition (dialogs.xml phrase 1 vs the
+-- "Sorry, we have other jobs already" phrase 2), so it isn't in either paid dialog's
+-- <precondition> list, but it is what decides whether an offer exists at all. It also
+-- WRITES: the first call rolls the squad's chance, pins can_work, and pins the price
+-- multiplier, permanently. Asking is therefore the same thing opening the dialog
+-- would do, just slightly earlier - and idempotent afterwards, which is what lets the
+-- card match the dialogue exactly, including a refusal's card disappearing.
+-- The verdict is latched game-side, so ours is memoized alongside the static facts.
+-- Called LAST, after every other gate including the tier filter, so the dice are only
+-- ever rolled for a squad whose card would otherwise be about to appear: one you are
+-- within appear_dist of, on-screen, and about to talk to.
+local function paid_competent(actor, obj, f)
+	if f.competent == nil then
+		local txr = txr_paid_companions
+		f.competent = (txr and txr.is_squad_competent(actor, obj)) and true or false
+	end
+	return f.competent
+end
+
+-- The paid dialogue's last gate, and the only one that moves with your wallet.
+-- txr_paid_companions pins a price multiplier per squad (dialog_squad[id].money,
+-- set by is_squad_competent) and gates the two payment phrases on
+-- have_guard_money_1/2. Can't afford the cheaper one and BOTH are hidden, leaving
+-- only "Actually... I changed my mind" - a dead end, so nothing to card.
+-- The multiplier and the base prices are all file locals;
+-- gamedata\configs\unlocalizers\iqm_unlocalizers.ltx exposes them, which needs the
+-- modded exes GAMMA ships. Without them dialog_squad is simply nil here, this
+-- returns nil, and the caller skips both the affordability gate and the price -
+-- i.e. exactly the behaviour before the unlocalizer existed.
+--
+-- The base game is inconsistent here and we mirror it deliberately:
+-- have_guard_money_1 TESTS the multiplier against a hardcoded 2000, while
+-- take_guard_money_1 CHARGES money_1_base (1500). So you need 2700 in your pocket
+-- to be offered a 2025 RU hire. Test what the dialogue tests, show what it charges.
+local HIRE_TEST_BASE = 2000   -- have_guard_money_1's hardcoded test base; NOT money_1_base
+
+-- Returns the 24h price shown on the card and the amount the dialogue demands you
+-- be carrying, or nil when the multiplier isn't readable.
+local function hire_price(squad_id)
+	local txr = txr_paid_companions
+	local ds  = txr and txr.dialog_squad                  -- nil without the unlocalizer
+	local e   = ds and squad_id and ds[squad_id]
+	local mult = e and e.money
+	if not mult then return nil end
+	return floor(mult * (txr.money_1_base or 1500)), mult * HIRE_TEST_BASE
+end
+
+-- The price the scan resolved for this NPC's squad, for the card header.
+function hire_price_of(id)
+	local f = recruit_static[id]
+	return f and f.price
+end
+
+-- Per-NPC recruit predicate: returns the card role the NPC's own dialog would offer
+-- ("companion" free / "hire" paid), or nil. Mirrors the dialog preconditions exactly
+-- rather than approximating them -- and, since R2.60, first asks whether the NPC HAS
+-- that dialogue at all, which no precondition answers (see profile_offers).
+-- Free beats paid when both somehow apply
+-- (allow_only_friends off makes the relation gates non-exclusive) - no reason to
+-- advertise a price you needn't pay.
+--
+-- Ordered by cost, because this runs for every non-hostile stalker in range on every
+-- pass. Cheapest first: `rel` is already known from the scan's own gate, so it picks
+-- the branch WITHOUT calling either relation precondition (is_actor_friend /
+-- is_actor_natural each resolve the squad again, and friend/neutral are mutually
+-- exclusive, so at most one of them could ever have mattered); then the memoized
+-- per-NPC constants; then the squad-shape walk (get_squad_count iterates the squad's
+-- members), the most expensive call in the chain, run last and shared by both
+-- branches. `paid_ok` carries the two pass-invariant paid gates (Warfare, blacklisted
+-- map), resolved once in the pre-pass.
+--
+-- Wrapped whole in pcall; these are third-party mod functions called once per
+-- candidate. The body is a named function (not a closure built per call) so the
+-- pcall wrapper allocates nothing per candidate.
+local function npc_recruitable_impl(obj, rel, ctx)
+	local actor = db.actor
+	local dac   = dialogs_axr_companion
+	if not (dac and axr_companions) then return nil end
+
+	-- Which branch could this relation even reach? The two dialogs' relation gates
+	-- (is_actor_friend / is_actor_natural) are mutually exclusive while
+	-- allow_only_friends_as_companions is on, and ignore relation entirely when it
+	-- is off - so read that flag once instead of resolving the squad twice.
+	local any_rel = not axr_companions.allow_only_friends_as_companions
+	local free    = C.mark_companions and (any_rel or rel == ctx.friend)
+	local paid    = C.mark_hires and paid_ok and (any_rel or rel == ctx.neutral)
+	if not (free or paid) then return nil end
+
+	-- simulation squads must be recruitable at all (both relation preconditions
+	-- check this before anything else)
+	if not axr_companions.allow_simulation_squads_as_companions then return nil end
+
+	-- the per-NPC constants (memoized): the squad must not be a story squad, and the
+	-- paid offer needs both a community that sells escort duty and a squad tier that
+	-- can actually accept it
+	local f = static_facts(actor, obj, obj:id())
+	if not (f and f.story_ok) then return nil end
+	-- ...and the offer has to EXIST before its preconditions mean anything: a profile
+	-- without the dialogue attached can never make it, whatever the gates below say.
+	-- Checked per branch, since a profile can carry one dialogue and not the other, and
+	-- first because it is a cached boolean -- the cheapest gate in the chain.
+	if free and not f.dlg_free then free = false end
+	if paid and not f.dlg_paid then paid = false end
+	if not (free or paid) then return nil end
+	if paid and not (f.paid_faction and f.paid_tier) then
+		paid = false
+		if not free then return nil end
+	end
+
+	-- gates common to all four dialog variants
+	if not dac.is_not_hostage_task_giver(actor, obj) then return nil end
+	-- the stalker currently looking for a guide is off-limits to both offers; they
+	-- normally out-rank these roles anyway, but not when mark_guides is off
+	if tasks_guide and tasks_guide.not_prec_1
+	   and not tasks_guide.not_prec_1(actor, obj) then return nil end
+
+	local shape = squad_shape(actor, obj)
+	if not shape then return nil end
+
+	-- FREE: friendly recruit. The actor-strength check belongs to the solo variant
+	-- only (the base dialog has no such precondition).
+	if free then
+		local irc = individually_recruitable_companions
+		if shape ~= "solo"
+		   or not (irc and irc.get_is_actor_stronger_if_script_is_available)
+		   or irc.get_is_actor_stronger_if_script_is_available(actor, obj) then
+			return "companion"
+		end
+	end
+	if paid and paid_competent(actor, obj, f) then
+		-- affordability is the one paid gate that isn't static: re-checked every pass,
+		-- so the card appears the moment you can cover it and goes away when you can't
+		local price, need = hire_price(f.squad_id)
+		if price and mlr_utils and mlr_utils.have_money
+		   and not mlr_utils.have_money(need) then return nil end
+		f.price = price
+		return "hire"
+	end
+	return nil
+end
+
+local function npc_recruitable(obj, rel, ctx)
+	local ok, res = pcall(npc_recruitable_impl, obj, rel, ctx)
+	return ok and res or nil
+end
+
+-- Per-NPC test for the recruitable scan: cheapest checks first (option 3's ordering),
+-- the screen projection last. Returns the card role ("companion"/"hire") for a
+-- recruitable, on-screen, in-range stalker, else nil. The relation pre-gate admits
+-- both branches' relations; npc_recruitable applies the exact per-branch one.
+local function companion_scan_one(id, ctx)
+	local obj = get_obj(id)
+	if obj and IsStalker(obj) and obj:alive()
+	   and obj:position():distance_to_sqr(ctx.apos) <= ctx.appear2
+	   and not obj:has_info("npcx_is_companion") then
+		local rel = obj:relation(ctx.actor)
+		if rel ~= ctx.friend and rel ~= ctx.neutral then return end
+		local role = npc_recruitable(obj, rel, ctx)
+		if role then
+			-- option 3: keep only on-screen NPCs. The anchor and the projection both
+			-- belong to the card renderer, so this asks iqm_core the question
+			-- rather than borrowing its two helpers: it runs a handful of times per
+			-- frame on an amortized scan, so one namespace-bound call costs nothing.
+			if on_screen(obj) then return role end
+		end
+	end
+end
+
+-- Once-per-pass gate: skip the whole scan when both features are off, the companion
+-- system is absent, or the party is full (nobody recruitable anyway). Also resolves
+-- the paid branch's two pass-invariant preconditions here rather than per NPC:
+-- Warfare is a session constant and the dangerous-map blacklist a level one (and
+-- is_not_dangerous_map allocates a level-name string on every call). Under Warfare
+-- or on a blacklisted map the whole paid branch then costs nothing at all.
+local function companions_available()
+	if not (C.mark_companions or C.mark_hires) then return false end
+	if not (axr_companions or individually_recruitable_companions) then return false end
+	-- pcall'd like the per-NPC preconditions: is_not_dangerous_map reaches into
+	-- xr_effects.blacklisted_maps, and this one runs outside npc_recruitable's guard.
+	local txr = txr_paid_companions
+	if C.mark_hires and txr and dialogs.warfare_disabled(db.actor, db.actor) then
+		local ok, safe = pcall(txr.is_not_dangerous_map, db.actor, db.actor)
+		paid_ok = (ok and safe) and true or false
+	else
+		paid_ok = false
+	end
+	return room_for_companion()
+end
+
+-- Smaller per-frame budget than the default: each candidate here runs a chain of
+-- recruit preconditions (several squad resolutions and a squad-member walk), so ten
+-- of these in one frame is a far bigger slice than ten map-spot queries.
+local companion_scanner = make_scanner(COMPANION_SCAN, companion_scan_one, companions_available, 4)
+
+-- Merge the recruitable ids (published by the amortized scanner) into the desired set,
+-- each with the role its own dialog offers. Quest/guide roles already in `desired` win
+-- (never overwritten).
+local function augment_companions(desired)
+	for id, role in pairs(companion_scanner.live) do
+		want(desired, id, role)
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- Service / important NPC detection
+-- (options: mark_guiders, mark_traders, mark_important)
+-- --------------------------------------------------------------------------
+-- Role NPCs are read off the engine's own PDA map-spot registry: NPC logic sets
+-- level_spot = trader/mechanic/medic/barman/guider/special/quest_npc and the
+-- engine turns that into a map spot on the NPC's id, queryable per NPC via
+-- level.map_has_object_spot. That matches exactly what the player's PDA legend
+-- flags (it's what GAMMA's own sim_squad_scripted and Tactical Compass key off),
+-- so no trade-config scanning is needed. Caveat: the spot tracks the NPC's LOGIC
+-- (level_spot), not the service it offers, so dialog-driven service NPCs (guides,
+-- dm_init_trader traders) carry no service spot. Often they carry only a story
+-- special/quest_npc spot, which cards them as "important" (VIP). extras_scan_one
+-- uses service_role (a self-contained classifier, no external deps) to catch those
+-- and to outrank the VIP role for an active guide/trader; see the note there.
+local EXTRA_SCAN  = 2000  -- ms between role rescans (matches the quest scan, so role cards feel as responsive)
+
+-- Spot -> role, checked in order (first hit wins for multi-spot NPCs). `opt` is
+-- the MCM toggle gating that role card. THE ARRAY ORDER IS THE PRECEDENCE, and
+-- spot_role below no longer reads it by walking the array, so each entry also
+-- carries that position as `order` -- see the ordering note there before moving,
+-- inserting or reordering a row.
+local ROLE_SPOTS = {
+	{ spot = "ui_pda2_scout_location",     role = "guider",    opt = "mark_guiders" },
+	{ spot = "ui_pda2_trader_location",    role = "trader",    opt = "mark_traders" },
+	{ spot = "ui_pda2_mechanic_location",  role = "mechanic",  opt = "mark_traders" },
+	{ spot = "ui_pda2_barman_location",    role = "barman",    opt = "mark_traders" },
+	{ spot = "ui_pda2_medic_location",     role = "medic",     opt = "mark_traders" },
+	{ spot = "ui_pda2_special_location",   role = "important", opt = "mark_important" },
+	{ spot = "ui_pda2_quest_npc_location", role = "important", opt = "mark_important" },
+}
+
+-- [spot type] = the ROLE_SPOTS row it selects, built once from the array so a spot
+-- type coming back from the engine resolves in one hash lookup instead of a walk.
+-- Stamping `order` here rather than writing it out by hand keeps the two in step:
+-- the precedence is still the order the rows are written in, and reordering them
+-- reorders it, exactly as when the array was iterated.
+local ROLE_BY_SPOT = {}
+for i, e in ipairs(ROLE_SPOTS) do
+	e.order = i
+	ROLE_BY_SPOT[e.spot] = e
+end
+
+--- The NPC's service/VIP role from the PDA map-spot registry, as `role, opt`.
+--
+--  ONE REGISTRY CALL, NOT SEVEN. This used to ask level.map_has_object_spot once per
+--  ROLE_SPOTS row, and the overwhelmingly common answer -- an ordinary stalker in a
+--  hub carrying no service spot at all -- cost all seven round trips to learn nothing.
+--  At SCAN_BUDGET 10 that is ~70 registry queries on every frame of an extras pass.
+--  level.map_get_object_spots_by_id returns EVERY spot on the object as
+--  {spot_type=, text=} in a single call (level_script.cpp:485) -- the same call, with
+--  the same optional-and-type guard, that target_covered uses above.
+--
+--  FIRST-HIT-WINS SURVIVES THE CHANGE, AND NOT BY ACCIDENT. The old loop got its
+--  precedence for free: it asked in ROLE_SPOTS order and returned on the first yes, so
+--  an NPC carrying both a trader spot and a quest_npc spot read TRADER. The engine
+--  returns that NPC's spots in ITS OWN order, which says nothing about ours, so
+--  iterating the reply and taking the first recognised hit would make the verdict
+--  depend on the registry's internal ordering. Instead the reply is scanned for the
+--  row with the LOWEST `order` -- the ROLE_SPOTS index -- which is by definition the
+--  row the old loop would have reached first, whatever order the spots arrive in.
+--
+--  The seven-query loop is kept as the fallback, because map_get_object_spots_by_id is
+--  not in every build (hence the `and` guard). It needs no ordering fix-up: asking in
+--  order and returning early IS the ordering.
+local function spot_role(id)
+	local list = map_get_spots and map_get_spots(id)
+	if type(list) ~= "table" then
+		for _, e in ipairs(ROLE_SPOTS) do
+			if map_has_spot(id, e.spot) ~= 0 then return e.role, e.opt end
+		end
+		return
+	end
+	local best
+	for _, s in pairs(list) do
+		local e = type(s) == "table" and s.spot_type and ROLE_BY_SPOT[s.spot_type]
+		if e and (best == nil or e.order < best.order) then best = e end
+	end
+	if best then return best.role, best.opt end
+end
+
+-- A "trader" spot can hide a technician/barkeep/medic (their logic just says
+-- trader); trader_autoinject reads the NPC's actual trade file and tells them
+-- apart, so the header/glyph match what the NPC really offers. Trade logic is
+-- stable for an NPC's life, so the answer is cached. Soft dependency (ships
+-- with GAMMA); without it every trader-spot NPC just reads TRADER.
+local TRADER_TYPE_ROLE = { [1] = "mechanic", [2] = "barman", [3] = "medic" }  -- trader_autoinject constants
+local _ttype = {}   -- [id] = refined role for trader-spot NPCs
+local function refine_trader(id, obj)
+	local r = _ttype[id]
+	if r == nil then
+		r = "trader"
+		if trader_autoinject and trader_autoinject.get_trader_type then
+			local ok, tt = pcall(trader_autoinject.get_trader_type, obj)
+			if ok and tt then r = TRADER_TYPE_ROLE[tt] or "trader" end
+		end
+		_ttype[id] = r
+	end
+	return r
+end
+
+-- Signals gating each service role (checked at the call site). Guider is the fast-travel
+-- guide (mark_guiders); the rest are the trade services (mark_traders).
+local SERVICE_OPT = {
+	guider = "mark_guiders", trader = "mark_traders", mechanic = "mark_traders",
+	barman = "mark_traders", medic = "mark_traders",
+}
+
+-- Signal-based service classifier for the spot-less / VIP-preempted fallback (see
+-- extras_scan_one). A ui_pda2_*_location spot tracks the NPC's logic scheme (level_spot),
+-- not the service it offers, so it misses dialog-driven service NPCs (dm_init_trader mercs
+-- like Dushman) and, for story characters (merc guides/traders like Leopard/Dushman),
+-- surfaces only a special/quest_npc spot -> spot_role reads "important" (VIP). This
+-- re-derives the actual service from signals:
+--   * guider: fast-travel guide. Guide NPCs carry "guid" in their section, either as
+--     the guid_* prefix (guid_bar_stalker_navigator, guid_jup_stalker_garik, ...) or
+--     within "guide" (ds_killer_guide_main_base, zaton_killer_guide_station,
+--     mil_freedom_guid). Checked against every character in the pack: "guid" hits only
+--     guides. The engine hook is a "travel_<class>" actor-dialog, which isn't queryable
+--     per object, so the section name is the runtime signal. Two guides slip past this:
+--     lider_monolith_haron (no "guid" token) reads as important, and the monolith/merc
+--     station guides that also sell (trader_monolith_kbo, ...) fall to the trade branch
+--     and card as trader (they do both, so that's fine).
+--   * trader/mechanic/barman/medic: the `trade =` field in the NPC's active [logic]
+--     block (the trade_generic_* constants Demonized's trader_autoinject keys off), backed
+--     by section-name / script_trader clsid / "trader" community for dialog-injected trade
+--     NPCs that declare no trade= field.
+-- Returns "guider"/"trader"/"mechanic"/"barman"/"medic", or nil (non-service, or a
+-- companion whose trade catalog serves only the actor). Self-contained: no dependency on
+-- trader_autoinject or Xlib. Cached per NPC (a service role is stable for its life).
+--
+-- SECOND RETURN: `weak` -- true when the ONLY thing that classified this NPC was the
+-- "trader" community. That is not a job, it is a relations bucket meaning "neutral, in no
+-- faction", and roughly half the vanilla profiles carrying it sell nothing: Arnie the
+-- Rostok arena manager (R2.36, the reported case), the Bar informant, osoznanie and the
+-- seven Warlab pod stalkers. So it is kept -- it is still the only signal a dialog-trade
+-- NPC with no catalog and an unhelpful section name would have -- but it is reported as
+-- weak, and extras_scan_one refuses to overrule the game's own VIP label on it. Every
+-- other signal here is evidence about the JOB rather than about the relations bucket, so
+-- every other signal is strong.
+local _srole = {}
+local _sweak = {}   -- [id] = true when _srole[id] came from the community alone
+local function service_role(obj, cls)
+	local id = obj:id()
+	local r = _srole[id]
+	if r ~= nil then return r or nil, _sweak[id] end   -- false = cached "not a service NPC"
+
+	local sec = obj:section()
+	local weak = nil
+	r = false
+	if sec:find("guid") then                                   -- fast-travel guide (guid_* / *_guide)
+		r = "guider"
+	else
+		local name_mech  = sec:find("mechanic") or sec:find("_tech") or sec:find("mech_mlr") or sec:find("mechan")
+		local name_medic = sec:find("medic") or sec:find("medik") or sec:find("doctor")
+		-- Split deliberately: everything here says something about the NPC's JOB...
+		local name_trade = sec:find("trader") or sec:find("barm[ae]n")
+		                   or cls == clsid.script_trader or cls == clsid.trader
+		-- ...and this one only says they are neutral. See the header.
+		local comm_trade = char_comm(obj) == "trader"
+
+		-- trade= catalog in the active logic block: the engine's real trade enabler and
+		-- the most specific signal (names the exact service). Absent for dialog-trade NPCs.
+		local cat
+		local st = db.storage[id]
+		if st and st.ini and st.section_logic then
+			cat = st.ini:r_string_ex(st.section_logic, "trade")
+		end
+
+		if cat and cat:find("companion") then                  -- companion catalog serves only the actor
+			r = false
+		elseif cat and cat:find("trade_generic_mechanic") then r = "mechanic"
+		elseif cat and cat:find("trade_generic_barman")   then r = "barman"
+		elseif cat and cat:find("trade_generic_medic")    then r = "medic"
+		elseif name_mech  then r = "mechanic"                  -- name signals catch NPCs with no trade= field
+		elseif name_medic then r = "medic"
+		elseif cat or name_trade then r = "trader"             -- generic supplier / barman catalog / trader
+		elseif comm_trade then r = "trader"; weak = true       -- ...neutral, and nothing else. Last resort.
+		end
+	end
+
+	_srole[id] = r
+	_sweak[id] = weak
+	return r or nil, weak
+end
+
+-- Per-NPC test for the role scan. Unlike the companion scan there is no on-screen
+-- gate here: that would tie a card's appearance to whether the NPC happened to be
+-- projecting the frame it was scanned, which made role cards feel unresponsive.
+-- Instead we accept every in-range role NPC and let render() project and show/hide it
+-- per frame, exactly as the quest/guide cards work. The distance gate keeps the
+-- tracked set small. Returns the NPC's refined role string, or nil.
+local function extras_scan_one(id, ctx)
+	local obj = get_obj(id)
+	if not obj then return end
+	local cls = obj:clsid()   -- resolved once: reused by the IsStalker gate and service_role
+	local d2  = obj:position():distance_to_sqr(ctx.apos)
+	if (IsStalker(obj, cls) or cls == clsid.script_trader) and obj:alive()
+	   and d2 <= ctx.extra2
+	   and not obj:has_info("npcx_is_companion")
+	   and not is_enemy_to_actor(obj, ctx.actor_comm) then
+		-- Inside the CARD's range, this NPC is a candidate for everything the scanner
+		-- can produce. Outside it, the card would draw at alpha 0 anyway, so the only
+		-- reason to have looked this far is a marker -- see the trim at the bottom.
+		local near = d2 <= ctx.appear2
+		local role, opt = spot_role(id)
+		-- A real service role beats the ambient "important"/VIP classification. The PDA
+		-- spot reflects the NPC's logic scheme (level_spot), not the service it offers, so
+		-- story-heavy service NPCs (merc guides/traders like Leopard/Dushman) surface only
+		-- a special/quest_npc spot and spot_role returns "important", carding an active
+		-- guide or shopkeeper as a plain story character. So whenever the spot found
+		-- nothing or only "important", re-derive the actual service from signals
+		-- (service_role) and prefer it, gated by that role's own option. service_role
+		-- resolves the exact type (incl. the mechanic/barman/medic split), so it's used
+		-- directly. A genuine service spot (role set and not "important") keeps the fast
+		-- path unchanged. The role is resolved even when its card option is off (`out`
+		-- carries the gated result) because the work check below needs to know a
+		-- technician when it sees one, option or no option.
+		local out, mech
+		if role == nil or role == "important" then
+			local sr, weak = service_role(obj, cls)
+			-- Two different bars, because these are two different acts (R2.36).
+			-- role == nil: nobody has said anything about this NPC, so any signal is an
+			-- improvement on silence and the worst a wrong one costs is one stray card.
+			-- role == "important": the NPC's logic carries an authored `level_spot =
+			-- special`, and replacing it means declaring the game wrong about its own
+			-- character. That takes evidence about the JOB -- a trade catalog, a trader
+			-- clsid, a name -- and not merely the "trader" relations bucket, which is what
+			-- put a shop glyph on Arnie the arena manager, who sells nothing.
+			if sr and not (weak and role == "important") then
+				mech = (sr == "mechanic")
+				if C[SERVICE_OPT[sr]] then out = sr end
+			end
+		end
+		if out == nil and role then
+			local r = (role == "trader") and refine_trader(id, obj) or role
+			mech = mech or (r == "mechanic")
+			if C[opt] then out = r end
+		end
+		-- "Has a task to give right now" outranks the ambient service/VIP card (you can
+		-- see WHO the NPC is any time; that they have work for you is the actionable
+		-- fact). iqm_taskwork answers from the engine's own per-NPC verdict cache and
+		-- rations the expensive cold checks; see that file for the full story.
+		--
+		-- Gated on `near`, and that is not an optimisation detail: tw_has_work is the
+		-- expensive cold check the whole of iqm_taskwork exists to ration, and work is a
+		-- CARD with no marker behind it. Letting the wider extras range drag the work
+		-- probe out with it would quietly quadruple the population it probes to buy
+		-- nothing drawable. iqm_taskwork is configured with appear_dist for the same
+		-- reason, so this keeps the two agreeing.
+		--
+		-- BOTH ROLES TRAVEL (R2.58). `work` carries no marker, so returning it alone threw
+		-- `out` away and a shopkeeper with a job to offer lost the trader marker he would
+		-- otherwise have had -- unnoticed in the open, where the work card covers for it,
+		-- and total behind a wall, which is the one place the marker was all there was.
+		-- The card still takes `work`; the marker keeps the service role. This is the one
+		-- role collision `want` cannot resolve for itself, because both answers come out
+		-- of ONE scanner slot and only one of them was ever published.
+		if near and C.mark_work and tw_has_work and tw_has_work(id, obj, mech) then
+			return "work", out
+		end
+		-- The trim that pays for the wider scan. Past the card's range the only thing an
+		-- entry can still do is carry a marker, so anything that cannot is dropped here
+		-- rather than tracked: it would hold a MAX_CARDS slot and a FILT record to draw a
+		-- card at alpha 0. That is also what keeps "important" -- which has carried no
+		-- marker since R2.29 -- from being scanned into existence at four times the range.
+		if not near and not (out and beacon_roles[out]) then return end
+		return out
+	end
+end
+
+-- Once-per-pass gate: skip the whole scan when every role option is off.
+local function extras_enabled()
+	return C.mark_guiders or C.mark_traders or C.mark_important or C.mark_work
+end
+
+local extras_scanner = make_scanner(EXTRA_SCAN, extras_scan_one, extras_enabled)
+
+-- Merge the cached role set (published by the amortized scanner) into desired.
+local function augment_extras(desired)
+	if not extras_enabled() then return end
+	for id, role in pairs(extras_scanner.live) do want(desired, id, role) end
+	-- ...and the roles the work card displaced INSIDE the scanner, which `want` would
+	-- otherwise never see. Marker-only on purpose: these lost the card fairly, and
+	-- putting them back through `want` would float an ambient service card over the
+	-- work card that outranks it.
+	for id, role in pairs(extras_scanner.live2) do want_marker(id, role) end
+end
+
+-- --------------------------------------------------------------------------
+-- Public: what the renderer asks this module for
+-- --------------------------------------------------------------------------
+--- The full desired set for this scan pass: [npc_id] = role.
+--
+--  The three sources in the order they have always run, because the order IS the
+--  precedence: `want` keeps the more actionable (lower ROLE_PRIO) role when two
+--  sources name the same NPC, so quest targets and the guide job are merged first
+--  and the two amortized scanners only ever fill gaps.
+function desired_set()
+	-- Wiped IN PLACE rather than rebound, so the table iqm_core holds stays the one this
+	-- fills: marker_set is read on the same pass that calls this, and one table reused
+	-- keeps a second per-pass allocation off a path that already counts them.
+	for id in pairs(_mrole) do _mrole[id] = nil end
+	local desired = collect_desired()
+	augment_companions(desired)   -- add recruitable stalkers (throttled scan; no-op if off)
+	augment_extras(desired)       -- add service/important role NPCs (throttled scan; no-op if off)
+	return desired
+end
+
+--- [npc_id] = the role that NPC's MARKER should wear, for the pass desired_set just built.
+--
+--  Read by iqm_core' update() beside desired_set and cached on the tracked entry, because
+--  the card's role is not always the marker's -- see want_marker for the whole argument.
+--  nil for an NPC with no markered role at all, which is most of them, and is exactly the
+--  "no marker" the render path wants.
+--
+--  MUST BE READ ON THE SAME PASS: the set is wiped at the top of desired_set, so a held
+--  reference is only valid until the next one. iqm_core reads both in one breath.
+function marker_set()
+	return _mrole
+end
+
+--- Advance both amortized scanners by one slice; call every frame. Returns true on a
+--  frame where either published a fresh set, so the caller can merge it promptly
+--  instead of waiting out its update throttle.
+--
+--  Both are ticked unconditionally (not short-circuited on the first true): each has
+--  its own cadence and its own budget, and skipping one because the other finished
+--  would stall it for a whole frame every time they happened to line up.
+function tick(tg)
+	local a = scanner_tick(companion_scanner, tg)
+	local b = scanner_tick(extras_scanner, tg)
+	return a or b
+end
+
+--- True when neither scanner is mid-pass. iqm_taskwork prefers to run its cold
+--  probes on such frames so the budgeted costs don't stack; see probe_tick there.
+function idle()
+	return companion_scanner.ids == nil and extras_scanner.ids == nil
+end
+
+-- Every cache in this file KEYED BY AN OBJECT ID, dropped in one place, because they
+-- share a lifetime and forgetting one of them is exactly how a stale verdict survives.
+--
+-- THIS IS A CORRECTNESS FIX, NOT A MEMORY ONE. The growth is trivial; the recycling is
+-- not. alife hands object ids out again after the object holding one is released, and
+-- every function below answers from its cache BEFORE re-deriving anything --
+-- service_role's first line returns the cached role outright. So a `_srole[id] =
+-- "medic"` left behind by a squad released on the last level is inherited whole by
+-- whatever unrelated object takes that id next, and the wrong glyph that produces is
+-- near-impossible to reproduce deliberately. Same story for recruit_static's static
+-- facts and _ttype's refined trader type.
+--
+-- The scanners are reset with them, and that is part of the same statement rather than
+-- housekeeping: `live` is a published [id] = role set, so leaving it would hand a
+-- recycled id the previous level's role card for the whole interval before the next
+-- pass overwrites the set.
+--
+-- WHAT IS DELIBERATELY NOT HERE: the TASK-keyed caches -- kind_seen/kind_next,
+-- functor_cache, stage_complete_cache, open_kind/open_tgt. Those are keyed by task
+-- SECTION id, which is authored text out of the modpack's task list and not a recycled
+-- handle: they are bounded by that list, they stay true across a level change, and
+-- dropping them would re-run the functor walks and the stage probes to arrive back at
+-- the answers they already had.
+local function drop_npc_caches()
+	recruit_static = {}
+	_ttype = {}
+	_srole, _sweak = {}, {}
+	-- Keyed on the placed waypoint's TARGET id, so recycled in the same way, and held
+	-- for KIND_RECHECK without re-testing while the target compares equal. Cleared to
+	-- nil rather than re-tested, which makes the next task_kind call do the test.
+	wp_target, wp_kind, wp_next = nil, nil, nil
+end
+
+--- Start both scans over, and drop the memoized per-NPC facts with them, so a toggled
+--  option applies at once rather than after the throttle lag.
+--
+--  Also the on_level_changing handler (see on_game_start): a level change wants exactly
+--  this -- every id-keyed verdict forgotten and both scanners re-armed -- for the
+--  recycling reason above rather than the option one.
+function reset()
+	scanner_reset(companion_scanner)
+	scanner_reset(extras_scanner)
+	drop_npc_caches()
+end
+
+-- --------------------------------------------------------------------------
+-- Config + startup
+-- --------------------------------------------------------------------------
+--- PULLED, not pushed: iqm_core calls this at the end of read_config and this
+--  file reaches over for what it needs. See the seam note at the top.
+function apply_config()
+	-- The live TABLE, not a copy: iqm_core mutates it in place and never rebinds it,
+	-- so binding it once here is what keeps the two from drifting. The two ranges are
+	-- numbers, so those really are copies -- refreshed on every config change, which is
+	-- the only time either can move.
+	C = iqm_core.config()
+	local beacon2
+	appear2, beacon2 = iqm_core.ranges()
+	beacon_roles = iqm_beacon.roles()
+	-- ...and the extras scan reaches as far as the roles it feeds actually need. Only the
+	-- guide and the four trades come out of that scanner with a marker attached, so when
+	-- neither of those switches is on there is nothing past appear_dist worth classifying
+	-- and the scan stays at the card's own range, exactly as before.
+	local br = beacon_roles
+	extra2 = (br.guider or br.trader) and beacon2 or appear2
+end
+
+function on_game_start()
+	get_obj      = level.object_by_id            -- bind the hot object lookup as an upvalue (level.* is ready now)
+	map_has_spot = level.map_has_object_spot     -- per-NPC in spot_role's fallback loop (extras scan)
+	map_get_spots = level.map_get_object_spots_by_id   -- ...and its one-call fast path; nil on builds without it
+	char_comm    = character_community           -- per-NPC in is_enemy_to_actor / service_role
+	factions_enemies = game_relations.is_factions_enemies
+	on_screen    = iqm_core.npc_on_screen
+	if iqm_taskwork then                         -- work detection (soft: absent module just means no work cards)
+		tw_has_work = iqm_taskwork.has_work
+	end
+	-- The one callback this file registers. Every per-NPC verdict it caches is keyed by
+	-- an object id and alife recycles ids across a transition, so the caches are dropped
+	-- with the level that filled them -- see drop_npc_caches for which ones and why the
+	-- task-keyed ones stay. iqm_core (:2321) and iqm_nav (:2230) drop their own
+	-- level-relative state on the same callback.
+	RegisterScriptCallback("on_level_changing", reset)
+end

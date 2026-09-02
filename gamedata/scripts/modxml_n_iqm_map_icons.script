@@ -1,0 +1,988 @@
+-- Immersive Quest Markers - higher-resolution PDA map / minimap spot icons.
+--
+-- Re-points the engine's own map-spot definitions at IQM's 128px source cells
+-- (gamedata/textures/ui/iqm_map_icons.dds, ids in iqm_textures.xml) and tints
+-- them, by patching the parsed XML in memory rather than shipping a copy of
+-- map_spots*.xml. Overriding those files is not an option here: the winning copy
+-- in GAMMA is Sota UI EGUI Style HUD's, and Display Campfires on Map ships one
+-- too, so a whole-file override would silently revert both.
+--
+-- Requires the modded exes' DXML support (ships with GAMMA). Without it the
+-- global on_xml_read below is simply never called and the vanilla icons stay -
+-- no error, nothing else in the mod is affected.
+--
+-- Load order matters and is why this file is named as it is. dxml_core gathers
+-- every modxml_*.script, table.sort()s the names and calls on_xml_read() in that
+-- order (dxml_core.script:166-185), so registration order - and therefore the
+-- order the callbacks fire in, last write winning - is a plain byte-wise sort of
+-- the filename. Uppercase sorts before lowercase, which matters below.
+--
+-- The "n_" exists to place this file inside a WINDOW, not merely late:
+--
+--   after  modxml_AL_MapSpots      - AlphaLion re-points these same elements at
+--                                    its own 19x19 / 15x14 cells ('A' < 'i').
+--   after  modxml_map_spots_milpda - Milspec PDA, same reason.
+--   after  modxml_map_spots_paw    - PAW does not EDIT map_spots.xml, it splices
+--                                    its own file in (see the paw entry below).
+--                                    Before this rename we ran at "iqm_", i.e.
+--                                    ahead of "map_...", so PAW's spot did not
+--                                    exist yet when our query ran and the patch
+--                                    was a silent no-op.
+--   before modxml_z_dart_*         - Dynamic Aspect Ratio Tweaks READS each
+--                                    spot's x/width and rewrites them for the
+--                                    player's aspect ratio. It has to see our
+--                                    geometry, not the other way round: running
+--                                    after it would clobber its corrections.
+--
+-- "modxml_n_" is the whole of that - after every 'm', ahead of every 'z'. Rename
+-- this file and one of the four goes wrong, silently, in ways that only show up
+-- at some resolutions or with some mods installed.
+--
+-- Do NOT wrap any of this in a --[[ ]] block comment: an inner [[ui\...xml]]
+-- literal closes the block early, which is exactly why AlphaLion's own
+-- modxml_AL_QuestArrow.script fails to load in all three of its variants.
+
+local addon_name = "Immersive Quest Markers"
+
+-- One entry per spot element to retexture: the CSS-ish selector the DXML query
+-- takes, the texture id to point it at, and the tint. Tint is applied as r/g/b on
+-- the <texture> element (the engine multiplies the texture's RGB by it), so the
+-- art stays white and recolouring is an edit here with no texture rebuild. The
+-- keyline baked around the glyph is unaffected by any tint set here, since black
+-- times anything is still black.
+--
+-- THE PALETTE, and why it is what it is. Three measurements decide all of it.
+--
+-- 1. WHAT THESE SIT ON. Sampling the terrain out of a PDA screenshot (dropping the
+--    chromatic pixels, i.e. the markers) gives a warm dark khaki: mean (119,111,100),
+--    relative luminance 0.16, but spanning 0.07 in shadow to 0.47 on bright roofs. No
+--    single value contrasts with all of that, so chasing brightness is wasted - what
+--    actually guarantees separation from the ground is the baked BLACK KEYLINE, which
+--    is there at every size regardless of tint. That frees the palette to do the job
+--    it is really needed for, which is telling the markers apart from EACH OTHER.
+--    (The keyline is not free, though - see 3, where its AREA turned out to be what was
+--    draining the colour out of these. It earns its keep at 4px and not at 6.)
+--
+-- 2. SHAPE SEPARATES CATEGORIES; COLOUR SEPARATES WITHIN ONE. A gold ring badge and a
+--    gold reticle are different marks. Two gold ring badges are not. So the constraint
+--    is per shape family - the ring badges (services, VIP, companion, question) must
+--    all differ from one another, and the task marks (reticle, diamond, exclamation)
+--    among themselves, but the two families may reuse hues freely. Every within-family
+--    pair here clears dE 28 in CIELAB; below ~25 is confusable at minimap size. ONE
+--    exception, and it is a requested one: the turn-in diamond is the SAME green as the
+--    companion bust, deliberately, so glyph alone separates those two. See the on_guider
+--    block. (There used to be a second exception for the reds - softening medic removed
+--    it, see below.)
+--
+-- 3. THE TINT IS NOT WHAT IS ON SCREEN. This is the one that took two wrong attempts to
+--    find, and it governs the whole table. A badge is white ink plus a BLACK KEYLINE, and
+--    at the 26px the minimap draws, the keyline used to be 37-49% of the mark's area. The
+--    eye reads the mean of that, so the icons carried barely half the chroma they were
+--    given and looked washed out - "muted pastels", which was the accurate complaint.
+--
+--    Verified from the other end before changing anything: sampling a rendered PDA
+--    screenshot put the fast-travel house's peak pixel at (66,162,192) against an intended
+--    (66,166,176). Nothing in the engine desaturates a tint. The tint arrives exactly, and
+--    then gets averaged with black.
+--
+--    So it was fixed where it lives, in tools/map-icons/build.py: keyline 6/4 -> 4/3 and
+--    the ring stroke widened from vanilla's 1.35/19 to 2.1/19 - more ink per unit of edge.
+--    That alone took the medic badge from effective chroma 88 to 110 and its black share
+--    from 37% to 23%. Only THEN were the tints raised, which is why they can now be this
+--    saturated without the marks turning into blobs.
+--
+--    The earlier reasoning here said to stay well below full saturation because 255,0,0
+--    reads as a UI error state. That is true of a pure primary and was over-applied into
+--    mid-chroma tints that read as pastel on a dark, busy, mil-sim map. These sit high but
+--    not pure, which also keeps them off the engine's own RELATION dots (friend 0,255,0,
+--    enemy 237,28,36, neutral 255,240,0, in map_spots_relations) - those are transient and
+--    tactical and should stay the loudest thing on the map.
+--
+-- RESOLVED, and worth recording because it was recorded here as unresolvable. A signal
+-- red medic (240,40,24) sat dE 6.8 from the engine's own enemy-squad dots and dE 16.5 from
+-- the unknown-hostile marker: red means hostile and a red cross means medical, and the note
+-- here said shape and size would have to settle it. Softening the cross to 238,106,94 - done
+-- for appearance, not for this - took those to dE 32.3 and 28.8. The conflict was never
+-- really about the two conventions colliding; it was about the medic being the same VALUE
+-- and CHROMA as a hostile mark. Move it off those and both conventions can coexist.
+--
+-- Shape still carries the red/green axis that red-green colour deficiency collapses: cross,
+-- bust, diamond, exclamation and question mark are all distinct silhouettes, and with the
+-- turn-in and companion greens now identical by request that redundancy is load-bearing
+-- rather than belt-and-braces.
+--
+-- Each role is a PAIR: <role>_location_spot is the fullscreen map (19x19 units) and
+-- <role>_location_mini_spot is the HUD minimap (14x14). Those are the only two
+-- render targets a map spot has - there is no world or HUD target - so a pair covers
+-- every place the game draws that marker. Sizes are left alone on purpose: this is
+-- an art swap, not a layout change.
+--
+-- Colours are chosen to stay apart at minimap size, where the glyph is ~26px and shape
+-- alone stops carrying: medic a soft coral cross, trader gold, barman hazard orange,
+-- mechanic bright steel, sleep a mid sky blue. Medic, sleep and VIP were all taken a stop
+-- or two down in chroma after the first strong pass read as harsh in game; they sit between
+-- that pass and the muted one before it.
+--
+-- Trader and barman were a tan and a copper, and both were wrong for the same measurable
+-- reason: the trader tan sat at hue 81 degrees against the terrain's own 82. It was not a
+-- dull colour, it was the GROUND's colour a couple of stops lighter, which is why it kept
+-- disappearing into roofs and dirt. Both now sit well off that hue.
+--
+-- The optional `el` table is applied to the element named by `sel` itself rather than
+-- to its <texture> child, for the handful of cases that need geometry changed and not
+-- just art: currently only the selection borders' x (see below).
+--
+-- Note it is NOT used to rebalance glyph sizes. The badge frame gives every icon the
+-- same circular footprint regardless of what sits inside it, and resizing one badge
+-- would break the uniformity the ring shares with the game's own selection borders.
+local SPOTS = {
+	{ sel = "ui_pda2_medic_location_spot",            tex = "iqm_mapspot_medic",  r = 238, g = 106, b = 94 },
+	{ sel = "ui_pda2_medic_location_mini_spot",       tex = "iqm_mapspot_medic",  r = 238, g = 106, b = 94 },
+	{ sel = "ui_pda2_trader_location_spot",           tex = "iqm_mapspot_trader", r = 0, g = 198, b = 176 },
+	{ sel = "ui_pda2_trader_location_mini_spot",      tex = "iqm_mapspot_trader", r = 0, g = 198, b = 176 },
+	{ sel = "ui_pda2_actor_sleep_location_spot",      tex = "iqm_mapspot_bed",    r = 110, g = 154, b = 234 },
+	{ sel = "ui_pda2_actor_sleep_location_mini_spot", tex = "iqm_mapspot_bed",    r = 110, g = 154, b = 234 },
+	{ sel = "ui_pda2_mechanic_location_spot",         tex = "iqm_mapspot_mechanic", r = 120, g = 206, b = 236 },
+	{ sel = "ui_pda2_mechanic_location_mini_spot",    tex = "iqm_mapspot_mechanic", r = 120, g = 206, b = 236 },
+	-- Rust orange rather than another warm tan: the barman sits next to the trader in most
+	-- hubs, so at minimap size hue is doing as much work as shape - and a tan would also
+	-- put it back in the terrain's own hue, which is what was wrong with the old copper.
+	{ sel = "ui_pda2_barman_location_spot",           tex = "iqm_mapspot_barman", r = 255, g = 128, b = 185 },
+	{ sel = "ui_pda2_barman_location_mini_spot",      tex = "iqm_mapspot_barman", r = 255, g = 128, b = 185 },
+	-- VIP is TWO spot types, not one: ui_pda2_special_location is the faction/story
+	-- important character and ui_pda2_quest_npc_location is the quest NPC. The card
+	-- side of this mod already folds both into its single "important" role
+	-- (iqm_core.script ROLE_SPOTS), so they share a glyph here for the same reason.
+	-- Companions reuse the VIP bust in green rather than getting a glyph of their own:
+	-- both mark "a person who matters", the shape is already right, and at minimap size
+	-- hue separates them faster than two similar silhouettes would. Costs no atlas cell.
+	{ sel = "ui_pda2_companion_location_spot",        tex = "iqm_mapspot_vip",    r = 40, g = 172, b = 66 },
+	{ sel = "ui_pda2_companion_location_mini_spot",   tex = "iqm_mapspot_vip",    r = 40, g = 172, b = 66 },
+	{ sel = "ui_pda2_special_location_spot",          tex = "iqm_mapspot_vip",    r = 190, g = 140, b = 240 },
+	{ sel = "ui_pda2_special_location_mini_spot",     tex = "iqm_mapspot_vip",    r = 190, g = 140, b = 240 },
+	{ sel = "ui_pda2_quest_npc_location_spot",        tex = "iqm_mapspot_vip",    r = 190, g = 140, b = 240 },
+	{ sel = "ui_pda2_quest_npc_location_mini_spot",   tex = "iqm_mapspot_vip",    r = 190, g = 140, b = 240 },
+
+	-- The task marker is a PAIR of textures per spot, not one. The spot's own
+	-- <texture> is the icon it always draws; its <static_border> child is the frame
+	-- CMapSpot shows only while that task is the selected one (show_static_border,
+	-- driven from CMapLocation). Selecting a different task therefore only moves the
+	-- frame - which is why the frame carries the whole "this one is selected" signal.
+	--
+	-- That frame is now a RING of four arcs, not the four corner brackets it started as.
+	-- Everything else this mod draws on the map is round - the badge, the reticle, the
+	-- pulse - and a square bracket frame around a round badge was the one mark that did
+	-- not belong. Its arcs sit on the cardinals with the gaps on the diagonals, the exact
+	-- inverse of the reticle and the pulse, which is what keeps three concentric rings
+	-- legible as three different things when a selected task is also a new one.
+	--
+	-- A `sel` of "<spot> > static_border" reaches the border because the loop appends
+	-- "> texture" to it. Chained child selectors are how both AlphaLion and Sota
+	-- address these same elements, so the syntax is well-trodden.
+	--
+	-- Storyline is gold and secondary pale, matching the game's own split (vanilla
+	-- tints the storyline border 242,231,11 and leaves secondary white; AlphaLion
+	-- recolours both to 255,227,89).
+	--
+	-- x = -5 CENTRES the selection frame; vanilla's x="-4" does not. The border is 29
+	-- units against the spot's 19, so symmetric is -(29-19)/2 = -5 on both axes, and
+	-- vanilla gets y right and x wrong by one unit.
+	--
+	-- Worth recording how that was established, because the obvious reading of the
+	-- engine sends you the wrong way. The spot is waCenter (position = centre) while
+	-- the border is waNone (position = top-left, uiabstract.h:87-96) and CMapSpot
+	-- scales only the border's WIDTH by kx (map_spot.cpp:60-63), which looks exactly
+	-- like -4 being deliberate aspect compensation for -5*kx. It isn't: in game the
+	-- brackets sat 2.5 px RIGHT of the icon centre at x=-4 and 2.5 px LEFT at x=-6.2,
+	-- and those two points put zero at -5.1. Both textures were verified
+	-- pixel-symmetric in their cells first, so none of the offset was ours.
+	-- Independent corroboration: gamma-active-task-ui-enhancements declares its own
+	-- return-task border at x="-5" y="-5" and it sits centred.
+	--
+	-- One constant is enough at every zoom because these spots declare no scale="1",
+	-- so m_bScale is false and they never rescale with the map (map_spot.cpp:41-48);
+	-- the misalignment is a fixed pixel count, not a proportion.
+	{ sel = "storyline_task_spot",                      tex = "iqm_mapspot_task",   r = 246, g = 204, b = 0 },
+	{ sel = "storyline_task_spot_mini",                 tex = "iqm_mapspot_task",   r = 246, g = 204, b = 0 },
+	{ sel = "secondary_task_spot",                      tex = "iqm_mapspot_task",   r = 240, g = 244, b = 248 },
+	{ sel = "secondary_task_spot_mini",                 tex = "iqm_mapspot_task",   r = 240, g = 244, b = 248 },
+	{ sel = "storyline_task_spot > static_border",      tex = "iqm_mapspot_select", r = 246, g = 204, b = 0,
+	  el = { x = -5, y = -5 } },
+	{ sel = "storyline_task_spot_mini > static_border", tex = "iqm_mapspot_select", r = 246, g = 204, b = 0,
+	  el = { x = -5, y = -5 } },
+	{ sel = "secondary_task_spot > static_border",      tex = "iqm_mapspot_select", r = 240, g = 244, b = 248,
+	  el = { x = -5, y = -5 } },
+	{ sel = "secondary_task_spot_mini > static_border", tex = "iqm_mapspot_select", r = 240, g = 244, b = 248,
+	  el = { x = -5, y = -5 } },
+
+	-- Turn-in / hand-in: the "on guider" spots are the task marker relocated onto the
+	-- task GIVER, which is what the game draws once an objective is done and you owe
+	-- someone a report. Two things to know about them: they declare only <mini_map>,
+	-- no <level_map>, so they exist on the HUD minimap and never on the fullscreen map;
+	-- and they carry no static_border, so there is no selected state to dress. Not a
+	-- reticle, because it is a different verb: the objective is done, so the marker says
+	-- "settled here", not "search here". The glyph is Material Symbols' "nearby" - a
+	-- diamond inside a diamond outline, which reads as a destination rather than a
+	-- search. It replaced a shield, kept at tools/map-icons/svg/handin-shield.alt.
+	--
+	-- GREEN, and both of them the same green, which is the one place this file throws away
+	-- the storyline/secondary distinction on purpose. These spots mean the objective is
+	-- DONE, and complete-is-green is worth more to the player than which kind of task it
+	-- was - the task's own marker already carried that, in gold or bone, right up until it
+	-- turned into this. It is also the same green as ATUE's return spot below, so the two
+	-- routes to "go and get paid" finally look like one state instead of two.
+	--
+	-- Specifically 40,172,66 - the COMPANION green, byte for byte, which is a requested
+	-- exception to the dE 25 floor and the only one in the table. A lime (146,222,0) was
+	-- tried first for exactly that reason, since companion and turn-in are both ring badges
+	-- and the rule says badges must differ. It was asked for again as the companion green,
+	-- so it is the companion green.
+	--
+	-- What makes that affordable: the two glyphs are a BUST and a DIAMOND, which share no
+	-- silhouette, and the two markers rarely compete for attention - a companion sits next
+	-- to the player and moves, a turn-in sits on an NPC you are travelling towards. Set
+	-- these six entries and the two borders back to 146,222,0 / 192,240,96 to restore the
+	-- separation if the two ever do read as one thing.
+	{ sel = "storyline_task_on_guider_spot",             tex = "iqm_mapspot_handin", r = 40, g = 172, b = 66 },
+	{ sel = "secondary_task_on_guider_spot",             tex = "iqm_mapspot_handin", r = 40, g = 172, b = 66 },
+
+	-- The green RETURN marker, from gamma-active-task-ui-enhancements: its own spot
+	-- type for a task whose objective is done and which now wants handing in. Not
+	-- vanilla, hence a separate group - and every query here is guarded, so without
+	-- that mod installed this block is a silent no-op.
+	--
+	-- It gets the TURN-IN glyph, not the reticle, for the same reason on_guider does:
+	-- the two states mean the same thing to the player. That is the whole glyph grammar
+	-- on the map now - reticle = go find it, green diamond = done, go collect on it,
+	-- exclamation = and the clock is running, a ring of four arcs = the selected one,
+	-- question mark
+	-- = an unknown hostile, ring + pictogram = a service, and the one
+	-- frameless glyph (the house) = a place you leave from rather than one you visit.
+	--
+	-- The green is an ACID LIME, not ATUE's mint (107,255,176 icon, 180,255,170 border).
+	-- Two separate problems with those. They are near-white mints - value 255 on the green
+	-- channel with the other two well up - so they washed out on the map underlay. And a
+	-- mint here is dE 11 from the companion green, which is close enough to be confusable
+	-- at minimap size: "your companion is standing there" and "that task is finished" are
+	-- not things to make the player squint between. Lime clears companion by dE 40 while
+	-- staying in the green family the player already reads as done/friendly, and it earns
+	-- the hue honestly - geiger green is about as Zone-appropriate as a colour gets.
+	--
+	-- The border stays the lighter of the two, keeping ATUE's own relation between them,
+	-- so the selection frame still reads as a frame around the icon rather than part of it.
+	--
+	-- This is the one place the mod overrides another mod's chosen colour rather than
+	-- deferring to it. Put ATUE's values back here if you would rather it stay the
+	-- authority; nothing else depends on them.
+	--
+	-- Its border is already declared at x="-5" y="-5", so it needs no `el` correction -
+	-- which is also what confirmed -5 is right for vanilla's spots above.
+	--
+	-- Ordering works out: ATUE splices its definitions in from its own modxml, and
+	-- "modxml_atue_..." sorts before "modxml_iqm_...", so its elements exist by the
+	-- time these queries run. If the flag never appears, check that first.
+	{ sel = "atue_return_task_spot",                          tex = "iqm_mapspot_handin", r = 40, g = 172, b = 66 },
+	{ sel = "atue_return_task_spot_mini",                     tex = "iqm_mapspot_handin", r = 40, g = 172, b = 66 },
+	{ sel = "atue_return_task_spot > static_border",          tex = "iqm_mapspot_select", r = 108, g = 200, b = 120 },
+	{ sel = "atue_return_task_spot_mini > static_border",     tex = "iqm_mapspot_select", r = 108, g = 200, b = 120 },
+
+	-- The pulse: a ring that scales and fades around a marker for 15 s after the task
+	-- appears (ttl="15"). The bounce is the engine's xform_anim and the fade its
+	-- light_anim, neither of which is ours - but the art under them was a 25px cell
+	-- (ui_pda2_stask_last_01a) drawn into a 39-unit rect and then scaled up again by
+	-- that animation, which is why it read as a soft halo.
+	--
+	-- x/y go to 0, and this is where vanilla's offsets finally make sense. A blink spot
+	-- is its OWN map location, not a child of the task spot, and it carries
+	-- alignment="c" - so waCenter applies and its position IS its centre
+	-- (uiabstract.h:92-96), making 0,0 centred. Vanilla has x="-8" y="-10" on storyline
+	-- and x="-8" y="-40" on secondary: those are -(39-19)/2 arithmetic, correct for a
+	-- top-left-aligned child and wrong for a centre-aligned spot, with -40 a stray on
+	-- top of that pushing the secondary pulse 30 units clear of its marker. Which also
+	-- confirms the -5 on the static_borders above: those really ARE top-left children.
+	{ sel = "ui_storyline_task_blink_spot",  tex = "iqm_mapspot_blink", r = 246, g = 204, b = 0,
+	  el = { x = 0, y = 0 } },
+	{ sel = "ui_secondary_task_blink_spot",  tex = "iqm_mapspot_blink", r = 240, g = 244, b = 248,
+	  el = { x = 0, y = 0 } },
+
+	-- Off-level swaps. When a minimap target sits on another floor, CMiniMapSpot swaps
+	-- the whole icon for its texture_above / texture_below (Load stores them as
+	-- m_icon_above / m_icon_below, Draw picks one) - they REPLACE the marker rather
+	-- than decorate it, so each has to say both "marker" and "other level" alone. Hence
+	-- the badge ring with a big directional arrow where a pictogram would go. Vanilla's
+	-- cells are 13-19px (ui_mini_sn_spot_below, storyline_task_spot_below).
+	{ sel = "storyline_task_spot_mini",  child = "texture_above", tex = "iqm_mapspot_above", r = 246, g = 204, b = 0 },
+	{ sel = "storyline_task_spot_mini",  child = "texture_below", tex = "iqm_mapspot_below", r = 246, g = 204, b = 0 },
+	{ sel = "secondary_task_spot_mini",  child = "texture_above", tex = "iqm_mapspot_above", r = 240, g = 244, b = 248 },
+	{ sel = "secondary_task_spot_mini",  child = "texture_below", tex = "iqm_mapspot_below", r = 240, g = 244, b = 248 },
+	{ sel = "atue_return_task_spot_mini", child = "texture_above", tex = "iqm_mapspot_above", r = 40, g = 172, b = 66 },
+	{ sel = "atue_return_task_spot_mini", child = "texture_below", tex = "iqm_mapspot_below", r = 40, g = 172, b = 66 },
+
+	-- DELIBERATELY NOT PATCHED: fast_travel_spot (Limited Fast Travel's marker, added by
+	-- game_fast_travel.script with level.map_add_object_spot(obj.id, "fast_travel", ...)
+	-- as smarts are discovered). Reverted to the pack's own art by request, after R2.55
+	-- through R2.57 tried three glyphs on it. Everything below is why it is left alone and
+	-- what it would cost to bring back, because the findings were expensive.
+	--
+	-- WHAT THE PLAYER SEES INSTEAD. Not vanilla's art: AlphaLion's Reworked Stash Quest and
+	-- Map Markers rewrites this element at runtime (modxml_AL_MapSpots.script:454-464) to
+	-- width=11 height=15 with texture ui_AlphaLion_Location, at ui\AlphaLion\ui_MapSpots.dds
+	-- rect 1,64,11,15. Sampled, that art is an OPAQUE teal HOUSE OUTLINE - hollow, with a
+	-- solid door and a house-shaped keyline, inking 11x12 of its 11x15 rect at 30.9%, all
+	-- 51 lit pixels exactly 80,229,202. Vanilla's own ui_hud_icon_sleep (a 64x64 alpha-128
+	-- ghost) loses the load order and nobody in this pack sees it, so do not reason from it.
+	--
+	-- TO REINSTATE, one entry is enough - the atlas cell and its texture id both still
+	-- exist, unused, the same way `skull` is kept below:
+	--
+	--   { sel = "fast_travel_spot", tex = "iqm_mapspot_home", r = 80, g = 229, b = 202,
+	--     el = { width = 12, height = 12 } },
+	--
+	-- and the LEGEND row for ui_AlphaLion_Location has to come back with it, or the panel
+	-- describes a mark the map no longer draws. 12x12 is the calibrated number: our cell is
+	-- SQUARE with the glyph letterboxed, so it cannot go into AlphaLion's 11x15 without
+	-- stretching the glyph vertically by 1.36, and 12 is the square equivalent of their real
+	-- 11x12 of ink. Do not restore the 20 that shipped in R2.55 - see below.
+	--
+	-- THE THREE THINGS THIS COST, none of which is about fast travel:
+	--
+	--   SIZE A BARE GLYPH BY INK, NOT BY BOX. R2.55 put this at 20 units by matching the
+	--   medic badge's rendered 26 px, and hit it exactly - the shipped screenshot measures
+	--   26x26. Wrong quantity. A badge spends that box on a ring stroke with a small glyph
+	--   inside; a bare glyph spends it on one solid mass. Tinted ink per cell, keyline
+	--   excluded: task reticle 24.7%, transition 27.5%, VIP 30.7%, medic 34.9%, solid house
+	--   51%. Same footprint, ~1.5x the coloured area, and it read as the biggest thing on
+	--   the map.
+	--
+	--   A KEYLINE IS IN CELL PIXELS, SO IT ONLY LOOKS CONSTANT IF EVERY SPOT IS ONE SIZE.
+	--   What lands on screen is outline/128 * drawn_px. At 12 units GLYPH_OUTLINE 3 arrives
+	--   as 0.38 px against 0.61-0.81 everywhere else, and under a pixel a keyline stops
+	--   being an edge. Fixed generally in build.py (GLYPH_OUTLINE_BY_NAME), which is where
+	--   that fix belongs and why it outlives this entry.
+	--
+	--   THE NO-CIRCLE RULE DOES NOT HOLD, and it is quoted in tools/map-icons as though it
+	--   settled things. It said the handheld 3D PDA squashes every spot to 0.75 width, so a
+	--   circular glyph ovals where a straight-edged one merely narrows. True, and it does
+	--   not follow: the twelve ringed badges in this table are circles, they oval in exactly
+	--   that view, and this pack has always shipped them that way. A squashed badge and a
+	--   squashed pin distort identically. Choose a glyph on how it reads, not on that.
+	--
+	-- AND THE ZOOM QUESTION, which is general to this whole file rather than to this spot.
+	-- Asked twice as "why does it not shrink when I zoom out" and answered twice with "no
+	-- marker in this pack scales" - which is FALSE. Auditing the merged spot files for scale
+	-- attributes: the anomalies, stashes and treasures, smart terrains, faction and campfire
+	-- circles, item spots, combat spots, ZCP's landmarks and all of PAW's pins carry
+	-- scale="1", mostly 1->1.2 or 1->1.5. The marks that do not are almost exactly the ones
+	-- this file patches. Worse, the service badges carry scale_min="3" with no scale, which
+	-- reaches UIMap.cpp:436-437 and HIDES them below zoom 3, as do the squad spots - so
+	-- zoomed out the badges are not smaller, they are GONE. Nothing here acts on that: it is
+	-- behaviour rather than art, and this file's rule is that sizes and behaviour are left
+	-- alone. Two facts if it is ever revisited: scaling is opt-in (m_bScale is set only for
+	-- scale="1", map_spot.cpp:44-45), so vanilla's scale_max="1" here is inert; and the
+	-- mechanism is FULLSCREEN-MAP ONLY, since CUIMiniMap never reads m_bScale - every _mini
+	-- element's scale_min, vanilla's included, has never done anything. R_ASSERT2 at
+	-- map_spot.cpp:50 makes scale="1" without both bounds an engine fatal, uncatchable.
+
+	-- The COMPANION squad marker. Distinct from ui_pda2_companion_location above: that
+	-- one is the service-style badge on a companion NPC, while companion_spot is Warfare's
+	-- squad-marker route (companion_tex on the map, companion_spot_mini on the minimap),
+	-- drawn from ui_inGame2_companion_hint. Two paths to the same idea, so they get the
+	-- same glyph and the same green - which is the point of routing this here rather than
+	-- giving it a cell: a companion should not look like two different things depending on
+	-- which code path put the marker on the map.
+	--
+	-- Vanilla tints these 255,255,128 and 255,255,64 - a pale yellow that reads as a task
+	-- marker at minimap size, which is the other reason to change it.
+	{ sel = "companion_tex",         tex = "iqm_mapspot_vip", r = 40, g = 172, b = 66 },
+	{ sel = "companion_spot_mini",   tex = "iqm_mapspot_vip", r = 40, g = 172, b = 66 },
+
+	-- red_location: an UNKNOWN HOSTILE. Not a generic "something is here" marker, which is
+	-- what this was first taken for - the callers settle it. Warfare's tasks_assault and
+	-- tasks_smart_control, and New Storylines' utils_slht, all add it to a SQUAD id with
+	-- the hint st_ui_pda_task_unknown_enemy. A question mark is the right glyph for that
+	-- (an unidentified contact), and vanilla's art is a featureless red blob
+	-- (ui_icons_mapPDA_mark_t at 32px, ui_icons_newPDA_SmallRed at 11px), so the glyph is
+	-- the first time the marker says anything. Ringed rather than bare: the mark's dot is
+	-- exactly the kind of shape the handheld PDA's squash ruins (see fast_travel_spot).
+	--
+	-- RED, because hue here carries a CATEGORY rather than an identity: red means hostile,
+	-- in this game and every other, and the player must not have to resolve a 26px glyph to
+	-- learn that something wants to kill them.
+	--
+	-- This entry was for a while the one place the dE 25 floor was knowingly broken, at dE
+	-- 16.6 from the medic cross, on the reasoning that no red could do better because medic
+	-- owned the hue. That turned out to be true only while the medic was a SIGNAL red -
+	-- softening the cross to 238,106,94 lifted the pair to dE 28.8 and the exception simply
+	-- went away. Worth remembering as a pattern: a collision blamed on a hue being occupied
+	-- was really about the two marks sharing a value and chroma.
+	--
+	-- A magenta was here briefly. It cleared everything comfortably (dE 37) and was chosen
+	-- while this was believed to be a generic unknown-thing marker; once the callers showed
+	-- it to be an enemy, separation stopped being worth a hostile marker that does not look
+	-- hostile. If the collision with medic ever proves worse in play than this reasoning
+	-- expects, 226,98,164 is the fallback.
+	--
+	-- Its above/below get ours too. They are not decoration - CMiniMapSpot REPLACES the
+	-- icon with them when the target is on another floor - so leaving them on vanilla's
+	-- 13px ui_mini_sn_spot_* would mean the marker silently reverted to the old art in
+	-- exactly the situation where it matters most.
+	{ sel = "red_spot",       tex = "iqm_mapspot_question", r = 206, g = 0, b = 32 },
+	{ sel = "red_mini_spot",  tex = "iqm_mapspot_question", r = 206, g = 0, b = 32 },
+	{ sel = "red_mini_spot",  child = "texture_above", tex = "iqm_mapspot_above", r = 206, g = 0, b = 32 },
+	{ sel = "red_mini_spot",  child = "texture_below", tex = "iqm_mapspot_below", r = 206, g = 0, b = 32 },
+
+	-- DELIBERATELY NOT PATCHED: primary_object_spot (ui_inGame2_PDA_icon_location).
+	--
+	-- Recorded because the name invites exactly the mistake that was made here once, which
+	-- was to read "primary object" as "quest object" and give it the task reticle. It is
+	-- not a task marker at all. It is ZCP's LANDMARK DISCOVERY system (pda.script's
+	-- primary_objects_tbl / discover_spots): named anomalies, buildings and landmarks -
+	-- mar_2c_01_anomaly_spot, pri_a16_spot, hints ending _name_land - revealed as the
+	-- player walks near them, with a spot_discovered sound and a fade message.
+	--
+	-- Its geometry says the same thing, and is the part to check before ever touching it:
+	--
+	--   location_level="-3"  drawn BEHIND every other spot, i.e. it is ground, not a mark
+	--   scale="1" scale_max="6"  it GROWS with map zoom, up to 6x its 15 units
+	--
+	-- That second attribute makes it the one exception to a claim made elsewhere in this
+	-- file and in tools/map-icons: that these spots do not rescale with the map. True of
+	-- every spot patched here - none of them declares scale="1" - and false of this one,
+	-- which is precisely why it is not patched. A 205px soft circle is the right art for
+	-- something drawn at up to 90 units behind everything else; a reticle at that size
+	-- turns ambient scenery into a screenful of active objectives.
+	--
+	-- Nothing to gain even setting the shape aside: at 205px the vanilla art is already
+	-- larger than a 128px cell here, so there is no resolution to recover.
+
+	-- TIMED tasks. secondary_task_complex_spot_mini_timer serves storyline_task_location_
+	-- complex_timer, secondary_task_location_complex_timer and secondary_task_location_
+	-- complex_defend_smart_delay - and it is a SEPARATE element from
+	-- secondary_task_spot_mini, which is why every other task marker in this file was
+	-- already replaced while a timed task still drew vanilla's 11px ui_mmap_secondary_
+	-- alert. Found by inventorying every spot the game loads (tools/map-icons/inventory.py)
+	-- rather than by looking, because on the minimap 11 units is where things stop being
+	-- legible enough to notice they are wrong.
+	--
+	-- Hazard orange and an exclamation rather than the task tints: what distinguishes these
+	-- tasks is that they EXPIRE, and one shared element cannot carry storyline gold and
+	-- secondary white at once, so a colour that means neither and says "clock running" is
+	-- the honest choice. Orange rather than the amber this first used, for two reasons that
+	-- both came out of measuring: amber sat dE 18 from storyline gold, and at hue 79 it was
+	-- within 3 degrees of the terrain's own. Orange is also simply the convention - caution
+	-- and expiry are orange in more or less every game UI there is.
+	--
+	-- width/height 11 -> 19 to match every other task spot on the minimap. A badge at 11
+	-- units is ~15 px at 1440p, under half the size of the task markers beside it, and a
+	-- ring at that size is a smudge. This is the one geometry change here that is not
+	-- centring or sizing arithmetic; drop the `el` to leave vanilla's 11 alone.
+	{ sel = "secondary_task_complex_spot_mini_timer", tex = "iqm_mapspot_alert",
+	  r = 255, g = 128, b = 0, el = { width = 19, height = 19 } },
+	{ sel = "secondary_task_complex_spot_mini_timer", child = "texture_above",
+	  tex = "iqm_mapspot_above", r = 255, g = 128, b = 0 },
+	{ sel = "secondary_task_complex_spot_mini_timer", child = "texture_below",
+	  tex = "iqm_mapspot_below", r = 255, g = 128, b = 0 },
+
+	-- Personal Adjustable Waypoint clones the vanilla blink spot for its own waypoints,
+	-- including the same 25px art and the same bad offsets (x="-8" y="-40" on a
+	-- centre-aligned spot) - which is why a player-placed waypoint kept the old fuzzy
+	-- pulse while the game's own new-task pulse above was already fixed.
+	--
+	-- This one is not in map_spots.xml at all. PAW ships map_spots_paw.xml and its
+	-- modxml_map_spots_paw.script splices an #include of it into the parsed DOM
+	-- (insertFromXMLString, which resolves includes). So the element only exists once
+	-- PAW's callback has run, and this entry is only reachable because this file now
+	-- sorts after it - see the load-order note at the top. It fires for whichever of
+	-- the three files below PAW also targets; PAW checks map_spots_21.xml rather than
+	-- the _219 this pack ships, so on ultrawide PAW injects nothing and there is
+	-- nothing here to patch either, which is consistent, not a gap on our side.
+	--
+	-- No tint set here on purpose: PAW colours it with a named color="blue" attribute
+	-- rather than r/g/b, and a NAMED colour wins outright -- CUIXmlInit::GetColor
+	-- (UIXmlInit.cpp:1307-1323) returns the named entry and never looks at r/g/b. So
+	-- r/g/b here would not have "competed", it would simply have done nothing. (The
+	-- legend patch below has to remove the attribute for exactly this reason.)
+	-- Guarded, so it no-ops without PAW.
+	{ sel = "paw_task_default_spot", tex = "iqm_mapspot_blink", el = { x = 0, y = 0 } },
+
+	-- LEVEL TRANSITIONS. Nine elements for one mark: eight compass variants that differ
+	-- only in heading_angle, plus the minimap's. The glyph is an arch with an arrow going
+	-- through it, drawn rather than traced because no icon set has this mark - a gateway
+	-- seen head-on is not something anything outside this game needs to draw.
+	--
+	-- The green is AlphaLion's (102,173,88), not a choice made here. Its
+	-- modxml_AL_MapSpots re-points all nine at ui_AlphaLion_Transition and strips their
+	-- r/g/b, so what a GAMMA player sees today is that green BAKED into the art. Setting
+	-- it as a tint reproduces it and makes it editable, which the baked one was not. (The
+	-- vanilla texture underneath is white and vanilla tints it 10,250,250 cyan; nobody in
+	-- this pack sees that.) We run after AL - modxml_AL_* sorts before modxml_n_* - so
+	-- putting r/g/b back on an element AL cleared is the whole point, not a conflict.
+	--
+	-- THE THREE `el` VALUES ARE ALL LOAD-BEARING, and none of them is a resize:
+	--
+	--   stretch = 1  Required, and only on these spots. CMapSpot::Load turns stretch on
+	--                for everything else, but inside `if (!Heading())` (map_spot.cpp:35-39)
+	--                and these have heading_angle, so they fall out of that branch. Without
+	--                stretch, CUIStatic::DrawTexture takes the quad's size from the TEXTURE
+	--                RECT (UIStatic.cpp:117-150), i.e. a 128px cell draws at 128 UI units.
+	--                That is also why vanilla's art is exactly 19x21 for a 19x21 spot, and
+	--                why every other high-res spot atlas leaves these eight alone.
+	--   width/height Square, and that is the point rather than the size. The engine rotates
+	--                the QUAD (S2DVert::rotate_pt, ui_base.cpp:11-19), so a 19x21 rect at
+	--                heading 45 is a rotated oblong and the arch inside it comes out
+	--                sheared. 19x19 also puts these at the same footprint as this mod's
+	--                other spots, and on the minimap it is very nearly a no-op: the mini
+	--                spot's declared 8x10 never applied, since without stretch it was
+	--                drawing at the texture's 19x21 all along.
+	--
+	-- kx is not escaped by the heading path - it just moves from load time into rotate_pt,
+	-- which applies it after the rotation. So these behave like every other spot: exact on
+	-- the fullscreen map, 0.75 wide in the handheld 3D PDA. The arch is all straight edges
+	-- and survives that, per the no-circles-bare rule in tools/map-icons/build.py.
+	{ sel = "level_changer_up_spot",         tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_up_right_spot",   tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_right_spot",      tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_right_down_spot", tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_down_spot",       tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_down_left_spot",  tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_left_spot",       tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_left_up_spot",    tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+	{ sel = "level_changer_spot_mini",       tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	  el = { width = 19, height = 19, stretch = 1 } },
+
+	-- ------------------------------------------------------------------
+	-- SQUAD MARKERS - every NPC squad on either view
+	-- ------------------------------------------------------------------
+	-- Fifty spot elements, ONE picture. They all resolve to just two vanilla textures
+	-- in ui\ui_common: ui_pda2_squad_leader (11x11) on the map and
+	-- ui_minimap_squad_leader (11x11) on the minimap. Faction, relation and
+	-- moving/static are carried entirely by r/g/b on the element, which is why this is
+	-- one job and not fifty, and why a white disk covers all of them.
+	--
+	-- NO TINT SET HERE, deliberately, and this is the only block in the file like that.
+	-- Every element already carries its own colour - stalker 255,255,128, Duty
+	-- 192,32,32, Freedom 32,192,128, the A-life relation greens and reds - and that IS
+	-- the information the marker conveys. Setting r/g/b would flatten fifty meanings
+	-- into one. The disk is white so it takes each element's existing tint unchanged,
+	-- and the black keyline survives all of them because the tint multiplies.
+	--
+	-- WHY TWO CELLS. The map elements are 11-13 units and the mini ones 9, against 19
+	-- and 14 for every other spot this mod touches. At 9 units (~12.7 px at 1080p) a
+	-- keyline sized as a fraction of a shared cell comes out 1.44x thinner than on the
+	-- map cell and stops reading as an outline. iqm_mapspot_squadmini is the same disk
+	-- with a proportionally heavier border, so the black ring lands at the same FINAL
+	-- PIXEL width in both views. Both cells ink the same fraction of their cell, so
+	-- on-screen size still comes only from the element's own width/height - nothing
+	-- here sets `el`, so no size is changed.
+	--
+	-- AND THE DISK IS DELIBERATELY INSET IN ITS CELL, which is the answer to "why is the
+	-- dot smaller than its 13 units". It inks 0.78 of the cell, not 0.98 as it did before
+	-- R2.61. The two vanilla textures it displaces are mostly holes - 0.605 mean alpha for
+	-- ui_pda2_squad_leader and 0.245 for ui_minimap_squad_leader's four-point star - so a
+	-- wall-to-wall disk read 2.8x heavier on the minimap in an identical rect, and got
+	-- reported as the dots being much too big. The inset is the fix and it lives entirely
+	-- in the art: tools/map-icons/build.py, SQUAD_EXTENT, which carries the measurements.
+	-- Resizing the elements here was the alternative and was rejected - it would make this
+	-- mod decide squad-dot size for Sota UI, AlphaLion and Milspec PDA, which is exactly
+	-- what re-skinning instead of overriding is supposed to avoid.
+	--
+	-- Split by the element's DECLARED SIZE, not by its name: alife_presentation_squad_*
+	-- has an 11-unit map spot and a 9-unit mini one, and the names differ only by the
+	-- `_mini` suffix that also appears on 13-unit warfare elements.
+	--
+	-- WHICH SQUADS THE PLAYER ACTUALLY SEES is not decided here. Milspec PDA gates it
+	-- per PDA tier (item_milpda.actor_pda_can_see_mapspot, called from its
+	-- sim_squad_scripted.show monkeypatch): a PDA 2.0 shows friendlies only, 3.0 adds
+	-- neutrals, the Milspec adds enemies. This changes what a shown squad looks like,
+	-- never whether it is shown.
+	--
+	-- BEYOND ui_pda2/ui_minimap_squad_leader BY TWO ENTRIES. The two monster mini spots
+	-- draw a third texture, ui_mmap_squad_leader, and are patched here anyway: left out,
+	-- mutant squads would keep vanilla's blob on the minimap while every other squad
+	-- became a circle, which is a visible inconsistency rather than a preserved
+	-- distinction. Delete the two alife_presentation_squad_monster_spot_mini* lines to
+	-- limit this block to exactly the two named textures.
+
+	{ sel = "alife_presentation_squad_enemy_spot",          tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_enemy_spot_1",        tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_friend_spot",         tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_friend_spot_1",       tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_monster_spot",        tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_monster_spot_1",      tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_neutral_spot",        tex = "iqm_mapspot_squad" },
+	{ sel = "alife_presentation_squad_neutral_spot_1",      tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_army_tex",                             tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_bandit_tex",                           tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_csky_tex",                             tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_duty_tex",                             tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_ecolog_tex",                           tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_enemy_tex",                            tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_enemy_tex_moving",                     tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_freedom_tex",                          tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_friendly_tex",                         tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_friendly_tex_moving",                  tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_greh_tex",                             tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_isg_tex",                              tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_killer_tex",                           tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_monolith_tex",                         tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_mutant_tex",                           tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_neutral_tex",                          tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_neutral_tex_moving",                   tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_renegade_tex",                         tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_stalker_tex",                          tex = "iqm_mapspot_squad" },
+	{ sel = "warfare_zombied_tex",                          tex = "iqm_mapspot_squad" },
+
+	{ sel = "alife_presentation_squad_enemy_spot_mini",     tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_enemy_spot_mini_1",   tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_friend_spot_mini",    tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_friend_spot_mini_1",  tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_monster_spot_mini",   tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_monster_spot_mini_1", tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_neutral_spot_mini",   tex = "iqm_mapspot_squadmini" },
+	{ sel = "alife_presentation_squad_neutral_spot_mini_1", tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_army_spot_mini",                       tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_bandit_spot_mini",                     tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_csky_spot_mini",                       tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_duty_spot_mini",                       tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_ecolog_spot_mini",                     tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_freedom_spot_mini",                    tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_greh_spot_mini",                       tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_isg_spot_mini",                        tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_killer_spot_mini",                     tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_monolith_spot_mini",                   tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_mutant_spot_mini",                     tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_renegade_spot_mini",                   tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_stalker_spot_mini",                    tex = "iqm_mapspot_squadmini" },
+	{ sel = "warfare_zombied_spot_mini",                    tex = "iqm_mapspot_squadmini" },
+
+}
+
+-- --------------------------------------------------------------------------
+-- OFF-SCREEN POINTERS -- REVERTED (R2.59)
+-- --------------------------------------------------------------------------
+-- A location whose marker is off the edge of the map does not vanish: the engine draws that
+-- location's POINTER at the edge instead, rotated to face it (CMapLocation::Update,
+-- map_location.cpp:427). R2.53 declared five pointer elements of our own in
+-- ui/iqm_map_spots.xml and a POINTERS table here repointed storyline / primary / secondary
+-- at them, so the arrow at the edge wore the colour of the pin it belonged to.
+--
+-- ALL OF IT IS GONE. The task locations keep the game's own arrow and this file no longer
+-- touches a `pointer` attribute anywhere.
+--
+-- THE ARGUMENT FOR IT WAS HALF RIGHT, which is why it survived six releases. Redefining
+-- quest_pointer itself WOULD have been wrong -- those names are shared by the level
+-- changers, the treasure spots, the fourteen faction circles and the combat pointer, so an
+-- override would be this mod deciding what every other mod's off-screen cue looks like.
+-- Declaring our OWN elements and repointing three locations avoided that, and the note here
+-- said so at length, which made it read as settled.
+--
+-- What it missed is that the arrow is a SHARED VOCABULARY even when the element is private.
+-- The player learns one off-screen arrow. Giving task markers a different one does not
+-- enrich that, it splits it: the same glyph at the map's edge now means two things
+-- depending on what is behind it, and the arrow is seen precisely when the pin cannot be.
+-- Being technically non-invasive is not the same as being harmless. The pin at the
+-- destination is ours to style; the arrow that says "keep walking that way" is the map's.
+--
+-- To reinstate, restore the elements in ui/iqm_map_spots.xml (the note there records the
+-- two geometry constraints that cost the most to find) and put this table back:
+--
+--   local POINTERS = {
+--     { sel = "storyline_task_location", ptr = "iqm_pointer_task" },
+--     { sel = "primary_task_location",   ptr = "iqm_pointer_task" },
+--     { sel = "secondary_task_location", ptr = "iqm_pointer_side" },
+--   }
+
+-- Every aspect-ratio variant of the spot file that exists in this pack: base
+-- Anomaly ships map_spots.xml and map_spots_16.xml, and Sota UI adds the ultrawide
+-- map_spots_219.xml (which is nothing but #includes, map_spots_16.xml among them,
+-- so the medic element is present there once includes are inlined). Which one the
+-- engine reads depends on the player's resolution; the queries are guarded, so
+-- listing all three costs nothing and missing one would leave those players on the
+-- vanilla icon. Other packs use _21/_43 names - add them if you ever see one.
+local FILES = {
+	[ [[ui\map_spots.xml]] ]     = true,
+	[ [[ui\map_spots_16.xml]] ]  = true,
+	[ [[ui\map_spots_219.xml]] ] = true,
+}
+
+-- --------------------------------------------------------------------------
+-- The PDA map's SYMBOLS panel
+-- --------------------------------------------------------------------------
+-- Re-skinning the spots leaves the legend describing art that is no longer on the
+-- map: the panel is a plain list of <item> rows in pda_tasks*.xml, each an <image>
+-- with a hard-coded texture, and nothing in the engine connects a row to the spot it
+-- claims to explain. So it is patched the same way the spots are.
+--
+-- KEYED ON THE TEXTURE THE ROW ALREADY HAS, not on its position in the list or on its
+-- caption. Position is meaningless (AlphaLion's legend has 20 rows, vanilla's 15, in
+-- different orders) and the captions are worse: half of AlphaLion's rows carry literal
+-- English text rather than a string id, so a caption key would silently stop matching
+-- in any other language. The existing texture id is the one thing that says exactly
+-- which mark a row is for -- and keying on it makes this SELF-LIMITING, which is the
+-- whole answer to "can we do this without conflicts": a legend we do not recognise is
+-- a legend we do not touch, and a row whose spot we do not re-skin is left alone even
+-- in a legend we do recognise.
+--
+-- Both providers are listed per row. AlphaLion's Reworked Stash Quest and Map Markers
+-- wins pda_tasks_16.xml in this pack; base Anomaly's own legend is what a player
+-- without it gets, and it is the one that needs `color` removed (see below).
+--
+-- Ten rows, and the deliberate GAPS are as much of the design as the entries:
+--   * stashes, "Area", the player arrow and the squad/relation dots -- other mods' art
+--     or the engine's, none of it ours to explain;
+--   * guide/scout -- there is no scout entry in SPOTS either. Same rule.
+--
+-- FAST TRAVEL is the rule working in BOTH directions, which is worth a note because the row
+-- has now been claimed and released. It was held out for four releases because the spot was
+-- not patched; claimed in R2.55 when it was; and dropped again when the spot went back to
+-- AlphaLion's art. A legend row is not a thing to hold on to -- it is a claim that the panel
+-- and the map show the same mark, and it has to be given up the moment that stops being
+-- true, or the legend quietly starts lying. Restore it alongside the SPOTS entry, never on
+-- its own:
+--
+--   ["ui_AlphaLion_Location"] = { tex = "iqm_mapspot_home", r = 80, g = 229, b = 202 },
+--
+-- Only AlphaLion's legend has this row; base Anomaly's has no fast-travel entry at all.
+local LEGEND_BOX = { x = 6, y = 0, width = 19, height = 19 }
+local LEGEND = {
+	-- tasks: the reticle, gold for storyline and near-white for side jobs, exactly as
+	-- storyline_task_spot / secondary_task_spot are tinted above
+	["ui_AlphaLion_PrimaryMission"]           = { tex = "iqm_mapspot_task",  r = 246, g = 204, b = 0 },
+	["ui_inGame2_PDA_icon_Primary_mission"]   = { tex = "iqm_mapspot_task",  r = 246, g = 204, b = 0 },
+	["ui_AlphaLion_SecondaryMission"]         = { tex = "iqm_mapspot_task",  r = 240, g = 244, b = 248 },
+	["ui_inGame2_PDA_icon_Secondary_mission"] = { tex = "iqm_mapspot_task",  r = 240, g = 244, b = 248 },
+	-- the four trades
+	["ui_AlphaLion_Trader-large"]             = { tex = "iqm_mapspot_trader",   r = 0,   g = 198, b = 176 },
+	["ui_inGame2_PDA_icon_Stalker_Trader"]    = { tex = "iqm_mapspot_trader",   r = 0,   g = 198, b = 176 },
+	["ui_AlphaLion_Mechanic-large"]           = { tex = "iqm_mapspot_mechanic", r = 120, g = 206, b = 236 },
+	["ui_inGame2_PDA_icon_Stalker_machanik"]  = { tex = "iqm_mapspot_mechanic", r = 120, g = 206, b = 236 },
+	["ui_AlphaLion_Barman-large"]             = { tex = "iqm_mapspot_barman",   r = 255, g = 128, b = 185 },
+	["ui_inGame2_PDA_icon_Stalker_Barman"]    = { tex = "iqm_mapspot_barman",   r = 255, g = 128, b = 185 },
+	["ui_AlphaLion_Medic-large"]              = { tex = "iqm_mapspot_medic",    r = 238, g = 106, b = 94 },
+	["ui_inGame2_PDA_icon_Stalker_Medic"]     = { tex = "iqm_mapspot_medic",    r = 238, g = 106, b = 94 },
+	-- the two bust rows: same glyph, told apart by colour exactly as they are on the map
+	["ui_AlphaLion_Companion"]                = { tex = "iqm_mapspot_vip", r = 40,  g = 172, b = 66 },
+	["ui_AlphaLion_Special-large"]            = { tex = "iqm_mapspot_vip", r = 190, g = 140, b = 240 },
+	["ui_inGame2_PDA_icon_Stalker_Special"]   = { tex = "iqm_mapspot_vip", r = 190, g = 140, b = 240 },
+	-- ...and the level changer. Unrotated here, which is the canonical cell: on the map
+	-- the eight compass variants are the same art at eight heading_angles, and a legend
+	-- wants the mark rather than one of its bearings. Its row is drawn taller than the
+	-- rest (17x23 at y=-2), so it gets the same square box on the same centre.
+	["ui_AlphaLion_Transition"]               = { tex = "iqm_mapspot_transition", r = 102, g = 173, b = 88,
+	                                              el = { x = 6.5, y = 0, width = 19, height = 19 } },
+}
+
+-- Every aspect variant of the file the panel lives in. Only _16 exists as a mod copy
+-- in this pack (AlphaLion's); the others are base Anomaly's, and listing a name that
+-- never arrives costs nothing.
+local LEGEND_FILES = {
+	[ [[ui\pda_tasks.xml]] ]     = true,
+	[ [[ui\pda_tasks_16.xml]] ]  = true,
+	[ [[ui\pda_tasks_21.xml]] ]  = true,
+	[ [[ui\pda_tasks_219.xml]] ] = true,
+}
+
+--- Swap the legend rows we have art for. Scoped per row rather than run over one flat
+--  query of every texture, so the <image> geometry and its <texture> are read from the
+--  same item and cannot drift apart on a legend whose rows are not one-to-one.
+local function patch_legend(xml_obj, xml_file_name)
+	local items = xml_obj:query("legend_list > item")
+	if not (items and items[1]) then return end   -- a PDA layout with no symbols panel
+
+	local n = 0
+	for _, item in ipairs(items) do
+		local res = xml_obj:query("image > texture", item)
+		local el  = res and res[1]
+		local cur = el and xml_obj:getText(el)
+		local e   = cur and LEGEND[cur]
+		if e then
+			xml_obj:setText(el, e.tex)
+			-- Vanilla's rows carry color="pda_blue", and a NAMED colour beats r/g/b
+			-- outright (CUIXmlInit::GetColor). Leaving it would tint every one of our
+			-- glyphs the same PDA blue -- which is the map's colour coding thrown away,
+			-- and worse than not patching at all. AlphaLion's rows have no colour
+			-- attribute, so there it removes nothing.
+			xml_obj:removeElementAttr(el, { "color" })
+			xml_obj:setElementAttr(el, { r = e.r, g = e.g, b = e.b })
+
+			-- Square the swatch. The rows are 15x19 with stretch="1", which squashes a
+			-- square cell by 21%; 19x19 is both undistorted and the exact size the
+			-- fullscreen map draws these at, so the legend shows the mark at its real
+			-- size rather than a portrait-cropped impression of it.
+			local img = xml_obj:query("image", item)
+			if img and img[1] then
+				xml_obj:setElementAttr(img[1], e.el or LEGEND_BOX)
+			end
+			n = n + 1
+		end
+	end
+	printf("%s: DXML patched %s legend rows in %s", addon_name, n, xml_file_name)
+end
+
+--- Is the mod's own map art wanted, or should the game keep vanilla's?
+--
+--  Reads iqm/general/map_icons straight from MCM rather than from iqm_core.C, and that
+--  is deliberate: this file is a modxml, it has no apply_config and no on_game_start,
+--  and it runs on whatever frame the engine first parses map_spots.xml. Going through
+--  iqm_core would make the answer depend on the two modules' relative readiness at that
+--  moment, which is a race nobody can see the losing side of.
+--
+--  DEFAULTS TO TRUE at every failure, and each `nil` below is a different install:
+--  no MCM at all, MCM present but this mod's menu not registered, or the key never
+--  written because the player has not opened the menu. All three are "the player has
+--  not asked for vanilla", and turning the art off on a shrug would silently undo the
+--  whole mod. pcall because ui_mcm.get logs an error and returns nil on a path it does
+--  not know, and a stale key after a rename should read as absent, not as a log line
+--  per spot file.
+local function icons_on()
+	if not (ui_mcm and ui_mcm.get) then return true end
+	local ok, v = pcall(ui_mcm.get, "iqm/general/map_icons")
+	if not ok or v == nil then return true end
+	return v and true or false
+end
+
+function on_xml_read()
+	RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj)
+		-- The PDA's symbols panel: a different file, the same job, and it has to run
+		-- inside the same load-order window -- DART (modxml_z_dart_pda) rewrites this
+		-- file's geometry for the player's aspect ratio, so it must see our square
+		-- swatches rather than correct the old rects and have us overwrite the result.
+		-- The legend follows the icons. It is a KEY to the map's marks, so leaving it
+		-- patched while the map went back to vanilla would make it a key to marks that
+		-- are no longer there -- worse than either consistent state.
+		if LEGEND_FILES[xml_file_name] then
+			if icons_on() then patch_legend(xml_obj, xml_file_name) end
+			return
+		end
+
+		if not FILES[xml_file_name] then
+			return
+		end
+
+		-- Splice in the minimap trail's calibration spot type (F3). insertFromXMLString
+		-- resolves the include, which is how Personal Adjustable Waypoint adds its own
+		-- spot to this same file -- and the only route available, since overriding
+		-- map_spots*.xml outright would revert Sota UI's winning copy.
+		--
+		-- iqm_calib_declared is the gate iqm_minimap checks before it ever calls
+		-- map_add_object_spot with this type. Adding a spot type the engine does not know
+		-- is not a soft failure -- CMapLocation::Load asserts on the missing node and
+		-- takes the game down -- so on an install without the modded exes' DXML support
+		-- this callback never runs, the flag stays nil, and the trail simply never
+		-- calibrates instead of crashing.
+		--
+		-- NOTE the assignment is to this script's OWN NAMESPACE, not to a true global: a
+		-- .script runs in its own environment table, so a bare `x = true` here becomes
+		-- modxml_n_iqm_map_icons.x and nothing else can see it as `x`. iqm_calib_declared
+		-- reads it back through that table for exactly this reason. The first attempt set
+		-- it bare and read it bare from the other module, which silently never fired --
+		-- the DXML log line printed, the flag read false, and the trail never calibrated.
+		xml_obj:insertFromXMLString([[
+#include "ui\iqm_map_spots.xml"
+]])
+		iqm_calib_declared = true
+		-- The same splice also declares iqm_task_mutant / iqm_task_bounty, and
+		-- iqm_taskspot gates on this flag for exactly the reason above: it hands those
+		-- type names to change_map_location, and a name map_spots.xml does not carry is
+		-- an engine fatal rather than a no-op. A separate flag rather than a reuse of
+		-- iqm_calib_declared because they are separate promises about the same file, and
+		-- one of them being true is not evidence for the other if this ever splits.
+		--
+		-- VERIFIED, not assumed, which is the difference between a guard and a comment.
+		-- The flag above says "the splice ran"; this one has to mean "the types are in the
+		-- DOM", and those come apart the moment a deployed iqm_map_spots.xml is older than
+		-- the scripts reading it -- an install half-updated, or a game running while the
+		-- file is edited underneath it. Asserting it blindly would then hand a name to the
+		-- engine that map_spots.xml does not carry, which is the one failure here that
+		-- takes the game down. Querying the element costs one lookup, once per file.
+		--
+		-- ONE FAILURE STANDS THE FEATURE DOWN FOR THE SESSION. This callback fires once
+		-- per spot file and FILES holds three (the 16 / 43 / 219 aspect variants), but only
+		-- the engine knows which one g_uiSpotXml ended up loading. So the flag latches
+		-- false: "any of them missing the types" is the only safe reading of "the one that
+		-- matters might be missing".
+		--
+		-- EVERY TYPE IS PROBED, not one representative, and that changed in R2.51 because
+		-- the single-probe version had grown a hole exactly where this guard is supposed to
+		-- be strongest. It queried iqm_task_bounty alone, which answers "the R2.48 types are
+		-- here" -- and the stale-deployment case this guard exists for is precisely an XML
+		-- that is a few versions behind, i.e. one that HAS the old types and not the new
+		-- one. It would have passed the probe and then handed the engine a name that file
+		-- does not carry.
+		--
+		-- The list comes from iqm_taskspot rather than being restated here, so it cannot be
+		-- the thing that goes stale next: that module owns the names it hands to
+		-- change_map_location, and this asks it what they are. Falling back to the one type
+		-- if it is unreachable is safe in the only way that matters -- if iqm_taskspot did
+		-- not load, nothing is going to call change_map_location at all.
+		local types = iqm_taskspot and iqm_taskspot.spot_types
+		local missing = nil
+		for _, name in pairs(types or { "iqm_task_bounty" }) do
+			local probe = xml_obj:query(name)
+			if not (probe and probe[1]) then missing = name break end
+		end
+		if missing then
+			iqm_task_spots_declared = false
+			printf("%s: task-kind spot type %s MISSING from %s - kind markers stay off",
+			       addon_name, missing, xml_file_name)
+		elseif iqm_task_spots_declared ~= false then
+			iqm_task_spots_declared = true
+		end
+
+		-- THE VANILLA-ICONS ESCAPE HATCH (R2.48). Everything above is IQM ADDING its own
+		-- spot types, which no vanilla marker depends on and which the flags gate; below
+		-- is IQM REPLACING the game's art, and that is what the option turns off.
+		--
+		-- It is read HERE, at parse time, and takes effect at the next GAME START -- not
+		-- at the next save load. g_uiSpotXml is a process-lifetime static: the engine
+		-- parses map_spots.xml once, on the first map location created, and only frees it
+		-- at DLL detach (map_location.cpp:92-99, xrgame_dll_detach.cpp:132). There is no
+		-- reparse to hook, so a live toggle is not available at any price and the option's
+		-- label says so. ui_mcm is up by now -- this fires in game, long after
+		-- on_mcm_load -- but the nil guards keep an MCM-less install on the mod's art,
+		-- which is the behaviour every version before this one had.
+		if not icons_on() then
+			printf("%s: map spot icons left VANILLA in %s (MCM map_icons off)", addon_name, xml_file_name)
+			return
+		end
+
+		for _, s in ipairs(SPOTS) do
+			-- the <texture> child carries the id and the tint (or texture_above /
+			-- texture_below, for the minimap's off-level swaps)...
+			local res = xml_obj:query(s.sel .. " > " .. (s.child or "texture"))
+			local el = res and res[1]
+			if el then
+				xml_obj:setText(el, s.tex)
+				-- Guarded because an entry may deliberately carry NO tint, to leave
+				-- the element's own colour alone - the squad markers do that fifty
+				-- times over, and PAW's waypoint once. A table built from three nil
+				-- fields is just {}, and dxml_core:setElementAttr treats an empty
+				-- args table as a caller mistake: it prints a parser error and
+				-- returns (dxml_core.script:526-530). Harmless, since setText has
+				-- already done the work, but unguarded it is 50 error lines per spot
+				-- file and three files get patched.
+				if s.r then
+					xml_obj:setElementAttr(el, { r = s.r, g = s.g, b = s.b })
+				end
+			end
+
+			-- ...while geometry (x/y/width/height) lives on the element itself
+			if s.el then
+				local spot = xml_obj:query(s.sel)
+				if spot and spot[1] then
+					xml_obj:setElementAttr(spot[1], s.el)
+				end
+			end
+		end
+
+		printf("%s: DXML patched map spot icons in %s", addon_name, xml_file_name)
+	end)
+end

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-user">
+<!-- Bust, the mark for a BOUNTY task, drawn inside the task reticle rather than in a
+     badge ring. Tabler Icons user-filled (MIT).
+
+     BYTE-IDENTICAL TO svg/vip.svg TODAY, and copied rather than referenced so the two
+     can diverge without either changing by surprise. The same glyph marks two very
+     different things, and that is deliberate:
+
+       vip     bust in a BADGE RING, purple (190,140,240) or companion green
+       bounty  bust in the TASK RETICLE, red (214,44,60)
+
+     The frame separates them before the colour does. A ring badge means "a person who
+     is here"; the reticle means "a task, go and find it", which is the same grammar
+     the mutant skull uses. Filled rather than outline, for the reason recorded in
+     skull.svg: at the 26 px a minimap spot gets, an outline glyph is nearly all
+     keyline and a mark's apparent colour is the mean over its own area.
+
+     If the two ever do read as one thing on the map, change THIS file, not vip.svg.
+     Everything the bounty needs in order to stay distinct is here. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M12 2a5 5 0 1 1 -5 5l.005 -.217a5 5 0 0 1 4.995 -4.783z" /><path d="M14 14a5 5 0 0 1 5 5v1a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-1a5 5 0 0 1 5 -5h4z" /></svg>

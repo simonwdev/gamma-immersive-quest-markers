@@ -1,3 +1,26 @@
 # MO2 writes its per-install metadata into the mod folder; with the repo
 # junction-linked as the live mod, that lands in the repo root.
 meta.ini
+
+# Contact sheet from `tools/map-icons/build.py --preview`: a scratch artifact for
+# eyeballing candidate glyphs at the sizes they are really drawn at. The atlas PNG
+# beside it IS committed, as with tools/role-icons.
+tools/map-icons/_preview.png
+
+# Renders from tools/route-preview/preview.py. Every one is a scratch artifact for
+# judging a look -- regenerated in seconds from the scripts and the texture builder, and
+# a committed one would go stale the moment a constant moved.
+tools/route-preview/*.png
+
+# route-preview imports tools/stroke-tex/build.py for its alpha functions, which leaves
+# a bytecode cache beside a file that is otherwise only ever run directly.
+tools/**/__pycache__/
+
+# Contact sheet from `tools/role-icons/build.py --preview`, the twin of the map-icons
+# one above: a scratch artifact, regenerated from the SVGs beside it.
+tools/role-icons/_preview.png
+
+# Output of `tools/map-icons/extract.py`: every engine map-spot cell at native size, a
+# labelled sheet per category and an index.html to review them in. Extracted from the
+# game's own textures in seconds, so nothing here needs to be committed.
+docs/icons/

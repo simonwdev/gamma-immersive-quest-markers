@@ -25,6 +25,122 @@
 		<texture id="iqm_shadow" x="0" y="0" width="64" height="64" />
 	</file>
 
+	<!-- The route stroke's CROSS-SECTION, not a picture: horizontally uniform, with a
+	     vertical alpha ramp (opaque core, feathered to nothing at the top and bottom).
+	     A segment quad's rect HEIGHT is the stroke's thickness, so the ramp lands on
+	     the two long edges and feathers them; the dark backing copy samples the same
+	     texture at a larger rect, which turns the old hard keyline into a soft halo.
+	     White RGB, tinted in script. Built by tools/stroke-tex/build.py. -->
+	<file name="ui\iqm_stroke">
+		<texture id="iqm_stroke" x="0" y="0" width="64" height="64" />
+	</file>
+
+	<!-- One ARM of a ground chevron. The same cross-section as iqm_stroke, plus a taper
+	     along its LENGTH which the stroke must not have: a stroke segment butts against
+	     the next one and a taper would open a gap at every joint, while an arm ends in
+	     mid-air at its outer tip and merely crosses its partner at the chevron's point.
+	     Both of those were square cuts, which is most of why a chevron read as two
+	     crossing slabs. u = 0 is the point (see place_arms). Same build script. -->
+	<file name="ui\iqm_arm">
+		<texture id="iqm_arm" x="0" y="0" width="64" height="64" />
+	</file>
+
+	<!-- THE GROUND-MARK SHAPES (R2.32), one 256px cell each, three cells per shape since
+	     the variants arrived in R2.42. The player picks one in MCM (route_shape) and
+	     iqm_core re-InitTextures the 16-widget mark pool, so only one is ever drawn at
+	     a time. An atlas rather than a file each because they are one family and a switch
+	     should not touch the disk.
+
+	     EIGHT SHAPES ARE DECLARED AND THREE ARE SELECTABLE. R2.43 cut chev50, chev30,
+	     rung, square and dart off the menu; their cells stay here because the atlas is
+	     addressed by cell index (see MARK_SHAPES in tools/stroke-tex/build.py), so
+	     removing them would slide every surviving rect onto different pixels and make the
+	     committed iqm_marks.dds wrong. The chev50 cell is load-bearing besides: the strip
+	     bands below are carved out of it. Unreferenced ids cost nothing.
+
+	     Each is a WHOLE mark as one picture, pointing +x, drawn in the mark's own metric
+	     rather than in pixels: the renderer stretches it onto a rect measured from the
+	     mark's projected extents, so the rect supplies the foreshortening and the texture
+	     supplies the shape (see place_mark). The chevrons in particular have to be one
+	     picture, because two quads cannot meet at a point: overlapped, the doubled alpha
+	     reads as a light spot; butted, the wedge between their end cuts reads as a notch.
+	     Inside one texture the arms are unioned before anything is blended.
+
+	     They differ in the DEPTH their footprint spans along travel, which is the only
+	     thing the keystone error scales with: rung 0.33 m, square 0.32, arrow 0.52,
+	     chev30 0.63, chev50 0.83. The box each is drawn into comes from shape_box() in
+	     tools/stroke-tex/build.py, which must agree with shape_box() in iqm_core.script
+	     or the picture sits off its own rect; build.py checks that before it will run.
+
+	     256px because the nearest mark is the largest thing the route draws. -->
+	<file name="ui\iqm_marks">
+		<texture id="iqm_mark_chev50"         x="0" y="0" width="256" height="256" />
+		<texture id="iqm_mark_chev50_b"       x="256" y="0" width="256" height="256" />
+		<texture id="iqm_mark_chev50_c"       x="512" y="0" width="256" height="256" />
+		<texture id="iqm_mark_chev30"         x="768" y="0" width="256" height="256" />
+		<texture id="iqm_mark_chev30_b"       x="1024" y="0" width="256" height="256" />
+		<texture id="iqm_mark_chev30_c"       x="1280" y="0" width="256" height="256" />
+		<texture id="iqm_mark_arrow"          x="1536" y="0" width="256" height="256" />
+		<texture id="iqm_mark_arrow_b"        x="1792" y="0" width="256" height="256" />
+		<texture id="iqm_mark_arrow_c"        x="0" y="256" width="256" height="256" />
+		<texture id="iqm_mark_rung"           x="256" y="256" width="256" height="256" />
+		<texture id="iqm_mark_rung_b"         x="512" y="256" width="256" height="256" />
+		<texture id="iqm_mark_rung_c"         x="768" y="256" width="256" height="256" />
+		<texture id="iqm_mark_square"         x="1024" y="256" width="256" height="256" />
+		<texture id="iqm_mark_square_b"       x="1280" y="256" width="256" height="256" />
+		<texture id="iqm_mark_square_c"       x="1536" y="256" width="256" height="256" />
+		<texture id="iqm_mark_dart"           x="1792" y="256" width="256" height="256" />
+		<texture id="iqm_mark_dart_b"         x="0" y="512" width="256" height="256" />
+		<texture id="iqm_mark_dart_c"         x="256" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevtight"      x="512" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevtight_b"    x="768" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevtight_c"    x="1024" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevsharp"      x="1280" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevsharp_b"    x="1536" y="512" width="256" height="256" />
+		<texture id="iqm_mark_chevsharp_c"    x="1792" y="512" width="256" height="256" />
+
+		<!-- STRIP BANDS (iqm_strip.script), carved out of the chev50 cell above rather
+		     than drawn as new art — they are the same picture, cut up.
+
+		     A mark is drawn as ONE heading-rotated rect, which is rotate + independent
+		     w/h scaling: three degrees of freedom. The true ground-to-screen map of a
+		     patch of floor is R' . S . R, which needs four (the missing one is shear),
+		     and with perspective it is really eight. That gap is exactly why marks at an
+		     angle to the view look wrong, and no tuning closes it — the freedom is not
+		     there (iqm_core.script:3189 says so itself).
+
+		     Slicing the mark ALONG TRAVEL into bands and giving each band its own rect
+		     buys it back: each band is a separate rotate+scale, so length, thickness and
+		     angle all vary down the mark. The shear appears as the bands' headings
+		     fanning; the keystone appears as their thicknesses tapering.
+
+		     HORIZONTAL bands — rows, not columns, and the difference is the whole
+		     mechanism rather than a layout preference.
+
+		     Slicing the other way does nothing at all. Bands cut ACROSS travel have
+		     their axes on the mark's centre line, projection maps a straight line to a
+		     straight line, so every band comes out with the SAME heading and eight
+		     widgets draw what one did. Measured at 0.001 degrees of fan before the
+		     harness caught it.
+
+		     Cut ALONG travel and stacked across it, each strip is a different world
+		     line parallel to the others — and parallel world lines converge to a
+		     vanishing point on screen. So each strip gets its own heading, and that fan
+		     IS the shear. Texture X stays the along-travel axis, matching the rect's
+		     width, so `stretch` maps each row onto its strip unchanged.
+
+		     Eight: enough that the residual affine error inside one strip is invisible,
+		     few enough that a mark costs 8 widgets rather than 32. -->
+		<texture id="iqm_strip_0" x="0" y="0"   width="256" height="32" />
+		<texture id="iqm_strip_1" x="0" y="32"  width="256" height="32" />
+		<texture id="iqm_strip_2" x="0" y="64"  width="256" height="32" />
+		<texture id="iqm_strip_3" x="0" y="96"  width="256" height="32" />
+		<texture id="iqm_strip_4" x="0" y="128" width="256" height="32" />
+		<texture id="iqm_strip_5" x="0" y="160" width="256" height="32" />
+		<texture id="iqm_strip_6" x="0" y="192" width="256" height="32" />
+		<texture id="iqm_strip_7" x="0" y="224" width="256" height="32" />
+	</file>
+
 	<!-- Role glyphs for the ambient service/important cards, as a 4x2 grid of 128px
 	     cells (Tabler outline icons, white stroke on transparent so SetTextureColor
 	     tints them the accent colour). Bundled, so the role cards need no other mod. -->
@@ -36,6 +152,118 @@
 		<texture id="iqm_role_guide"     x="0"   y="128" width="128" height="128" />
 		<texture id="iqm_role_important" x="128" y="128" width="128" height="128" />
 		<texture id="iqm_role_work"      x="256" y="128" width="128" height="128" />
+		<!-- Not a role glyph: the hand-in beacon's arrowhead, in the atlas's one
+		     spare cell. Drawn pointing +X so SetHeading(0) means "right", the same
+		     convention the leader line uses. -->
+		<texture id="iqm_chevron"        x="384" y="128" width="128" height="128" />
+		<!-- Row 2: the STATE roles, whose cards are verb phrases and carry no glyph
+		     of their own. Only the beacon draws these; with several roles beaconed
+		     at once, the glyph is the only thing telling them apart. -->
+		<!-- The turn-in mark, and the one cell here shared with the map atlas: it is the
+		     price tag iqm_mapspot_handin draws (tools/*/svg/handin.svg, one art for both
+		     builds), so the mark you look for through a wall is the mark the map puts on
+		     the pin. It was a DIAMOND until R2.56 while the map's had been a tag since
+		     R2.55 -- the shared-source rule's one failure, and it survived a release
+		     because nothing drew this cell in between: the `target` role's marker went out
+		     in R2.46 and the `handin` task kind that draws it arrived in R2.55. Both the
+		     ROLE `target` and the KIND `handin` resolve here (iqm_beacon's BEACON_ICON),
+		     deliberately: both mean REPORT BACK and the map draws one mark for them. -->
+		<texture id="iqm_role_handin"    x="0"   y="256" width="128" height="128" />
+		<texture id="iqm_role_needguide" x="128" y="256" width="128" height="128" />
+		<texture id="iqm_role_recruit"   x="256" y="256" width="128" height="128" />
+		<texture id="iqm_role_hire"      x="384" y="256" width="128" height="128" />
+		<!-- Row 3: the route direction mark. A separate glyph from iqm_chevron, not a
+		     reuse of it: this one is drawn a dozen times at a time across the ground
+		     at anything from 4 to 30 px, so it carries a much heavier stroke and
+		     skips the atlas's distress pass, which at that scale would read as
+		     speckle rather than as wear. -->
+		<texture id="iqm_route_arrow"    x="0"   y="384" width="128" height="128" />
+		<!-- The player-placed waypoint's marker glyph. It is the four-arc pulse RING that
+		     modxml_n_iqm_map_icons puts on PAW's paw_task_default_spot, drawn from the
+		     same three constants (tools/role-icons/svg/waypoint.svg), so the mark you
+		     look for through a wall is the mark you placed on the map. The only cell
+		     here whose map counterpart is not a pictogram. -->
+		<texture id="iqm_role_waypoint"  x="128" y="384" width="128" height="128" />
+		<!-- The SELECTED task's marker glyph, and the second cell here whose map
+		     counterpart is a reticle rather than a pictogram. Its outer arcs are
+		     iqm_mapspot_task's exact geometry - the cell that replaces
+		     ui_inGame2_PDA_icon_Secondary_mission - so the mark you look for through a
+		     wall is the mark the map draws a bracket around.
+		     It reads as a PAIR with iqm_role_waypoint above and is told apart the same
+		     way in both views: BOTH gap the cardinals, this one narrowly (11 degrees
+		     either side, so long arcs) and the waypoint's widely (20, so short ones),
+		     and this one carries a crosshair where the waypoint carries nothing.
+		     ("The waypoint's sit on the DIAGONALS" stood here until R2.63a and was never
+		     true of either cell - that is the map's SELECT frame, a different ring.)
+		     Its inner ring is deliberately dropped and its crosshair grown - a marker
+		     draws at ~20 px against a map spot's ~27, and at 20 px all three concentric
+		     elements merge. The reasoning is in tools/role-icons/svg/task.svg. -->
+		<texture id="iqm_role_task"      x="256" y="384" width="128" height="128" />
+		<!-- The MUTANT HUNT marker, and the last free cell of this 4x4 grid. Rendered
+		     from the same svg/skull.svg as iqm_mapspot_skull, so a mutant task's marker
+		     in the world is the mark its PDA spot carries - the R2.29 rule again.
+		     BOUNTY tasks have no cell here on purpose: a bounty wears the ordinary
+		     iqm_role_task reticle and is told apart by its RED tint, which is a runtime
+		     entry in iqm_beacon's BEACON_RGB rather than art. Adding another glyph here
+		     now means adding a ROW (see the grid-growth note below). -->
+		<texture id="iqm_role_skull"     x="384" y="384" width="128" height="128" />
+		<!-- ...and R2.55 is the change that note anticipated: the DELIVERY role's
+		     envelope opens ROW 4. Same art as iqm_mapspot_taskdelivery
+		     (tools/role-icons/svg/mail.svg is the map atlas's mail.svg), so a delivery's
+		     marker in the world is the mark its PDA spot carries - the R2.29 rule.
+		     WHY IT IS NOT JUST iqm_role_handin: the deliver-to NPC was carded as
+		     `target` until R2.55, which reads REPORT BACK and draws the hand-in diamond,
+		     so the card said "done, go collect" while the package was still in your
+		     pack. Delivery is its own role now, and this is its glyph. -->
+		<texture id="iqm_role_mail"      x="0"   y="512" width="128" height="128" />
+		<!-- The COMPANION marker's glyph (R2.57), second cell of that same row. Rendered
+		     from the same svg/vip.svg as iqm_mapspot_vip, and named for the ART rather
+		     than for the consumer because that is what the map calls it: the PDA draws a
+		     companion as the VIP BUST IN THE COMPANION GREEN, deliberately
+		     (modxml_n_iqm_map_icons points ui_pda2_companion_location_spot and Warfare's
+		     companion_tex at iqm_mapspot_vip, so a companion does not look like two
+		     different things depending on which path drew it). Mirroring the map -- the
+		     R2.29 rule -- therefore means wearing that bust rather than inventing a
+		     companion pictogram this mod would be the only view to draw. What separates a
+		     companion from a VIP on the map is the green, and BEACON_RGB.party carries the
+		     same 40,172,66 across.
+		     NOT iqm_role_important, which is also a person: that is a tabler STAR, it is
+		     card-only, and it is distressed. Two person-ish cells is the honest outcome of
+		     the card's art and the map's art having different sources. -->
+		<texture id="iqm_role_vip"       x="128" y="512" width="128" height="128" />
+		<!-- The SELECTED task's RING (R2.63), third cell of that row. Not a glyph: it is
+		     drawn UNDER another mark and frames it (iqm_cards draws the ring first), and it
+		     is the only cell on this sheet whose job is to say WHOSE a mark is rather than
+		     what it is. BEACON_RING in iqm_beacon is the only table that names it.
+		     It is iqm_role_task's outer arcs with the crosshair dropped -- the same
+		     ../map-icons TASK_* geometry, so the R2.29 rule holds for a frame as it does for
+		     a glyph: the bracket the PDA draws round the task you picked is the bracket you
+		     look for through a wall. The crosshair goes because the middle is occupied now
+		     (the tag, the envelope, the skull) and a crosshair behind those is a second mark
+		     showing through the first at 20 px.
+		     It reads as a PAIR with iqm_role_waypoint and is told apart the same way in both
+		     views: both gap the cardinals, this one narrowly (long arcs) and the waypoint's
+		     widely (short ones). That gap width is not cosmetic - see RING_GEOM in
+		     iqm_cards, where it is the whole reason this ring needs its own proportions.
+		     WHY THE MARKER NEEDED IT: the selected task used to be told from an unselected
+		     one by COLOUR, wearing its kind's green beside a neighbour wearing the accent --
+		     which broke the rule the tint exists for, since the map does not tint the task
+		     you picked either. It draws a bracket round it. This is that bracket. -->
+		<texture id="iqm_role_ringtask"  x="256" y="512" width="128" height="128" />
+	</file>
+
+	<!-- The minimap trail's dot: a white disc with its dark keyline BAKED IN, which is
+	     what makes it a texture of its own rather than another use of iqm_circle.
+	     Everything else small this mod draws gets its outline from a black copy of the
+	     widget two pixels larger, and at an 8 px mark that copy is 25% oversized AND
+	     rounds to screen pixels independently of the mark it is meant to sit behind - a
+	     heavy ring, visibly off centre. Baked, the keyline is concentric by construction
+	     and stays the same FRACTION of the dot at every size the menu offers.
+	     RGB is therefore not uniformly white here, unlike iqm_stroke and friends: the
+	     keyline is black in the art and survives SetTextureColor because the tint
+	     multiplies. Built by tools/dot-tex/build.py. -->
+	<file name="ui\iqm_dot">
+		<texture id="iqm_dot" x="0" y="0" width="64" height="64" />
 	</file>
 
 	<!-- Both card plates are a single rounded-rect quad (white with a faint top-down
@@ -48,5 +276,270 @@
 	</file>
 	<file name="ui\iqm_plate">
 		<texture id="iqm_plate" x="0" y="0" width="192" height="48" />
+	</file>
+
+	<!-- (The MCM page banner used to be declared here as iqm_mcm_banner, a custom
+	     1024x64 plate built by tools/mcm-banner/build.py. Dropped in R2.44: the menu
+	     now uses the stock ui_options_slider_player, so the texture, its declaration
+	     and the build tool all went with it.) -->
+
+	<!-- Beacon badge. Squarer and more evenly rounded than iqm_chip, which suits a
+	     glyph stacked over a short range readout. Shipped with the mod from the
+	     start but never declared until the beacon needed a plate of its own. -->
+	<file name="ui\iqm_panel_round">
+		<texture id="iqm_panel_round" x="0" y="0" width="64" height="64" />
+	</file>
+
+	<!-- The waypoint marker's range readout, as SPRITES rather than text (R2.30). An
+	     engine font renders at a height picked from a resolution bucket, cannot be scaled
+	     per widget from Lua, and the smallest of the eleven the engine has is still too
+	     big beside a 14-unit glyph; drawn from here the readout is as small as asked for
+	     and scales with the marker.
+
+	     Bahnschrift (DIN 1451) semibold condensed, white on transparent so the accent
+	     tint applies, built by tools/digit-tex/build.py - rerun it and re-paste these
+	     rects if the metrics change.
+
+	     Unlike the map-spot cells, each rect here is the glyph's own INK box, not its
+	     128px cell: the script sizes the destination rect from these proportions, so a
+	     padded cell would draw as padding. Every DIGIT is declared at one common width -
+	     the tabular advance box, centred on its ink - so a counting-down range does not
+	     jitter as its digits change. "m" has no ascender, so it gets a shorter box and
+	     the script drops it to the shared baseline (RD_G.mdy).
+
+	     Each rect INCLUDES the glyph's baked black keyline (R2.31), which is why the
+	     figures are 104 of the 126-px rect height: the readout used to draw a second,
+	     offset black copy of every character, and a second widget cannot stay aligned
+	     with the first (see keylined() in tools/role-icons/build.py for the two engine
+	     reasons). The keyline is inside the same quad now, so it cannot drift. -->
+	<file name="ui\iqm_digits">
+		<texture id="iqm_digit_0" x="22"  y="1"   width="84" height="126" />
+		<texture id="iqm_digit_1" x="150" y="1"   width="84" height="126" />
+		<texture id="iqm_digit_2" x="278" y="1"   width="84" height="126" />
+		<texture id="iqm_digit_3" x="406" y="1"   width="84" height="126" />
+		<texture id="iqm_digit_4" x="22"  y="129" width="84" height="126" />
+		<texture id="iqm_digit_5" x="150" y="129" width="84" height="126" />
+		<texture id="iqm_digit_6" x="278" y="129" width="84" height="126" />
+		<texture id="iqm_digit_7" x="406" y="129" width="84" height="126" />
+		<texture id="iqm_digit_8" x="22"  y="257" width="84" height="126" />
+		<texture id="iqm_digit_9" x="150" y="257" width="84" height="126" />
+		<texture id="iqm_digit_m" x="271" y="272" width="97" height="95"  />
+	</file>
+
+	<!-- PDA map / HUD minimap SPOT icons, as a row of 128px cells. Unlike everything
+	     above, these are not drawn by this mod at all: modxml_n_iqm_map_icons.script
+	     re-points the engine's own map-spot definitions at these ids via DXML, and
+	     CMapSpot draws them. A spot's on-screen size comes from its width/height in
+	     map_spots*.xml (19 and 14 units for the medic, with stretch="1"), which are
+	     UI units and so scale with the player's RESOLUTION: 19 units is ~27px at
+	     1080p, ~36px at 1440p, ~53px at 4K, against the 15-23px cells vanilla and the
+	     other spot addons supply. (These spots declare no scale="1", so m_bScale is
+	     false and they do NOT grow with map zoom - an earlier version of this comment
+	     said they did.) A 128px cell is minified at every resolution instead of
+	     magnified at most of them - that IS the quality change - the DESIGN is the game's own: a ring around a flat glyph, rebuilt
+	     at 128px from measurements off the vanilla 19x19 cells in
+	     ui\ui_actor_hint_wnd. (Vanilla also puts four crosshair ticks on the ring;
+	     those are deliberately dropped, and the ring grown into the margin they
+	     used, so the badge keeps its apparent size.) The circular footprint matters
+	     because task spots wrap their icon in a ring-textured static_border, which
+	     a square glyph does not nest inside.
+	     White ink with a baked black keyline; the colour comes from r/g/b on the
+	     spot's <texture> element, set in the script, and the keyline survives it
+	     because the tint MULTIPLIES (black x anything is still black). Built by
+	     tools/map-icons/build.py.
+	     Grid is 4 wide and 5 tall, eighteen of twenty used; the next two cells go in
+	     row 4, and the one after that needs a sixth ROW (COLS stays 4 - widening it
+	     renumbers every id below). -->
+	<file name="ui\iqm_map_icons">
+		<!-- Always declare the whole 128px CELL, never a glyph's own bbox: with
+		     stretch="1" the engine fills the square spot rect with whatever rect you
+		     name here, so a tight bbox on a non-square glyph gets stretched. The
+		     badge frame is centred in the cell and every cell is square, so this is
+		     also what keeps all the badges the same size on screen. -->
+		<texture id="iqm_mapspot_medic"    x="0"   y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_trader"   x="128" y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_bed"      x="256" y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_vip"      x="384" y="0"   width="128" height="128" />
+		<!-- Row 1 opened here; rows 0's coordinates are untouched, which is the whole
+		     reason the grid grows downward and never sideways. -->
+		<texture id="iqm_mapspot_mechanic" x="0"   y="128" width="128" height="128" />
+		<!-- The active-task marker is TWO textures. iqm_mapspot_task is the icon a task
+		     spot always draws; iqm_mapspot_select is its static_border, which CMapSpot
+		     shows only while that task is the SELECTED one. Both are drawn as geometry
+		     by build.py rather than traced from an SVG - a broken ring with a crosshair,
+		     and a ring of four arcs. One pair serves storyline and secondary both, since
+		     the only difference between them is the tint. iqm_mapspot_select was corner
+		     brackets until it became a ring: every other mark here is round, and a square
+		     frame around a round badge was the only one that did not belong. Its arcs sit
+		     on the cardinals, the inverse of the reticle's and the pulse's, so three
+		     concentric rings stay legible as three separate things. -->
+		<texture id="iqm_mapspot_task"     x="128" y="128" width="128" height="128" />
+		<texture id="iqm_mapspot_select"   x="256" y="128" width="128" height="128" />
+		<!-- Turn-in, shared by the vanilla "on guider" spots (the task marker relocated
+		     onto the task GIVER once you owe someone a report - minimap only, they
+		     declare no <level_map>) and by gamma-active-task-ui-enhancements' green
+		     RETURN spot, and green on all of them, because the state it marks is
+		     COMPLETE. Not a reticle, because it is a different verb - the objective is
+		     done, go and be paid, not go and find. The glyph is Material Symbols'
+		     "nearby", a diamond inside a diamond outline: it reads as a destination
+		     rather than as a search, and being all straight edges it survives the
+		     handheld PDA's squash even before the ring helps it. (It was a shield
+		     first; svg/handin-shield.alt keeps that version.) -->
+		<texture id="iqm_mapspot_handin"   x="384" y="128" width="128" height="128" />
+		<!-- Row 2 opened here; rows 0-1 keep their coordinates, which is the whole
+		     reason the grid grows downward and never sideways. -->
+		<texture id="iqm_mapspot_barman"   x="0"   y="256" width="128" height="128" />
+		<!-- The 15-second new-task pulse (engine animates scale + alpha over this; the
+		     art was a 25px cell being scaled up twice over). -->
+		<texture id="iqm_mapspot_blink"    x="128" y="256" width="128" height="128" />
+		<!-- Minimap off-level swaps: CMiniMapSpot REPLACES the icon with these when the
+		     target is on another floor, so they carry the badge ring plus a big
+		     directional arrow rather than a pictogram. -->
+		<texture id="iqm_mapspot_above"    x="256" y="256" width="128" height="128" />
+		<texture id="iqm_mapspot_below"    x="384" y="256" width="128" height="128" />
+		<!-- Row 3 opened here; rows 0-2 keep their coordinates.
+		     The fast-travel point: a house, frameless, both as vanilla has it. The one
+		     cell with no badge ring, and the house is what makes that safe - the
+		     handheld 3D PDA squashes every map spot to 0.75 of its width while the
+		     fullscreen map does not, and a glyph of straight edges just reads as a
+		     narrower house where anything containing a circle reads as broken. A map
+		     pin was tried here and could not work bare for exactly that reason. Full
+		     derivation in tools/map-icons/build.py under NO_BADGE and PRESTRETCH.
+		     Vanilla's own art here is ui_hud_icon_sleep: a white house at alpha 128,
+		     i.e. a deliberate ghost - which is why it read cyan on the PDA rather than
+		     white, the screen showing through it. This one is opaque and takes its
+		     cyan from the tint instead. -->
+		<!-- NOT CURRENTLY APPLIED: fast_travel_spot was reverted to vanilla's
+		     ui_hud_icon_sleep. Kept declared and kept in the atlas because removing the
+		     cell would renumber question and alert below it and invalidate their
+		     coordinates - the same reason the grid only ever grows downward. -->
+		<texture id="iqm_mapspot_home"     x="0"   y="384" width="128" height="128" />
+		<!-- The generic RED marker (red_location), which script code and quest logic use
+		     for "something is here" without saying what. Vanilla draws a featureless red
+		     blob for it, so a question mark is not a reinterpretation - it is the first
+		     time the marker says anything at all. Ringed, because the mark has a dot in
+		     it and a bare dot is one of the shapes the handheld squash ruins. -->
+		<texture id="iqm_mapspot_question" x="128" y="384" width="128" height="128" />
+		<!-- The TIMED-task minimap marker (secondary_task_complex_spot_mini_timer, shared
+		     by the storyline and secondary timer variants and by the delayed defend
+		     task). Amber and an exclamation because the distinguishing fact about these
+		     tasks is that they expire, which no other task marker has to say. This spot
+		     was the one task marker the mod had missed: it is a separate element from
+		     secondary_task_spot_mini, so patching that one never reached it. -->
+		<texture id="iqm_mapspot_alert"    x="256" y="384" width="128" height="128" />
+		<!-- The level transition (the eight level_changer_* spots and their minimap
+		     one). An arch with an arrow through it, drawn as geometry by build.py
+		     because no icon set has this glyph: a gateway seen head-on is a mark
+		     nothing outside this game needs, and Tabler's door-exit / Material's
+		     exit_to_app are a door in perspective with the arrow beside it. So it is
+		     vanilla's own ui_pda2_exit_point rebuilt, measured off the 19x21 cell.
+		     THIS CELL IS THE ONE THAT NEEDS stretch="1" ON ITS SPOT, and the script
+		     sets it. Every other spot here gets stretch for free from CMapSpot::Load,
+		     which turns it on while correcting the width by kx - but only `if
+		     (!Heading())`, and these eight have heading_angle set so the engine can
+		     turn the arrow to the compass point. Without stretch, CUIStatic::
+		     DrawTexture sizes the quad from the TEXTURE RECT instead of the spot, so
+		     this cell would draw at 128 UI units - about seven times too big - and
+		     vanilla's 19x21 art matching its 19x21 spot exactly would look like a
+		     coincidence rather than the requirement it is. -->
+		<texture id="iqm_mapspot_transition" x="384" y="384" width="128" height="128" />
+		<!-- Row 4 opens here, the first growth past the original 4x4. Rows 0-3 keep
+		     every coordinate above, which is the whole reason the grid grows downward
+		     and never sideways. The atlas is now 512x640 - non-power-of-two, which is
+		     already proven in this mod by iqm_chip (128x96) and iqm_plate (192x48). -->
+
+		<!-- THE SQUAD MARKER, and the only mark here that needs TWO cells for one
+		     picture. All fourteen warfare_<faction>_spot types - the marks Milspec
+		     PDA's PDA-tier gating actually puts on NPC squads - resolve to just two
+		     textures, ui_pda2_squad_leader on the map and ui_minimap_squad_leader on
+		     the minimap, both 11x11 cells in vanilla ui\ui_common. The faction is
+		     carried entirely by r/g/b on the spot, so one white disk takes all
+		     fourteen colours and this is one job, not fourteen.
+		     These two are drawn at 13 and 9 units, against 19 and 14 for everything
+		     else here - small enough that a shared cell's keyline would come out 1.44x
+		     thinner on the minimap, i.e. a grey smudge rather than an outline at the
+		     ~12.7 px a 9-unit spot gets at 1080p. The two cells are identical except
+		     for border weight, chosen so the black ring lands at the same FINAL PIXEL
+		     width in both views; the marks fill their cells by the same fraction, so
+		     on-screen size still comes purely from the spot. See build.py, SQUAD_R. -->
+		<texture id="iqm_mapspot_squad"     x="0"   y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_squadmini" x="128" y="512" width="128" height="128" />
+		<!-- The bare skull (R2.48). SUPERSEDED as the mutant-hunt pin by
+		     iqm_mapspot_taskmutant below, and kept declared because it is still the right
+		     mark if that composite is ever backed out - point iqm_task_mutant_spot at
+		     this id again and nothing else has to change. Drawn BARE rather than ringed;
+		     see NO_BADGE in tools/map-icons/build.py, which also records why a glyph with
+		     circular eye sockets is allowed to be bare when the map pin was not. -->
+		<texture id="iqm_mapspot_skull"     x="256" y="512" width="128" height="128" />
+
+		<!-- The two TASK-KIND reticles (R2.49), used by the iqm_task_mutant and
+		     iqm_task_bounty location types in ui/iqm_map_spots.xml.
+		     Each is the ordinary task reticle used as a FRAME - inner ring and centre
+		     crosshair dropped - with a glyph in the space they leave, so a task's kind
+		     is read off the glyph while the reticle still says it is a task at all.
+		     Built by the same draw_task the plain reticle uses, so the frames cannot
+		     drift apart on screen. See RETICLE in tools/map-icons/build.py for the
+		     clearance measurements and for what the trade costs each glyph. -->
+		<texture id="iqm_mapspot_taskmutant" x="384" y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_taskbounty" x="0"   y="640" width="128" height="128" />
+
+		<!-- The OPEN FRAME (R2.49e), used by the iqm_task_open location type. The same
+		     reticle with nothing inside it, for a task whose marker lands on top of a mark
+		     the map was already drawing, so a solid crosshair would cover it outright. This
+		     rings that mark instead of replacing it.
+		     It arrived for Personal Adjustable Waypoint, which lets the player pick their own
+		     pin and puts the task spot and that pin on the SAME object
+		     (tasks_placeable_waypoints.script:1547-48). R2.52 generalised it to any task
+		     landing on an existing mark - the DRX quest-item family points straight at a
+		     found stash and buried the stash icon the same way - and renamed the location
+		     type to match. The CELL never changed; only what asks for it did. -->
+		<texture id="iqm_mapspot_taskopen"   x="128" y="640" width="128" height="128" />
+
+		<!-- The OFF-SCREEN POINTER (R2.53). Not a spot: the engine parks this at the map's
+		     edge, rotated to face a marker that is off screen (CMapLocation::Update calls
+		     UpdateSpotPointer, map_location.cpp:427). GAMMA's winning map_spots.xml is Sota
+		     UI EGUI Style HUD's, which replaces vanilla's 11x24 ui_hud_map_arrow with
+		     ui\enhancedGUI\QuestArrow - 68x43 px of inked art inside a 512x512 texture,
+		     98.9% of it empty, drawn into a 172-unit rect. Hence the soft yellow blob.
+		     ONE CELL, FIVE ELEMENTS: iqm_map_spots.xml declares a pointer per colour, each
+		     mirroring the pin it belongs to, exactly as the 14 warfare spots share one
+		     disk. The art is white with a black keyline like everything else here, so the
+		     tint on the element is all that differs. -->
+		<texture id="iqm_mapspot_pointer"    x="256" y="640" width="128" height="128" />
+
+		<!-- DELIVERY (R2.54): the envelope in the task reticle. Its stage 1 target is the
+		     person you are taking the package to, and its stage_complete is 2, so the pin
+		     sits on a named NPC while the job is outstanding - the same shape as a bounty
+		     and indistinguishable from it without a glyph.
+		     Cell 24 of 24 filled the original 4x6 grid; row 7 below is what growing it
+		     costs, and it costs only two new lines here precisely because cells are
+		     APPENDED. A wider grid would have renumbered every origin in this block. -->
+		<texture id="iqm_mapspot_taskdelivery" x="384" y="640" width="128" height="128" />
+
+		<!-- THE BARE OFF-LEVEL ARROWS (R2.59). Same art as iqm_mapspot_above/_below and
+		     the same job - CMiniMapSpot swaps one of these in for the whole marker when
+		     the target is on another floor - but with no badge ring.
+		     They exist because the ring is a claim. This mod's task marks read their
+		     FRAME as a verb: a ring means someone is here, a reticle means go and find
+		     this, a bare glyph means go and give this to a named person. The hand-in tag
+		     and the delivery envelope are bare, so a ringed off-level swap would have them
+		     change category for as long as the player is on a different floor. -->
+		<texture id="iqm_mapspot_abovebare" x="0"   y="768" width="128" height="128" />
+		<texture id="iqm_mapspot_belowbare" x="128" y="768" width="128" height="128" />
+	</file>
+
+	<!-- The TAPERED DART: the alternative direction cue to the chevron (iqm_dart.script).
+	     A chevron says "that way" with an APEX ANGLE, and projection does not preserve
+	     angles — the projected apex swings x16 over the normal viewing range and reads
+	     as a plain bar at both ends of it. A dart says it with a TAPER, back edge over
+	     front edge, and those are two PARALLEL segments, whose length ratio an affine
+	     map does preserve. Same sweep, the taper swings x1.49.
+
+	     White RGB with the shape in alpha, like iqm_stroke and iqm_arm and unlike
+	     iqm_marks — this is meant to be A/B'd against the arms, so it carries no baked
+	     wear, rim or contact shadow that would make the comparison about surface rather
+	     than about shape. Built by tools/dart-tex/build.py. -->
+	<file name="ui\iqm_dart">
+		<texture id="iqm_dart" x="0" y="0" width="128" height="128" />
 	</file>
 </w>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+<!-- Price tag, the mark for a HAND-IN: the objective is done and the marker has moved onto
+     whoever gave you the job, so the remaining act is to walk over and collect. Tabler Icons
+     tag-filled (MIT). Drawn BARE, no badge ring and no reticle - see NO_BADGE in build.py.
+
+     WHY THE MARKS HERE ARE FRAMED THE WAY THEY ARE, since this glyph is half of the pair
+     that made the rule explicit. The FRAME carries the verb, not the noun:
+
+       ring badge     someone is HERE            (medic, trader, companion...)
+       task reticle   go and FIND this           (mutant, bounty, open)
+       bare glyph     go and GIVE this to a named person   (delivery, hand-in)
+
+     Neither a delivery nor a hand-in involves searching for anything - the destination is a
+     person you already know - so neither wears a search reticle. The static_border is NOT
+     part of this and both keep it: that element is the engine's active-task indicator, and
+     dropping it would remove the only on-map answer to "which task am I following".
+
+     IT REPLACED A DIAMOND (kept at handin-diamond.alt), and the measurement that settled it
+     is the useful part, because the obvious reading was wrong. The diamond was reported as
+     hard to read on the map, which sounds like a size problem and is not: it inked 28.9% of
+     its cell against the envelope's 29.1%, essentially identical mass. It failed on
+     STRUCTURE. That ink was spread over two thin concentric outlines, so at the 26 px a spot
+     draws each ring was about one pixel and the two blurred together. A candidate with LESS
+     ink but solid regions reads better - the tick tested at 19.4% and was the most legible
+     thing on the sheet. So for a bare glyph at this size the criterion is STROKE WIDTH, not
+     ink: solid regions beat concentric outlines, whatever the totals say.
+
+     A tick and a flag were the other two finalists. The tick lost on meaning rather than
+     legibility - it reads as "finished, nothing to do here", when the mark's actual message
+     is "go here and collect". A tag says there is a reward at this pin, which is exactly
+     what a hand-in is and more than the diamond ever said. A coin and a money sack were
+     rejected outright: the coin loses its device by 26 px and becomes a plain disc, which
+     collides with the squad-leader dots, and the sack reads as an ambiguous blob.
+
+     FIT_SCALE 0.79 is not cosmetic. Filled solid, this glyph inks 46.9% of its cell - 1.6x
+     the envelope it sits beside, in the same green, with only the glyph separating them.
+     sqrt(29.1/46.9) = 0.788 equalises the ink, which is what the eye sizes a mark by. The
+     same correction is on taskdelivery for the same reason; the fast-travel house is the
+     cautionary tale of sizing a bare glyph by its box instead. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M11.172 2a3 3 0 0 1 2.121 .879l7.71 7.71a3.41 3.41 0 0 1 0 4.822l-5.592 5.592a3.41 3.41 0 0 1 -4.822 0l-7.71 -7.71a3 3 0 0 1 -.879 -2.121v-5.172a4 4 0 0 1 4 -4zm-3.672 3.5a2 2 0 0 0 -1.995 1.85l-.005 .15a2 2 0 1 0 2 -2" />
+</svg>

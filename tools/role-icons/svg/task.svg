@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"
+     fill="none" stroke="#000000" stroke-linecap="butt">
+  <!-- The SELECTED task's reticle, the world-marker twin of iqm_mapspot_task.
+       Outer arcs are that cell's exact geometry: TASK_OUT_R 0.455, TASK_OUT_W
+       2/23, TASK_GAP_DEG 11, gaps on the CARDINALS. See ../map-icons/build.py.
+
+       THE INNER RING IS DROPPED and the crosshair grown (0.196 -> 0.255 long,
+       1.2/23 -> 1.6/23 wide), which is the one place this parts company with the
+       map cell. Not a style choice - a marker draws at beacon_size, 14 UI units
+       by default, i.e. ~20 px at 1080p, against the 19 units a map spot gets.
+       At 20 px all three concentric elements plus their keylines merge into a
+       blob: the gap between the outer arcs and the inner ring is 4.9 units of
+       100, and the baked keyline alone grows 7.1 units into it from each side.
+       The map cell blurs the same way at that size - its inner ring and
+       crosshair already read as one filled centre - so dropping the ring and
+       growing the cross reproduces what the map RENDERS at marker size rather
+       than what it contains, which is the recognition that matters. Judge any
+       change to this at 20 px, never at 128. -->
+  <g stroke-width="8.6957">
+    <path d="M 94.664 58.682 A 45.5 45.5 0 0 1 58.682 94.664"/>
+    <path d="M 41.318 94.664 A 45.5 45.5 0 0 1 5.336 58.682"/>
+    <path d="M 5.336 41.318 A 45.5 45.5 0 0 1 41.318 5.336"/>
+    <path d="M 58.682 5.336 A 45.5 45.5 0 0 1 94.664 41.318"/>
+  </g>
+  <g stroke-width="6.9565">
+    <path d="M 54.300 50.000 L 75.500 50.000"/>
+    <path d="M 45.700 50.000 L 24.500 50.000"/>
+    <path d="M 50.000 54.300 L 50.000 75.500"/>
+    <path d="M 50.000 45.700 L 50.000 24.500"/>
+  </g>
+</svg>

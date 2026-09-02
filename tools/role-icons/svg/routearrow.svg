@@ -1,0 +1,14 @@
+<!-- Route direction mark. Deliberately NOT the beacon's `chevron`: that one is a
+     tabler icon at stroke-width 3, drawn once at badge size, where a fine line
+     reads as precision. This one is repeated a dozen times across the ground at
+     anything from 4 to 30 px, so it needs to survive being small - hence the much
+     heavier stroke and the shallower, wider spread, which keeps the two arms
+     distinguishable instead of merging into a blob as it shrinks.
+
+     Points RIGHT, like `chevron`, so a SetHeading of 0 means +X - the convention
+     the leader line and the beacon chevron both use. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="currentColor" stroke-width="5.5"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8 5l9 7l-9 7" />
+</svg>

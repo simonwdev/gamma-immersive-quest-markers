@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-mail">
+<!-- Envelope, the DELIVERY role's marker and card glyph. The SAME art as
+     ../map-icons/svg/mail.svg, for the R2.29 rule that governs every shared cell here: the
+     mark you look for through a wall must be the mark the PDA map puts on that task. Only
+     the rendering differs - the map atlas wraps this in the task reticle with a baked
+     keyline because a map spot stands alone, while this stays a bare keylined glyph because
+     the marker badge already supplies the ground.
+
+     WHY THE ROLE EXISTS AT ALL (R2.55). The deliver-to NPC used to be carded as `target`,
+     which reads REPORT BACK and draws the hand-in diamond - so a delivery said "completed,
+     go collect" while you were still carrying the package, and the map (since R2.54) said
+     envelope. Two views, two different sentences, and the card's was the wrong one.
+
+     IT TAKES THE FIRST CELL OF A NEW ROW. The 4x4 grid was exactly full at `skull`, whose
+     note in iqm_textures.xml called this out: "adding another glyph here now means adding a
+     ROW". Appended rather than inserted, so rows 0-3 keep their pixel origins and every
+     existing iqm_role_* id stays valid untouched. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M22 7.535v9.465a3 3 0 0 1 -2.824 2.995l-.176 .005h-14a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-9.465l9.445 6.297l.116 .066a1 1 0 0 0 .878 0l.116 -.066l9.445 -6.297z" /><path d="M19 4c1.08 0 2.027 .57 2.555 1.427l-9.555 6.37l-9.555 -6.37a2.999 2.999 0 0 1 2.354 -1.42l.201 -.007h14z" /></svg>

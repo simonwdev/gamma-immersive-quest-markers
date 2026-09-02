@@ -1,0 +1,1025 @@
+-- ======================================================================
+--  Immersive Quest Markers: the through-the-wall marker
+-- ======================================================================
+-- The MARKER (this mod calls it the beacon in code and the marker in the menu): the
+-- badge that says "your objective is that way" when the card cannot, because the NPC
+-- is behind a wall, too far off, or off the screen entirely. A card and a marker on
+-- one body are mutually exclusive -- see the crossover note in iqm_core' render --
+-- so what lives here is everything about the marker that the card does not share:
+-- which roles get one, what glyph and colour it wears, where on screen it lands, and
+-- the player's own placed waypoint, which is the one marker with no NPC behind it.
+--
+-- Split out of iqm_core at R2.45, along with iqm_scan and iqm_cards, because that
+-- file had reached 187 of the 198 locals a .script gets and going over is a SYNTAX
+-- ERROR AT LOAD that takes every feature down together.
+--
+-- ----------------------------------------------------------------------
+-- THE SEAM (the long version is in iqm_core, under "THE SHARED-STATE SEAM")
+--
+-- CONFIG IS PULLED. iqm_core.read_config ends by calling apply_config() below,
+-- and this file reaches over for what it needs -- including `bok`, the modded-exe
+-- projection binding, since without it a marker cannot be placed at all.
+--
+-- THE ROLE GATE IS OURS. `beacon_roles` is rebuilt here and read by two other
+-- modules: iqm_core' render (does this tracked NPC get a marker?) and iqm_scan's
+-- extras trim (is a role past card range still worth classifying?). Both bind THE
+-- TABLE, never a copy, and neither writes to it. One writer, two readers.
+--
+-- WHAT IS NOT OURS: the drawing. A marker is laid out here and drawn by
+-- IqmCards:draw_beacon, in that window's own projected space -- so the projection,
+-- the aspect correction and the pool size all come from iqm_cards, bound in
+-- on_game_start. The dialog itself is passed IN by the caller rather than fetched,
+-- so there is no second handle to an object that outlives a level.
+--
+-- NOTHING IS REFERENCED AT FILE SCOPE, for the reason given in iqm_scan: this module
+-- and iqm_core read each other, and a file-scope read on both sides of that pair
+-- would let the load order decide which one sees a half-built namespace.
+-- ----------------------------------------------------------------------
+
+local floor, max, min, sqrt = math.floor, math.max, math.min, math.sqrt
+local abs, atan2 = math.abs, math.atan2
+local time_global = time_global
+
+-- Live config, bound by apply_config below. `C` starts as an empty table rather than
+-- nil so anything that somehow runs before the first read_config reads every option
+-- as "off" instead of erroring. (The marker's RANGE gate, beacon_d/beacon2, is not
+-- here: it is read on iqm_core' per-NPC card pass, not by anything that draws.)
+local C = {}
+-- Most NPCs that can be OFFERED a marker slot in one frame, which is iqm_core'
+-- card cap. Restated rather than read across the seam, for the reason iqm_cards
+-- restates it: the candidate array below is preallocated from it AT LOAD, before any
+-- other module is guaranteed to have one. Change one, change all three; the slot
+-- harness reads MAX_CARDS out of iqm_core, which is the copy that decides.
+local MAX_CARDS = 8
+-- ...and the drawing space, all bound in on_game_start (see the seam note).
+local project_off, cards_kx, MAX_BEACONS = nil, nil, nil
+-- iqm_core' "where is object `id`" resolver, for the placed waypoint and the selected
+-- task. It answers for an OFFLINE object too, which is most of the point (see
+-- waypoint_goal and task_goal), and `task_target` is its "which id" companion: the object
+-- the SELECTED task's map marker sits on. Both bound in on_game_start.
+local goal_pos, task_target = nil, nil
+-- ...and iqm_core's MARKER TINT resolver (R2.63), bound the same way and for a reason
+-- worth stating, because the arrow points the unusual way round. Colour rules belong
+-- with the palettes, and FACTION_RGB lives over there -- but the two offers below are
+-- here, and they must not resolve a colour of their own: offer_task did exactly that
+-- until R2.63, with no beacon_color test in it, so a selected hand-in wore the map's
+-- green in the mode whose whole promise is that everything is the accent, beside an
+-- unselected hand-in wearing the accent. Same glyph, same meaning, two colours.
+-- One resolver, three callers, and no path is permitted a private copy -- offer_party's
+-- was CORRECT and went too, because a copy that happens to agree is the same hazard one
+-- edit later. What tells the selected mark apart now is its RING; see BEACON_RING.
+local beacon_tint = nil
+local beacon_edge, beacon_size, beacon_alpha, beacon_range = 46, 24, 225, true
+-- ...and the centre falloff's two knobs (R2.58, see ctr_fade). `ctr_r` is the radius in
+-- HALF-SCREEN-HEIGHTS and 0 turns the feature off, which is why there is no third switch --
+-- the same arrangement dim_hold uses. `ctr_amin` is its opacity floor, 0..1.
+local ctr_r, ctr_amin = 0, 0.2
+-- ...and whether the falloff SHRINKS as well as fades (beacon_ctr_size, default off). Asked
+-- for in play: the fade is the half that gets the marker out of the way, and the shrink is
+-- the half that reads as the mark standing down -- and not everyone wants the second one,
+-- because a marker that changes size is a marker whose position you have to re-find. Off,
+-- the badge holds beacon_size exactly and only the opacity moves.
+local ctr_shrink = true
+-- [role] = true when that role should be beaconed. One hash lookup replaces a
+-- chain of option tests on the per-NPC render path, and an all-false table means
+-- the beacon costs a single failed lookup per tracked NPC.
+local beacon_roles = {}
+-- ...and the two switches that are not roles (see apply_config): the placed waypoint's,
+-- and the selected task's, which replaced the `target` role's marker at R2.46.
+-- `task_handin` is the difficulty gate on the second of them (R2.47) -- see task_goal.
+local wp_on, task_on, task_handin = false, false, true
+-- ...and the third of them (R2.57): the player's own COMPANIONS. Same standing as wp_on --
+-- a standalone switch with its own source of truth (axr_companions' party list), not a
+-- filter over the card scan's output -- because a companion has no card role for it to
+-- ride. See offer_party.
+local party_on = false
+-- Marker glyph per role, for the six roles that can carry one. Every glyph here is
+-- now drawn from the SAME source art as that role's PDA map spot (R2.29), so the
+-- mark you learn on the map is the mark you look for through the wall:
+-- iqm_role_handin is Tabler "tag-filled", the price tag the map's turn-in spot uses, and
+-- the four trades match their own spots. Same ids, re-sourced art, so nothing here or in
+-- iqm_textures.xml had to move -- see tools/role-icons/README.md.
+--
+-- THAT CELL WAS A DIAMOND UNTIL R2.56 AND THE MAP'S HAD NOT BEEN ONE SINCE R2.55, which is
+-- this rule failing in the one way it can. The shared SVGs have two consumers and two build
+-- scripts; the map's handin.svg was replaced and the role copy was not, so for one release
+-- the map drew a tag and the beacon drew a diamond for the same objective. It went unseen
+-- because nothing DREW this cell in between -- the `target` role's marker was retired in
+-- R2.46 and the `handin` kind that draws it now did not exist until R2.55 -- so the mirror
+-- was broken with no eye on either side of it. Change one of the shared SVGs and rerun BOTH
+-- builds; the pair is only as good as the slower half.
+--
+-- `waypoint` is the odd one out and follows the same rule for the same reason: it is
+-- the four-arc ring modxml_n_iqm_map_icons puts on PAW's paw_task_default_spot, so the
+-- mark you look for through a wall is the mark you dropped on the map. Not a role --
+-- there is no waypoint card -- it is keyed here because this is where the marker's
+-- glyphs live.
+--
+-- `task` follows the same rule as `waypoint` and is its opposite number: the reticle
+-- modxml_n_iqm_map_icons puts on the task spots (iqm_mapspot_task, which replaces
+-- ui_inGame2_PDA_icon_Secondary_mission), so the mark you look for through a wall is the
+-- mark the map draws a bracket around. The two are told apart the same way in both views:
+-- the task's arcs are LONG and its cardinal gaps narrow (11 degrees either side), the
+-- waypoint's arcs are SHORT and its gaps wide (20), and the task carries a crosshair
+-- where the waypoint carries nothing.
+--
+-- THIS SAID "THE WAYPOINT'S GAPS ARE ON THE DIAGONALS" UNTIL R2.63a, in this note and in
+-- five others, and it was never true of either mark: both ring cells put their gaps on
+-- the cardinals and centre their arcs on the diagonals, which is what ../map-icons says
+-- in as many words at both of the spots they mirror. The claim came from the map's SELECT
+-- frame, which really is the inverse and is a third ring this pair has nothing to do with.
+-- It went unnoticed because nothing depended on it -- until R2.63a, when the tag's corners
+-- turned out to pass through the waypoint's WIDE gaps and land on the task ring's arcs,
+-- and the wrong sentence was the first place anyone would have looked to explain why.
+--
+-- `target` is still keyed here and still drawn: the ROLE's marker is retired (see
+-- apply_config) but the role itself lives on as a card, and iqm_core resolves a card's
+-- glyph through this same table.
+local BEACON_ICON = {
+	target    = "iqm_role_handin",    guider   = "iqm_role_guide",
+	trader    = "iqm_role_trader",    mechanic = "iqm_role_mechanic",
+	barman    = "iqm_role_barman",    medic    = "iqm_role_medic",
+	waypoint  = "iqm_role_waypoint",  task     = "iqm_role_task",
+	delivery  = "iqm_role_mail",
+	-- R2.56, and it is a KIND that deliberately shares the `target` ROLE's glyph rather
+	-- than a second entry that happens to match: both mean REPORT BACK, and the map draws
+	-- one mark (iqm_mapspot_handin) for both. task_kind gained "handin" in R2.55 and this
+	-- table did not, so a selected hand-in beaconed as the gold go-find-it reticle while
+	-- the map drew the green tag -- the two-vocabularies-one-key hazard the waypoint
+	-- note below warns about, arriving from the other direction: a kind with NO entry is
+	-- as wrong as two keys agreeing by luck, because the fall-through is silent and looks
+	-- deliberate. Keyed next to `target` so the pair is read together.
+	handin    = "iqm_role_handin",
+	-- R2.48. `mutant` is a glyph of its own; `bounty` deliberately is NOT keyed here and
+	-- falls through to `task`, because a bounty IS the ordinary go-find-it reticle and
+	-- only its colour differs. Keys here are iqm_scan.task_kind's vocabulary, not roles.
+	-- There was a `hostage` note here for the same reason until R2.55, when the kind itself
+	-- was removed and the rescue functor started answering "bounty" outright. `delivery` WAS
+	-- absent for a third reason -- the role atlas had no envelope, and the map glyph lives
+	-- in the SPOT atlas, a different sheet at a different size. R2.55 added the cell (it
+	-- cost the role atlas its fifth row) because the gap was not cosmetic: with no entry
+	-- here the deliver-to NPC was carded as `target`, so the card read REPORT BACK over a
+	-- hand-in diamond while the package was still in your pack. Note the pairing it makes
+	-- with `target` below: the marker for "report back" and the marker for "take
+	-- this to them" are the same green, and only the glyph differs. That is the whole point
+	-- of the colour, not a collision to be tidied away.
+	mutant    = "iqm_role_skull",
+	-- R2.57, and it is neither a role nor a task kind but a THIRD vocabulary -- the same
+	-- standing as `waypoint`: a mark with no card behind it, keyed here because this is
+	-- where the marker's glyphs live. `party` rather than `companion` throughout, because
+	-- iqm_scan already owns `companion` and it means the OPPOSITE thing there (a stalker you
+	-- could recruit and have not); one key for both would read as agreement and be a
+	-- collision. See beacon_party in iqm_core' OPTIONS for the rest of that argument.
+	--
+	-- iqm_role_vip, not a companion pictogram, and that is the mirror rule rather than a
+	-- shortcut: modxml_n_iqm_map_icons draws a companion as the VIP BUST IN THE COMPANION
+	-- GREEN (ui_pda2_companion_location_spot and Warfare's companion_tex both point at
+	-- iqm_mapspot_vip), on the stated ground that a companion must not look like two
+	-- different things depending on which path drew it. What tells a companion from a VIP
+	-- on the map is the green, so BEACON_RGB.party carries the same 40,172,66 across.
+	party     = "iqm_role_vip",
+	-- ...WHICH MEANS `waypoint` ABOVE IS NOW BOTH (R2.49e). It was written as a role, and
+	-- task_kind now also returns "waypoint" for PAW's placed waypoint, so a kind lookup
+	-- lands on the role's glyph. That is the right answer by luck rather than by design -
+	-- the player's own pin should draw the waypoint glyph whichever way it is reached -
+	-- but the two vocabularies sharing a key is fragile, so it is written down: rename
+	-- either one and this line stops agreeing with itself silently.
+}
+
+-- Marker TINT per role, the colour half of the rule BEACON_ICON is the glyph half of:
+-- the mark you learn on the map should also be the colour you learn on the map. Every
+-- value here is copied from the SPOTS table in modxml_n_iqm_map_icons.script, which is
+-- what actually paints those spots -- so if a colour changes there it must change here,
+-- or the two views disagree. That modxml is unconditional (no MCM gate), so a match here
+-- is never stale.
+--
+-- THE TURN-IN IS GREEN, and getting there was a wrong turn worth recording. R2.34 first
+-- mirrored `storyline_task_spot` / `secondary_task_spot` and so split the turn-in into a
+-- gold and a pale by task type. Those are the wrong spots: they are the GO FIND IT mark,
+-- the reticle the map puts on an objective. The `target` role is not that -- every way it
+-- is reached reads REPORT BACK (see target_is_talk_to) -- and the map's mark for that is
+-- iqm_mapspot_handin, the green tag (a diamond until R2.55), which is exactly the glyph
+-- BEACON_ICON.target already draws. The glyph mirror was right and the colour mirror was
+-- pointed one spot away from it. Read modxml_n_iqm_map_icons' glyph grammar note:
+-- "reticle = go find it, green tag = done, go collect on it".
+--
+-- So there is ONE turn-in colour, not two: the map paints storyline_task_on_guider_spot,
+-- secondary_task_on_guider_spot and ATUE's atue_return_task_spot the same 40,172,66,
+-- because handing in is handing in whatever kind of task asked for it.
+--
+-- Two roles are deliberately absent and fall back to the accent:
+--   * `guider` -- vanilla does not map-spot guides at all, so there is nothing to match.
+--   * `waypoint` -- PAW tints it with a NAMED color="blue", which color_defs.xml resolves
+--     to pure 0,0,255. Unreadable over the world, and the modxml sets no r/g/b on that
+--     spot on purpose (PAW's named attribute would fight it). The player's own mark
+--     keeping the accent is the right answer anyway: gold already reads as "yours".
+--
+-- Published to iqm_core, whose per-NPC pass resolves a marker's glyph and its
+-- tint once per tracked entry (role and community are both stable for its life) and
+-- hands them over on the candidate record. Both stay file locals as well: the tables
+-- are the marker's own art, and reading them is not the caller's business.
+beacon_icon = BEACON_ICON
+
+local BEACON_RGB = {
+	target   = { 40, 172,  66}, trader   = {  0, 198, 176},
+	mechanic = {120, 206, 236}, barman   = {255, 128, 185},
+	medic    = {238, 106,  94},
+	-- R2.48, and these two are TASK KINDS rather than roles -- the same table because
+	-- offer_task resolves a colour out of it the same way every other marker does. Both
+	-- values are copied from ui/iqm_map_spots.xml, where the matching spot types are
+	-- declared, and the mirror rule at the top of this note applies to them exactly as
+	-- it does to the rest: change a colour there and it must change here, or a mutant
+	-- hunt is lime on the map and something else through the wall.
+	-- A `hostage` entry in azure sat here from R2.51 to R2.55 and went out with the kind
+	-- itself: rescues now answer "bounty", so the azure has no pin to mirror and a colour
+	-- in this table with no map spot behind it is the one thing it must not hold (the
+	-- colour harness asserts exactly that, and would have caught it).
+	mutant   = {176, 216,  72}, bounty   = {172,  60,  66},
+	delivery = { 40, 172,  66},
+	-- R2.56, the colour half of BEACON_ICON.handin above, and the same 40,172,66 the three
+	-- turn-in spots and `target` already carry -- see THE TURN-IN IS GREEN at the top of this
+	-- note. It is the mirror rule doing its job rather than a new decision: handing in is
+	-- handing in, so the kind and the role that mean it wear one colour. Nothing about the
+	-- "a colour here with no map spot behind it" prohibition applies -- this one has three.
+	handin   = { 40, 172,  66},
+	-- R2.57, the colour half of BEACON_ICON.party above, mirroring
+	-- ui_pda2_companion_location_spot -- which the modxml paints 40,172,66, the same green
+	-- as the three turn-in spots. That collision is the MAP'S, deliberately and by request
+	-- ("the companion green, byte for byte" -- see the modxml's own note beside it), so
+	-- mirroring it is this table doing its job; inventing a different green here would make
+	-- the marker disagree with the pin it is supposed to be a copy of. The two are never
+	-- confusable in practice anyway: they wear different glyphs, and a turn-in stands still
+	-- while a companion is the thing walking behind you.
+	party    = { 40, 172,  66},
+}
+beacon_rgb = BEACON_RGB
+
+-- The RING a marker can wear around its glyph, and the marker's answer to "whose mark is
+-- this" (R2.63). A THIRD axis, deliberately independent of the other two: the GLYPH says
+-- what the mark is, the TINT says the same thing in colour (see BEACON_RGB), and the ring
+-- says the player put this one here themselves. Nothing else may encode that -- which is
+-- the change R2.63 is, because the selected task used to say it in COLOUR, by wearing its
+-- kind's green while an unselected hand-in two metres away wore the accent. Two marks
+-- meaning the same thing in two colours is the one thing the mirror rule forbids.
+--
+-- `wp` is the placed waypoint's, unchanged since R2.38: a waypoint dropped ON a body
+-- draws as that NPC's marker wearing this ring.
+--
+-- `sel` is the SELECTED task's, and the pair is told apart exactly as the map tells the
+-- two spots apart -- both gap the CARDINALS, this one narrowly (11 degrees either side)
+-- and the waypoint's widely (20), so this ring's arcs are the long ones. It is
+-- iqm_role_task's outer arcs with the crosshair dropped, because framing a glyph is a
+-- different job from being one: the middle is occupied now (the tag, the envelope, the
+-- skull), and the crosshair drawn under it would be a second mark showing through the
+-- first. See tools/role-icons/svg/ringtask.svg.
+--
+-- ONE RING SLOT, so a body that is both -- placing a waypoint SELECTS its task, which
+-- makes this the DEFAULT state and not a corner case -- draws `sel`: offer_task is the
+-- offer that survives the merge (see its note), so it is the one that names the ring.
+local BEACON_RING = {
+	wp  = "iqm_role_waypoint",
+	sel = "iqm_role_ringtask",
+}
+beacon_ring = BEACON_RING
+--- The waypoint the PLAYER placed, as id and world position, or nil.
+--
+--  Read straight from Personal Adjustable Waypoint rather than through the selected
+--  task, even though placing one selects its task (see docs/minimap-route.md §6j).
+--  Those are different questions: select a quest afterwards and the waypoint is still
+--  standing there, which is exactly when a marker on it earns its keep.
+--
+--  A soft dependency in both directions. Without PAW there is no waypoint and this
+--  returns nil for good; with it, nothing here writes to PAW or assumes anything
+--  beyond get_current_waypoint, which is the one call it has always exported.
+--  The ID is resolved on a throttle; the POSITION on every call. WHICH waypoint is
+--  current changes only when the player places or clears one, so asking PAW every frame
+--  answered the same question ~250 times over. Measured at 0.017 ms/frame in a hub --
+--  a quarter of this module's entire per-frame cost, and as much as drawing a real
+--  marker -- because goal_pos falls through to alife():object() and game_graph() for a
+--  waypoint whose object is not online.
+--
+--  The POSITION is deliberately NOT cached with it WHILE THE OBJECT IS ONLINE: PAW allows
+--  a waypoint placed ON AN NPC (the case the R2.38 ring exists for), and that NPC walks. A
+--  position 250 ms stale would drag the marker behind a moving quest giver -- exactly the
+--  target this marker is most for. Splitting the two keeps the mark exact and still drops
+--  the cross-module call to 4 Hz. `false` (not nil) caches "no waypoint", so the absent
+--  case is throttled too rather than re-asking every frame.
+--
+--  THE OFFLINE BRANCH *IS* CACHED, at the same 250 ms tick, inside iqm_core.goal_pos --
+--  so the throttle above no longer applies only to the absent case. The rule is narrowed,
+--  not overturned: the argument above is about an NPC you can watch walking, and such an
+--  NPC is by definition online, which is the branch that stays live. A target outside the
+--  online radius only moves on an ALife update anyway, and is drawn here as a screen-edge
+--  chevron over a metre-rounded readout that cannot resolve the difference. The cache is
+--  inside goal_pos rather than here on purpose: three callers share that helper, and
+--  caching at one of them would let two of them disagree about one object on one frame.
+local _wp = { t = 0 }   -- { t = next poll (ms), id = last answer or false }
+function waypoint_goal()
+	if not (wp_on and tasks_placeable_waypoints
+	        and tasks_placeable_waypoints.get_current_waypoint) then return nil end
+	local tg = time_global()
+	if tg >= _wp.t then
+		_wp.t  = tg + 250
+		_wp.id = tasks_placeable_waypoints.get_current_waypoint() or false
+	end
+	local id = _wp.id
+	if not id then return nil end
+	local pos = goal_pos(id)
+	if not pos then return nil end
+	return id, pos
+end
+
+-- --------------------------------------------------------------------------
+-- Hand-in beacon
+-- --------------------------------------------------------------------------
+-- Candidates are gathered during the card pass (which already has each NPC's
+-- object and distance in hand) and drawn after it, so the nearest objectives get
+-- the few beacon widget sets rather than whichever `pairs` happened to reach
+-- first. The entry tables are preallocated and permuted in place by the sort --
+-- this runs every frame, so it must not allocate.
+local _bcand = {}
+for i = 1, MAX_CARDS do
+	_bcand[i] = { id = 0, dist = 0, mult = 0, x = 0, y = 0, z = 0, tex = nil, prio = 1 }
+end
+local _bn = 0
+
+local WP_NEAR       = 3.0   -- m: inside this the placed waypoint's marker is not drawn
+local BEACON_LIFT   = 2.0   -- metres above the NPC's feet the marker anchors (just over head height)
+local BEACON_ABOVE  = 12    -- px the on-screen chevron floats above that anchor
+local HALF_W, HALF_H = 512, 384          -- centre of the 1024x768 virtual UI
+
+-- --------------------------------------------------------------------------
+-- THE CENTRE FALLOFF (R2.58)
+-- --------------------------------------------------------------------------
+-- Cyberpunk's move: a marker gets out of the way of what you are LOOKING AT. Near the
+-- crosshair it shrinks and fades, because the thing under the crosshair is the thing
+-- you want to see. The mod is already plate-less and keyline-baked for exactly that
+-- reason; this is the same instinct one step further.
+--
+-- IT ONLY FIRES ON THE UNCLAMPED BRANCH, and that is correct rather than a shortfall: a
+-- marker parked at a screen edge is BY DEFINITION far from the centre, so there is
+-- nothing to fade. What is left is precisely the cases where a marker can sit under the
+-- crosshair -- an NPC on screen but behind a wall (the LOS cull), one on screen but past
+-- card range, and the placed waypoint dead ahead as you walk to it.
+--
+-- MEASURED IN SCREEN SPACE, NOT UI SPACE, and this is the one trap in the whole feature.
+-- The 1024x768 virtual UI is stretched to the real window, so sqrt(dx^2+dy^2) in UI units
+-- traces an ELLIPSE on screen, not a circle round the crosshair. draw_beacons already
+-- resolves the correction for the chevron heading (UI_KX): the screen-space direction of a
+-- UI delta is (dx/UI_KX, dy). Normalising THAT by HALF_H gives a radius in half-screen-
+-- heights -- a true circle, and the same circle at any resolution or aspect.
+--
+-- (Normalising each axis by its own half-extent, which looks like the obvious fix, gives
+-- back exactly the UI-space ellipse: dx/HALF_W and dy/HALF_H. It is not the fix.)
+--
+-- A FLOOR AND NOT A HIDE for the alpha, for the reason the combat dim states at length:
+-- the default should be the behaviour that cannot flicker. 0 is reachable and is a full
+-- hide for anyone who wants one.
+local CTR_IN   = 0.25   -- fraction of the radius inside which everything is at the floor
+-- The SIZE floor, and deliberately not an MCM knob. It is not a taste setting: much below
+-- three quarters the badge stops being legible as a glyph, and the metre readout -- already
+-- the smallest thing on it at beacon_rsize percent of the glyph -- collapses into the
+-- max(2, ...) clamp in draw_beacon and pops back out of it. Alpha is what does the
+-- getting-out-of-the-way; the shrink is there to say the mark has stood down.
+--
+-- 3/4 exactly, and not 0.7, because it has to land ON the quantisation grid below: 0.7
+-- rounds to 11/16 = 0.6875, so the constant would not be the floor the code applies and
+-- every expectation written against it would be off by a step.
+local CTR_SMIN = 0.75
+-- Quantise the SIZE multiplier to 1/CTR_Q, and only the size. The engine floors every
+-- widget's position to a whole screen pixel independently -- the reason the keylines are
+-- baked into the art instead of drawn as a second widget behind it -- and the readout's
+-- digit tracking is fractional, so a badge whose size changes every frame while you pan
+-- re-floors its digits against each other and shimmers. Alpha is not quantised: it has no
+-- geometry to re-floor, and stepping it is exactly the popping the floor exists to avoid.
+local CTR_Q    = 16
+
+--- How much alpha and how much size a marker `ax, ay` UI units off the screen centre
+--  keeps. Returns two multipliers, 1, 1 outside the falloff radius.
+--
+--  Callers must gate on ctr_r > 0 (the divisions below assume it) and on the marker being
+--  UNCLAMPED -- behind the camera the projected magnitude is meaningless, only the
+--  direction survives, so a radius read there is noise.
+local function ctr_fade(ax, ay, kx)
+	local sx = ax / kx
+	local r  = sqrt(sx * sx + ay * ay) / HALF_H
+	if r >= ctr_r then return 1, 1 end
+	local inner = ctr_r * CTR_IN
+	local t = (r <= inner) and 0 or ((r - inner) / (ctr_r - inner))
+	t = t * t * (3 - 2 * t)                                  -- smoothstep, so nothing eases in abruptly
+	local a = ctr_amin + (1 - ctr_amin) * t
+	-- The shrink is optional and the fade is not, which is the right way round: opacity is
+	-- what actually clears the view, and it is also the half that cannot go wrong -- a
+	-- constant size has no quantisation to land on and no readout to collapse.
+	if not ctr_shrink then return a, 1 end
+	local sz = CTR_SMIN + (1 - CTR_SMIN) * t
+	return a, floor(sz * CTR_Q + 0.5) / CTR_Q
+end
+
+-- Offer one candidate to the beacon set. `mult` is the beacon's own eased alpha
+-- as a 0..1 fraction: 1 while its card is down, easing to 0 as the card comes up.
+--
+-- `prio` orders ahead of distance. It used to separate exactly one candidate -- the
+-- waypoint the player placed (0) from everything else (1) -- which meant every marker the
+-- mod found for you competed on METRES ALONE. That is wrong whenever more candidates than
+-- slots are in range, because the roles are not equal: a technician you happen to be
+-- standing nearer to would evict the quest you are carrying, and the eviction is silent.
+-- Observed in Rostok (R2.39) with five in range: a mechanic at 37 m and a guide at 39 m
+-- held the first two slots while a turn-in at 60 m was dropped, and the turn-in at 45 m
+-- flickered in and out of the last one as the player drifted a few metres.
+--
+-- So callers now pass the candidate's ROLE_PRIO, the same table that orders card slots --
+-- one source of truth, and the two orderings agree by construction. Nearest-first still
+-- decides WITHIN a role class, so nothing changes until the slots are actually contended.
+-- The placed waypoint keeps prio 0, ahead of every role: it is the one mark the player
+-- made themselves rather than one the mod found for them.
+-- `col` is a REFERENCE into BEACON_RGB / FACTION_RGB, never a fresh table: this runs per
+-- tracked NPC per frame, and a {r,g,b} built here would be garbage every frame. nil = accent.
+function beacon_offer(id, dist, mult, x, y, z, tex, prio, col, nmt, ring)
+	-- An NPC whose card is up needs no beacon, and must not hold a beacon slot
+	-- either: the near one you can already see would otherwise crowd out the far one
+	-- you cannot.
+	if mult < 0.01 or _bn >= MAX_CARDS then return end
+	_bn = _bn + 1
+	local e = _bcand[_bn]
+	e.id, e.dist, e.mult, e.x, e.y, e.z, e.tex = id, dist, mult, x, y, z, tex
+	-- ROLE_PRIO covers every role that can carry a marker, so the fallback is unreachable
+	-- in practice; it resolves to the turn-in's rank because an unclassified candidate that
+	-- got this far is more likely an objective than ambient scenery, and losing an objective
+	-- is the failure this ordering exists to prevent.
+	e.prio = prio or 1
+	e.col  = col
+	e.nmt  = nmt          -- nil when beacon_name is off, or for the placed waypoint
+	-- The ring to frame the glyph with, or nil for the marks the mod found by itself.
+	-- A TEXTURE and not the boolean this was until R2.63: there are two rings now, and a
+	-- second flag beside the first would let a caller ask for both -- which is exactly the
+	-- case that arises (the placed waypoint IS usually the selected task's body) and has
+	-- one right answer rather than a blend. One field, one ring, the caller chooses.
+	-- `true` is the WAYPOINT's ring, the only one a role marker can wear, and the reason
+	-- it is a sentinel rather than a texture id from the caller is iqm_core's upvalue
+	-- budget: the function that makes that call sits at exactly LuaJIT's 60, so naming
+	-- BEACON_RING over there costs a load failure. Resolved here, where the table
+	-- already lives, and the caller keeps passing the flag it always passed.
+	e.ring = (ring == true) and BEACON_RING.wp or ring or nil
+	-- insertion sort by (prio, distance); at most MAX_CARDS entries, so this is cheaper
+	-- than any allocation a comparator-based sort would make
+	for i = _bn, 2, -1 do
+		local a, b = _bcand[i - 1], _bcand[i]
+		if a.prio < b.prio or (a.prio == b.prio and a.dist <= b.dist) then break end
+		_bcand[i - 1], _bcand[i] = b, a
+	end
+end
+
+--- Offer the PLACED WAYPOINT, ahead of every NPC (prio 0).
+--
+--  Three things differ from every other marker, and all three follow from it being
+--  the player's own mark rather than one the mod found for them:
+--    * NO RANGE GATE. beacon_dist is there so the markers don't hand out NPC
+--      positions you had not earned; a waypoint's position is one you chose.
+--    * mult is a flat 1. There is no card to hand over to, so nothing to ease.
+--    * WP_NEAR, and nothing else, hides it -- standing on the spot, where a badge
+--      over your own head says less than the ground under your feet.
+--
+--  `owned` is the one thing this cannot decide for itself: whether the mod is already
+--  MARKING the NPC the waypoint sits on, which is a question about `tracked` and so
+--  iqm_core' to answer. See the note at its call site -- it is not the same
+--  question as "is that NPC tracked", and confusing the two is the R2.38 dead band.
+--  A no-op when there is no waypoint (`wd` nil), so the caller needs no guard.
+function offer_waypoint(wid, wpos, wd, owned)
+	if wd and not owned and wd >= WP_NEAR then
+		beacon_offer(wid, wd, 1, wpos.x, wpos.y, wpos.z, BEACON_ICON.waypoint, 0)
+	end
+end
+
+--- The SELECTED task's target, as id and world position, or nil.
+--
+--  Twin of waypoint_goal above, throttled the same way and for the same two reasons:
+--  WHICH task is selected changes only when the player changes it, while WHERE its target
+--  stands changes every frame it walks. So the id is cached for 250 ms and the position
+--  resolved on every call.
+--
+--  WHY THIS EXISTS AT ALL, rather than a priority tweak on the old `target`-role marker:
+--  that marker could never follow the selection however it was ordered, because the
+--  selected task's target frequently never reaches `tracked` in the first place.
+--  iqm_scan's is_markable_npc needs level.object_by_id to resolve (so OFFLINE targets are
+--  out, and a task marker is wherever the objective is, not wherever you are), demands a
+--  stalker or trader (so a crate or a smart terrain is out -- iqm_nav's own note says a
+--  task marker is routinely one of those), and target_is_talk_to drops any task below its
+--  stage_complete (so a selected go-find-it task is deliberately not a `target` at all).
+--  goal_pos answers for all three, and returns nil for a target on ANOTHER LEVEL.
+--
+--  SELECTION ONLY, no fallback. iqm_core.route_target() falls back to the nearest tracked
+--  turn-in when nothing is selected; this deliberately does not, so the marker says
+--  exactly "the task you picked" and can never point where the map's bracket is not. The
+--  visible consequence, and it is a chosen one: with no task selected the ground route
+--  still leads to a nearest turn-in that now carries no marker.
+--  HAND-IN GATE (R2.47). With `task_handin` set -- the default -- the marker is only
+--  offered once the task's own `stage_complete` says the objective is done and the marker
+--  has moved to the person you report back to. That is a difficulty decision, not a
+--  tidiness one: at the other stages this marker is an exact live position through a wall,
+--  and on a bounty that is the whole challenge handed over. The bounty functor makes the
+--  split for us (tasks_bounty.script:228) -- stage 1 returns the task giver, stage 0 the
+--  mark itself -- so the gate lands exactly on it.
+--
+--  It is also the rule the `target` ROLE always had (iqm_scan's target_is_talk_to); R2.46
+--  dropped it by accident in moving the marker onto the selection, and this is it coming
+--  back as something the player can switch.
+--
+--  The ROUTE is deliberately NOT gated. A path along the ground is navigation; an exact
+--  position through a wall is a reveal. So during a bounty you still get a line towards
+--  the area and no badge on the body.
+--  THIRD RETURN, the task's KIND (R2.48) -- "mutant", "bounty" or nil -- cached on the
+--  same 250 ms tick as the id, because it is an answer about WHICH TASK rather than
+--  about where anything is. It picks the marker's glyph and tint below.
+--
+--  WORTH KNOWING HOW THIS INTERACTS WITH THE GATE ABOVE, because the two pull opposite
+--  ways by design. task_kind returns "handin" once the objective is done; the hand-in gate
+--  hides the marker until it is. So with `beacon_handin` at its default the SKULL and the
+--  RED reticle never appear on a beacon at all -- a mutant hunt and a bounty are gated for
+--  the whole of the stage that makes them one, and by the time a marker exists the kind has
+--  become the turn-in. Those two are a PDA-map feature under those settings, which is where
+--  telling one pin from another is the job anyway (see iqm_taskspot). Turn the gate off and
+--  the marker follows the objective from the start, which is exactly when knowing whether it
+--  is a mutant or a man is worth something. Neither half is redundant; they serve the two
+--  halves of that switch.
+--
+--  TWO KINDS ESCAPE THAT and so are visible on a beacon at the DEFAULT setting -- which is
+--  why both needed their own entries in the tables above:
+--    * `handin`, because it IS the gate's open state rather than something it withholds.
+--    * `delivery`, by the explicit exemption below, because the gate can never open for one.
+--  Read the two together: at the default the beacon's whole kind vocabulary is those two,
+--  and the rest is what the map draws.
+local _tk = { t = 0 }   -- { t = next poll (ms), id = last answer or false, kind, comm }
+function task_goal()
+	if not (task_on and task_target) then return nil end
+	local tg = time_global()
+	if tg >= _tk.t then
+		_tk.t = tg + 250
+		local id, handin, kind = task_target()
+		-- A DELIVERY IS EXEMPT FROM THE GATE (R2.56), and this is the gate being applied
+		-- correctly rather than weakened. The gate withholds an exact through-wall position
+		-- while the objective is still something you have to GO AND DO; a delivery's objective
+		-- is a person you walk up to and talk to, which is the case the gate exists to let
+		-- through, not the case it exists to stop.
+		--
+		-- Without this the marker was not merely late, it was UNREACHABLE. talk_to compares
+		-- stage against stage_complete, a delivery declares stage_complete = 2, and
+		-- tasks_delivery only ever flips 0 and 1 -- the quest completes through dialog
+		-- (tasks_delivery.script:255-285, and the note at iqm_scan's delivery branch). So
+		-- `handin` is false for the whole life of every delivery and the gate could never
+		-- open. Verified live in Rostok: two deliveries at stage 1 of 2, the recipient 18 m
+		-- away and tracked, and no marker at any range.
+		--
+		-- iqm_scan made exactly this exemption for the CARD in R2.55 and said why in its own
+		-- note; the marker did not follow, which is the whole of the bug. The two views now
+		-- agree again, and they agree on the envelope glyph BEACON_ICON.delivery already had
+		-- waiting for them.
+		_tk.id = (id and (handin or kind == "delivery" or not task_handin) and id) or false
+		_tk.kind = kind
+		-- ...AND THE GIVER'S COMMUNITY, off the SERVER object (R2.63c), which is the whole
+		-- point: this marker has no range gate, and the tracked set that iqm_core resolves a
+		-- community from stops at beacon_dist. Reading it from the tracked entry therefore
+		-- made beacon_color mode 2's answer a function of RANGE -- a Duty giver drew the
+		-- unknown-community fallback at 150 m and changed to Duty red on crossing 60 m. The
+		-- server object exists whether or not the NPC is spawned, so asking IT is the same
+		-- answer at every distance. Verified live: community() answers for offline objects
+		-- (sampled across a level -- stalker, bandit, zombied), and for an ONLINE one it
+		-- agrees with the character_community() the card pass uses.
+		--
+		-- ON THIS TICK AND NOT PER FRAME, beside the id it belongs to: a community is fixed
+		-- for an NPC's life, so the only thing that can change the answer is the player
+		-- selecting a different task -- which is exactly what this block re-reads.
+		--
+		-- nil ON FAILURE, NEVER false, and the difference is load-bearing downstream: false
+		-- means "asked, and this community is not one the palette knows" (the script traders,
+		-- which answer "trader" -- they reach that case through the palette lookup instead),
+		-- while nil means "could not ask", which beacon_tint answers with the turn-in green
+		-- rather than a faction colour it cannot stand behind. A target with no community at
+		-- all is not an NPC, so it cannot be a turn-in and never reaches that branch.
+		_tk.comm = nil
+		if _tk.id then
+			local se = alife():object(_tk.id)
+			if se and se.community then
+				local okc, comm = pcall(se.community, se)
+				_tk.comm = (okc and type(comm) == "string" and comm ~= "") and comm or nil
+			end
+		end
+	end
+	local id = _tk.id
+	if not id then return nil end
+	local pos = goal_pos(id)
+	if not pos then return nil end
+	return id, pos, _tk.kind, _tk.comm
+end
+
+--- Offer the SELECTED TASK's target, ahead of every role (prio 0).
+--
+--  Shares the placed waypoint's two exemptions, for a related reason -- this is the
+--  objective the player CHOSE, not one the mod found for them:
+--    * NO RANGE GATE. A marker that stops at beacon_dist is the thing this replaces; the
+--      whole job of this mark is "your objective is that way" when it is too far to see.
+--    * mult is a flat 1. There is no card to hand over to, so nothing to ease.
+--
+--  `owned` is iqm_core's answer to "is this body already showing something of ours",
+--  the same question offer_waypoint asks and for the same one-mark-per-body reason.
+--
+--  `merged` says this target IS the placed waypoint. Not an edge case: placing a waypoint
+--  SELECTS its own task, so the two ids coincide by DEFAULT rather than rarely. One mark
+--  is drawn and it is this one, the full reticle. It inherits WP_NEAR along with the
+--  identity -- standing on your own waypoint, the ground under your feet says more than a
+--  badge over your head, and that does not stop being true because the task is selected.
+--
+--  `kind` dresses it: a mutant hunt gets the skull, a bounty the same reticle in red,
+--  anything else the reticle. The glyph falls back on its own -- an unknown kind resolves
+--  to nil in BEACON_ICON and the reticle draws -- so a kind added later needs no change
+--  here to stay safe, only to become visible.
+--
+--  THE COLOUR IS THE CALLER'S NOW (R2.63), and that is the whole of the consistency fix.
+--  This used to resolve `BEACON_RGB[kind]` itself, with no beacon_color test -- while the
+--  role pass and offer_party both gate theirs on the mode. Three markers, two rules, and
+--  the visible result was a selected hand-in wearing the map's green in the mode whose
+--  entire promise is "everything is the accent", two metres from an unselected hand-in
+--  wearing the accent: the same glyph, the same meaning, two colours. iqm_core.beacon_tint
+--  is the one resolver all three read now, and it needs the NPC's community for mode 2,
+--  which lives on the tracked entry and never leaves that file -- so the answer arrives
+--  here rather than being fetched from here, the same way `owned` and `merged` do.
+--
+--  WHAT SAYS "SELECTED" INSTEAD is BEACON_RING.sel, unconditionally and in every colour
+--  mode -- see BEACON_RING. Shape rather than tint, because the tint is spoken for: it
+--  has to agree with the map, and the map does not draw the selected turn-in in a colour
+--  of its own either. It draws a BRACKET round it.
+function offer_task(tid, tpos, td, owned, merged, kind, fcomm)
+	if not (td and not owned) then return end
+	if merged and td < WP_NEAR then return end
+	local tex = (kind and BEACON_ICON[kind]) or BEACON_ICON.task
+	-- NO RING WHEN THE GLYPH ALREADY IS ONE, which is the reticle: BEACON_RING.sel is
+	-- literally iqm_role_task's outer arcs, so ringing the reticle draws the same four
+	-- arcs twice at two radii -- at 20 px they merge into a hoop and the crosshair inside
+	-- it goes with them. Not a rare dressing either: a BOUNTY wears the reticle on purpose
+	-- (red, no glyph of its own), and so does every kind the table has no entry for.
+	-- Nothing is lost by the suppression -- the reticle is ALREADY the selected task's own
+	-- mark and nothing else draws it, so it says `selected` on its own, which is the same
+	-- ground on which the placed waypoint's glyph never wears the waypoint ring either
+	-- (see the centre-fade test, which excuses that mark by TEXTURE for the same reason).
+	beacon_offer(tid, td, 1, tpos.x, tpos.y, tpos.z, tex, 0,
+	             beacon_tint(kind, fcomm), nil,
+	             tex ~= BEACON_ICON.task and BEACON_RING.sel or nil)
+end
+
+--- Offer the player's own COMPANIONS, BEHIND every role (R2.57).
+--
+--  WHY IT IS NOT A ROLE. Every other marker in this file rides a card role via
+--  `pre = "<x>_cards"`, and a companion has none: the scan finds people you could act on,
+--  and a companion is someone you already did. So this is modelled on the placed waypoint
+--  instead -- a standalone switch over its own source of truth. The source is
+--  axr_companions' party list, which is the same table the game's own PDA reads, so the
+--  set can never disagree with the one in your contacts.
+--
+--  PRIO 7, BEHIND EVERYTHING. ROLE_PRIO's ambient band is 6, so a companion is the LAST
+--  thing offered a slot and cannot evict anything -- not a turn-in (the whole point of
+--  R2.39's ordering), and not even a shop. Deliberately weaker than "at the ambient band":
+--  the ambient marks answer "where do I go", and a mark can be the only answer you have,
+--  while a companion is an asset that follows you and can be recalled by whistling at it.
+--  With six slots the case is theoretical in all but a hub full of switched-on roles, and
+--  when it is not, losing the mark on the man walking behind you is the right loss.
+--
+--  IT RIDES beacon_dist like the ambient roles, passed in as `bd` because the range mirror
+--  lives on iqm_core' card pass and this module deliberately keeps no second copy of it.
+--  The two exemptions above (the waypoint's and the task's) do not apply: those are
+--  positions the player CHOSE, and a companion is a body the mod found, so the "don't hand
+--  out positions you haven't earned" rule applies to it exactly as it does to a trader --
+--  even though you have, in fact, earned this one. Cheap to raise; 60 m covers the case.
+--
+--  `marked` is iqm_core' one-mark-per-body test, passed in for the same reason `owned` is
+--  above: it is a question about `tracked`, which never leaves that file. A companion who
+--  is ALSO carded or marked as something else (a companion can be the selected task's
+--  target, and Warfare guides do get recruited) keeps the stronger mark. `wid` and `tid`
+--  are skipped outright for the same invariant, since the two navigation marks are offered
+--  before this and answer for those bodies already.
+--
+--  THROTTLED AT 1 Hz, and only the LIST is. Which bodies are in your party changes when you
+--  recruit or dismiss one; where they are standing changes every step they take, which is
+--  the whole reason to mark them -- so the ids are cached and goal_pos is called live, the
+--  same split waypoint_goal makes and for the same reason. list_actor_squad_by_id builds a
+--  fresh table and walks every squad member on every call, so it is not a per-frame call.
+--  pcall'd like every other cross-mod precondition in this mod: it reaches into
+--  axr_task_manager.hostages_by_id, which is not ours to guarantee.
+local PARTY_PRIO = 7
+local _pt = { t = 0 }   -- { t = next poll (ms), list = last answer or nil }
+function offer_party(apos, marked, bd, wid, tid)
+	local ac = axr_companions
+	if not (party_on and apos and ac and ac.list_actor_squad_by_id) then return end
+	local tg = time_global()
+	if tg >= _pt.t then
+		_pt.t = tg + 1000
+		local ok, list = pcall(ac.list_actor_squad_by_id)
+		_pt.list = (ok and type(list) == "table" and list) or nil
+	end
+	local list = _pt.list
+	if not list then return end
+	-- ONE lookup for the whole party, and through the SHARED resolver (R2.63). This block
+	-- used to work the mode out for itself -- mode 0 and mode 3 the accent, 1 and 2 the
+	-- map's green, with the two modes written out explicitly because a `> 0` would have
+	-- handed mode 3 the map colour and left the custom one reaching nothing. All of that
+	-- is still true and all of it now lives in one place. This copy was CORRECT and went
+	-- anyway: it agreed with the role pass by inspection rather than by construction, and
+	-- the third copy -- offer_task's -- did not agree at all. A private copy that happens
+	-- to be right is the same hazard as one that is wrong, one edit later.
+	-- No community is passed: `party` is not a turn-in, so mode 2 has nothing to override.
+	local col = beacon_tint("party")
+	for i = 1, #list do
+		local id = list[i]
+		if id ~= wid and id ~= tid then
+			local pos = goal_pos(id)
+			if pos then
+				local d = pos:distance_to(apos)
+				-- No name is passed, and that is a limitation rather than a taste call: the
+				-- name cache lives on the tracked entry (t.name) and a companion is not
+				-- tracked, so a caption here would mean a second cache for text the engine
+				-- cannot scale with the marker anyway (see beacon_name). Worth revisiting
+				-- if anyone runs a party big enough to need to tell two apart.
+				if d < bd and not marked(id, d) then
+					beacon_offer(id, d, 1, pos.x, pos.y, pos.z,
+					             BEACON_ICON.party, PARTY_PRIO, col)
+				end
+			end
+		end
+	end
+end
+
+--- `dim` is iqm_core's combat-dim multiplier for this frame: 1 clear, down to the
+--  configured floor while the weapon is up and busy. Frame state, so it arrives as an
+--  argument rather than through apply_config, and it defaults to 1 so a caller that does
+--  not know about it (the harnesses) draws exactly as before.
+--
+--  Unlike the CARD's alpha, the one computed below is safe to scale directly: it feeds
+--  the draw and the `a < 2` hide, and that hide resets no state -- no entrance to replay,
+--  no chirp to re-fire, and e.mult (the handover alpha this marker rides) is untouched.
+function draw_beacons(tg, CARDS, dim)
+	dim = dim or 1
+	local n = min(_bn, MAX_BEACONS)
+	-- The aspect correction, hoisted once per frame rather than resolved per marker:
+	-- it belongs to the window this draws into (iqm_cards), which recomputes it only
+	-- when the resolution moves.
+	local UI_KX = cards_kx()
+	for i = 1, n do
+		local e = _bcand[i]
+		local px, py, dsign = project_off(e.x, e.y + BEACON_LIFT, e.z)
+		if not px then
+			CARDS:hide_beacon(i)
+		else
+			-- Direction from screen centre to the target. Behind the camera the
+			-- perspective divide by a negative w has mirrored the point through the
+			-- origin, so flip it back or the chevron points exactly the wrong way --
+			-- the single nastiest bug in this kind of marker.
+			local dx, dy = px - HALF_W, py - HALF_H
+			if dsign < 0 then dx, dy = -dx, -dy end
+
+			local lim_x, lim_y = HALF_W - beacon_edge, HALF_H - beacon_edge
+			local ax, ay = abs(dx), abs(dy)
+			-- Clamp when off the inset rect, and ALWAYS when behind the camera: there
+			-- the projected magnitude is meaningless, only the direction survives.
+			local clamped = (dsign < 0) or ax > lim_x or ay > lim_y
+			-- The centre falloff, read HERE because dx/dy are still the raw offset from
+			-- the screen centre -- both branches below overwrite them (the unclamped one
+			-- to the straight-down (0, 1) the on-screen chevron used to want), so a
+			-- radius taken after this point is not the marker's radius.
+			--
+			-- THE PLACED WAYPOINT IS EXEMPT, and it is the only carve-out. It is the mark
+			-- most likely to sit dead centre for minutes at a stretch, because it is the
+			-- thing you are walking toward: fading it there takes away the mark you placed
+			-- by hand at exactly the moment it is telling you that you are on course.
+			-- Cyberpunk gets away with a centre fade because its centre marks are ambient
+			-- points of interest, not a chosen destination. The waypoint is already exempt
+			-- from beacon_dist and from beacon_color for the same shape of reason.
+			--
+			-- Tested on the TEXTURE and on e.wp, not on prio: prio 0 is shared by the
+			-- waypoint and by the SELECTED TASK'S marker (offer_waypoint and offer_task both
+			-- pass it), so a prio test would quietly exempt the objective too. The objective
+			-- is deliberately NOT exempt -- it is the marker most likely to be under the
+			-- crosshair while you are looking at something else, it never disappears (the
+			-- floor), and the route line on the ground is already saying the same thing.
+			-- The WAYPOINT'S ring is the second half of the same mark: a waypoint dropped ON
+			-- a body draws as that NPC's marker wearing that ring, and that is still the
+			-- mark the player placed.
+			--
+			-- WHICH IS WHY THE TEST NAMES THE RING IT MEANS (R2.63) rather than asking
+			-- whether there is one. `e.wp` became `e.ring` and grew a second value in the
+			-- same change -- the selected task's -- and `not e.ring` would have read as the
+			-- same test while quietly exempting the objective, which the paragraph above
+			-- spends its length explaining must NOT be exempt. Exactly the failure the
+			-- `prio` note warns about, arriving through the field that replaced the flag
+			-- the note was written about.
+			local cfade, csize = 1, 1
+			if ctr_r > 0 and not clamped
+			   and e.ring ~= BEACON_RING.wp and e.tex ~= BEACON_ICON.waypoint then
+				cfade, csize = ctr_fade(ax, ay, UI_KX)
+			end
+			local cx, cy                       -- chevron centre (the pointing end)
+			if clamped then
+				if ax < 0.001 and ay < 0.001 then
+					dx, dy = 0, lim_y          -- degenerate (dead centre / directly behind): park below
+				else
+					-- scale the direction onto the rect boundary; works for a point
+					-- inside it too, which is what the behind-camera case needs
+					local s = min((ax > 0.001) and (lim_x / ax) or 1e9,
+					              (ay > 0.001) and (lim_y / ay) or 1e9)
+					dx, dy = dx * s, dy * s
+				end
+				cx, cy = HALF_W + dx, HALF_H + dy
+			else
+				-- on-screen: the chevron sits just above the anchor, pointing down at it
+				cx, cy = px, py - BEACON_ABOVE
+				dx, dy = 0, 1
+			end
+
+			-- Direction in SCREEN space. The 1024x768 virtual UI stretches X by
+			-- w/1024 and Y by h/768, so a UI delta (dx, dy) points along
+			-- (dx/UI_KX, dy) once on screen -- which is also exactly the vector
+			-- SetHeading wants, since it scales a rotated element's X by UI_KX.
+			local sdx, sdy = dx / UI_KX, dy
+			local slen = sqrt(sdx * sdx + sdy * sdy)
+			if slen < 0.0001 then sdx, sdy, slen = 0, 1, 1 end
+			local nx, ny = sdx / slen, sdy / slen
+			local ang = atan2(-ny, nx)
+
+			-- Hand the badge a UI-space unit direction as well as the heading. It
+			-- places itself behind the chevron along that line, but only IT knows how
+			-- big it is (the badge is sized around the measured range string), so the
+			-- layout has to happen there rather than here.
+			local ulen = sqrt(dx * dx + dy * dy)
+			if ulen < 0.0001 then dx, dy, ulen = 0, 1, 1 end
+
+			local a = floor(beacon_alpha * e.mult * dim * cfade)
+			if a < 2 then
+				CARDS:hide_beacon(i)
+			else
+				-- pass the rounded metres, not a built string: draw_beacon rebuilds the
+				-- text only when the number changes (once per metre walked), so the
+				-- per-frame path allocates nothing
+				-- The size goes over MULTIPLIED rather than as a second argument: every
+				-- metric in draw_beacon is already derived from this one number each
+				-- frame, so the falloff needs no signature change and nothing downstream
+				-- has to know the feature exists.
+				CARDS:draw_beacon(i, cx, cy, dx / ulen, dy / ulen, ang, a,
+				                  beacon_range and floor(e.dist + 0.5) or nil,
+				                  C, beacon_size * csize, clamped, e)
+			end
+		end
+	end
+	-- Only down to last frame's high-water mark, the same bookkeeping hide_route does with
+	-- rg_used. hide_beacon already no-ops on an already-hidden set, but the call still
+	-- crosses the class metatable, and with the usual one or two markers up this loop was
+	-- making four or five of them every frame in perpetuity. The mark lives on the dialog
+	-- rather than in a file local because this module is close to the engine's 198-local
+	-- budget and the dialog is where the widgets' own state already lives.
+	for i = n + 1, (CARDS.bhigh or MAX_BEACONS) do CARDS:hide_beacon(i) end
+	CARDS.bhigh = n
+	_bn = 0
+end
+
+function hide_beacons(CARDS)
+	for i = 1, (CARDS.bhigh or MAX_BEACONS) do CARDS:hide_beacon(i) end
+	CARDS.bhigh = 0
+	_bn = 0
+end
+
+
+-- --------------------------------------------------------------------------
+-- Public: what iqm_core asks this module for
+-- --------------------------------------------------------------------------
+--- The role gate: [role] = true when that role should carry a marker.
+--
+--  The live TABLE, not a copy -- apply_config rebuilds its entries in place and never
+--  replaces it, so binding it once is enough. Two readers (iqm_core' render and
+--  iqm_scan's extras trim) and one writer, which is this file.
+function roles()
+	return beacon_roles
+end
+
+--- Re-poll the placed waypoint, the selected task AND the party list on the next call,
+--  rather than waiting out their throttles (250 ms for the first two, a second for the
+--  party). Used on a config change, where wp_on / task_on / party_on may have just moved --
+--  and ALL of them must be cleared, or turning a marker back on leaves it blank for up to
+--  a poll with no way to tell that from a broken switch. The party's is the longest of the
+--  three, so it is also the one where the delay would read worst.
+function wp_repoll()
+	_wp.t = 0
+	_tk.t = 0
+	_pt.t = 0                      -- ...and the party list, whose switch may have just moved too
+end
+
+-- --------------------------------------------------------------------------
+-- Config + startup
+-- --------------------------------------------------------------------------
+--- PULLED, not pushed: iqm_core calls this at the end of read_config, BEFORE
+--  iqm_scan's, because the extras scan's own reach is derived from the role gate this
+--  rebuilds. See the seam note at the top.
+function apply_config()
+	C = iqm_core.config()
+	beacon_tint = iqm_core.tint()
+	local bok = iqm_core.w2u()
+	-- Rebuild the role gate. Every entry is (feature available) AND (the role's card
+	-- is being detected) AND (the marker switch for it), so a role can never mark
+	-- something the scan isn't finding, and turning a card off takes its marker with it.
+	local br = beacon_roles
+	-- THE `target` ROLE CARRIES A MARKER AGAIN (R2.60), on its own switch, and this is
+	-- the one assignment R2.46's note said restoring it would cost.
+	--
+	-- R2.46 retired it (`br.target = nil`) because the marker had never asked which task
+	-- was SELECTED: it marked every in-progress hand-in NPC, up to MAX_BEACONS of them by
+	-- distance, so selecting a task on the PDA changed nothing on screen. task_goal /
+	-- offer_task fixed the selection half and took the role's marker with it, leaving one
+	-- objective mark -- the one with the bracket round it on the map.
+	--
+	-- WHAT THAT MISSED is that a hand-in you have not selected is still a hand-in, and it
+	-- was competing for the same body with an AMBIENT role. `target` is ROLE_PRIO 1 and
+	-- wins the CARD outright, but a markerless winner hands the MARKER down to whatever
+	-- markered role the same NPC also qualifies for (iqm_scan's want_marker, R2.58) --
+	-- so Col Petrenko in Rostok, a turn-in with a shop, drew REPORT BACK on his card and
+	-- the TRADER glyph through the wall, and the two views disagreed about the same man.
+	-- Reported exactly that way. want_marker is not the bug: it is what stopped him
+	-- drawing NOTHING, and it does the right thing the moment `target` is markered again.
+	--
+	-- ONE MARK PER BODY STILL HOLDS, BY PRECEDENCE (R2.60a). This role never fires on the
+	-- SELECTED task's body: iqm_core's tracked loop skips that id outright and offer_task
+	-- keeps it, at prio 0, at any range, wearing the KIND dressing (skull / red reticle).
+	-- Every OTHER pending hand-in is this role's, inside beacon_dist.
+	--
+	-- R2.60 SHIPPED IT THE OTHER WAY ROUND -- by range: inside beacon_dist `marked` saw this
+	-- role and the selected task's own offer stood down, past it the role was out of reach
+	-- and that offer drew. One mark either way, and the glyph is the same either way
+	-- (BEACON_ICON.target and BEACON_ICON.handin are both iqm_role_handin), so it read as
+	-- invisible. It was not. Two things crossed that boundary with it: mode 2's faction tint
+	-- and beacon_name's caption are both ROLE-marker business, so the selected task's mark
+	-- changed colour and grew a name at 60 m. And the mark lost prio 0 -- re-offered from the
+	-- loop it ranked ROLE_PRIO.target, tied with every other turn-in and broken on metres, so
+	-- six nearer ones inside beacon_dist evicted the task the player had actually selected.
+	-- That is R2.39's eviction bug arriving through a door prio 0 used to keep shut.
+	--
+	-- THE COST is what R2.46 removed on purpose, and it is now a switch rather than a
+	-- rule: every pending hand-in within beacon_dist can hold one of the MAX_BEACONS
+	-- slots. Bounded by that, by beacon_dist, and by prio -- objectives sort ahead of the
+	-- ambient band, so what a crowd of turn-ins can crowd out is a shop. They can also
+	-- crowd out EACH OTHER, on metres, since they share one priority; what they cannot
+	-- crowd out is the selected one, which is the whole reason it kept prio 0.
+	--
+	-- `~= false` rather than a plain truth test, the same shape beacon_handin uses below:
+	-- a settings file predating this option reads nil for the key, and nil has to mean the
+	-- SHIPPED behaviour rather than silently withholding the fix from every existing user.
+	--
+	-- Gated on mark_targets like every other role here -- a marker for a role the scan
+	-- isn't finding has nothing to mark -- and NOT on mark_beacon, which is the SELECTED
+	-- task's own row and stays about the mark this one defers to.
+	--
+	-- The extras reach still keys on br.guider/br.trader only, and correctly: quest
+	-- targets never come out of that scanner (iqm_scan, extras_scan_one's trim).
+	br.target    = (bok and C.mark_targets and C.beacon_targets ~= false) or nil
+	task_on      = (bok and C.mark_targets and C.mark_beacon) and true or false
+	-- Defaults TRUE, and the `~= false` rather than a plain truth test is deliberate: a
+	-- player whose settings predate this option has no stored value, so C.beacon_handin
+	-- reads nil, and nil must mean "gated" rather than "wide open". Getting that backwards
+	-- would silently hand every existing user the OP behaviour on upgrade.
+	task_handin  = C.beacon_handin ~= false
+	br.guider    = (bok and C.mark_guiders    and C.beacon_guiders)    or nil
+	-- the four service roles share one switch, as they share one card toggle
+	local svc = (bok and C.mark_traders and C.beacon_traders) or nil
+	br.trader, br.mechanic, br.barman, br.medic = svc, svc, svc, svc
+	-- The placed waypoint is NOT in that table and deliberately rides none of the card
+	-- roles: it is not an NPC the scan has to find, it is a position the player chose,
+	-- so it needs neither a card behind it nor mark_targets in front of it. Only the
+	-- projection binding and its own switch.
+	wp_on = (bok and C.beacon_waypoint) and true or false
+	-- ...and neither is the party, for the same shape of reason: a companion is not an NPC
+	-- the scan has to find, it is one you already recruited, so it needs no card behind it
+	-- and no mark_* in front of it. Only the projection binding, its own switch, and the
+	-- mod that keeps the party list -- a soft dependency, guarded here AND at the call site
+	-- so an install without it simply never offers one.
+	party_on = (bok and C.beacon_party and axr_companions) and true or false
+
+	beacon_edge  = C.beacon_edge
+	beacon_size  = C.beacon_size
+	beacon_alpha = C.beacon_a
+	beacon_range = C.beacon_range and true or false
+	-- The falloff radius is stored as a PERCENT of the half screen height and used as a
+	-- fraction, so the divide happens once here rather than per marker per frame. Nil-
+	-- guarded because a settings file predating the option reads nil, and nil / 100 is an
+	-- error rather than a zero -- which for this key means the whole render path, not one
+	-- row of the menu.
+	ctr_r    = (C.beacon_ctr or 0) / 100
+	ctr_amin = (C.beacon_ctr_a or 20) / 100
+	-- `~= false` rather than a plain truth test, the same shape beacon_handin uses: a
+	-- settings file predating this option reads nil, and nil has to mean the SHIPPED
+	-- behaviour (shrink on) rather than silently turning half the feature off on upgrade.
+	ctr_shrink = C.beacon_ctr_size ~= false
+end
+
+function on_game_start()
+	-- iqm_cards' drawing space, and iqm_core' object resolver. Bound here rather
+	-- than at file scope: by on_game_start every .script has finished loading, which
+	-- is what makes a mutual reference well-defined (see the seam note).
+	project_off, cards_kx, MAX_BEACONS =
+		iqm_cards.project_offscreen, iqm_cards.kx, iqm_cards.MAX_BEACONS
+	goal_pos    = iqm_core.goal_pos
+	task_target = iqm_core.active_task_target
+end

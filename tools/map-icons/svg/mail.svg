@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-mail">
+<!-- Envelope, the mark for a DELIVERY task, drawn inside the task reticle rather than in
+     a badge ring. Tabler Icons mail-filled (MIT).
+
+     WHAT IT MARKS. tasks_delivery gives you a package and a person to take it to. Its
+     stage 1 target is that person (tasks_delivery.script:188) and its stage_complete is
+     2, so the pin is on a NAMED NPC while the job is still outstanding - which is the
+     same shape as a bounty, and reads as exactly the same reticle without
+     a glyph to tell them apart. This is that glyph.
+
+     FILLED, NOT OUTLINE, for the reason recorded under OUTLINE in build.py: at the 26 px
+     the minimap draws these at, most of a thin-stroked mark's area is its black keyline,
+     and a mark's apparent colour is its mean over its own area. The filled envelope has
+     the ink to survive that; the outline version of this icon does not.
+
+     THE FLAP IS THE WHOLE ICON at this size. Envelope silhouettes are a rectangle, and a
+     rectangle inside a circular frame is just a blob; what makes this read as mail is the
+     V of the flap breaking the top edge. Tabler's filled variant draws that as a separate
+     path with a real gap under it, which is why this one works where a single-path
+     envelope would not. Check that gap survives if the glyph is ever swapped. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M22 7.535v9.465a3 3 0 0 1 -2.824 2.995l-.176 .005h-14a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-9.465l9.445 6.297l.116 .066a1 1 0 0 0 .878 0l.116 -.066l9.445 -6.297z" /><path d="M19 4c1.08 0 2.027 .57 2.555 1.427l-9.555 6.37l-9.555 -6.37a2.999 2.999 0 0 1 2.354 -1.42l.201 -.007h14z" /></svg>

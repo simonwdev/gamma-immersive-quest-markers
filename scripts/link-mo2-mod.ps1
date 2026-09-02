@@ -14,8 +14,9 @@ param(
     # Remove the junction instead of creating it
     [switch]$Remove,
 
-    # Mod folder name as it appears in MO2
-    [string]$Name = "Immersive Quest Markers"
+    # Mod folder name as it appears in MO2. Defaults to the repo folder name so
+    # the link is obviously a dev checkout rather than an installed copy.
+    [string]$Name = "[DEBUG] $(Split-Path (Split-Path $PSScriptRoot -Parent) -Leaf)"
 )
 
 $ErrorActionPreference = "Stop"

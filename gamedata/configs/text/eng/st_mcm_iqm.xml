@@ -3,14 +3,53 @@
 
 	<string id="ui_mcm_menu_iqm"><text>Immersive Quest Markers</text></string>
 
-	<!-- Tab (subpage) labels -->
-	<string id="ui_mcm_iqm_tab_core"><text>Core</text></string>
-	<string id="ui_mcm_iqm_tab_advanced"><text>Advanced</text></string>
+	<!-- Page (subpage) labels. One page per feature; each page carries that
+	     feature's fine tuning in an "Advanced" section of its own. -->
+	<string id="ui_mcm_iqm_tab_general"><text>General</text></string>
+	<string id="ui_mcm_iqm_tab_cards"><text>Nameplates</text></string>
+	<string id="ui_mcm_iqm_tab_beacons"><text>Waypoint markers</text></string>
+	<string id="ui_mcm_iqm_tab_worldview"><text>Route: ground</text></string>
+	<string id="ui_mcm_iqm_tab_minimap"><text>Route: minimap</text></string>
 
-	<!-- Card headers (shown on the card itself, not in MCM). Two grammars on
+	<!-- Section headers. These caption a group of options inside a page (MCM's
+	     "title" support element); they are not options and have no _desc. -->
+	<string id="ui_mcm_iqm_hdr_adv"><text>Advanced</text></string>
+
+	<string id="ui_mcm_iqm_hdr_reveal"><text>Hotkey</text></string>
+	<string id="ui_mcm_iqm_hdr_dim"><text>Fade in combat</text></string>
+	<string id="ui_mcm_iqm_hdr_noise"><text>Interference</text></string>
+	<string id="ui_mcm_iqm_hdr_route_shared"><text>Route</text></string>
+	<string id="ui_mcm_iqm_hdr_mapicons"><text>Map icons</text></string>
+
+	<string id="ui_mcm_iqm_hdr_roles"><text>Show for</text></string>
+	<string id="ui_mcm_iqm_hdr_faction"><text>Factions</text></string>
+	<string id="ui_mcm_iqm_hdr_look"><text>Appearance</text></string>
+	<string id="ui_mcm_iqm_hdr_vis"><text>Visibility</text></string>
+	<string id="ui_mcm_iqm_hdr_alert"><text>Alerts</text></string>
+	<string id="ui_mcm_iqm_hdr_accent"><text>Accent colour</text></string>
+	<string id="ui_mcm_iqm_hdr_card"><text>Nameplate</text></string>
+	<string id="ui_mcm_iqm_hdr_node"><text>Node and line</text></string>
+	<string id="ui_mcm_iqm_hdr_anchor"><text>Anchor</text></string>
+	<string id="ui_mcm_iqm_hdr_motion"><text>Motion</text></string>
+	<string id="ui_mcm_iqm_hdr_fade"><text>Fade</text></string>
+	<string id="ui_mcm_iqm_hdr_sound"><text>Sound</text></string>
+	<string id="ui_mcm_iqm_hdr_work"><text>Work detection</text></string>
+	<string id="ui_mcm_iqm_hdr_focus"><text>Focus</text></string>
+
+	<string id="ui_mcm_iqm_hdr_beacon"><text>Show for</text></string>
+
+	<!-- Shown in place of a route page's controls when quest target nameplates are
+	     off, since the route leads to the objective NPC and has nothing to point at. -->
+	<string id="ui_mcm_iqm_route_no_targets"><text>The route leads to the NPC your task points you at. Needs "Quest targets" on the Nameplates page.</text></string>
+
+	<!-- Card headers (shown on the nameplate itself, not in MCM). Two grammars on
 	     purpose: verb phrases for act-now state cards, terse nouns for the
 	     ambient service/identity cards (which also carry a role glyph). -->
 	<string id="st_iqm_hdr_target"><text>REPORT BACK</text></string>
+	<!-- The DELIVER-TO NPC (R2.55). A separate header from REPORT BACK on purpose:
+	     that one means the job is done and you are collecting, this one means it is not.
+	     Same verb-phrase grammar as the other state cards. -->
+	<string id="st_iqm_hdr_delivery"><text>DELIVER TO</text></string>
 	<string id="st_iqm_hdr_guide"><text>LOOKING FOR GUIDE</text></string>
 	<string id="st_iqm_hdr_companion"><text>LOOKING FOR WORK</text></string>
 	<string id="st_iqm_hdr_hire"><text>FOR HIRE</text></string>
@@ -44,142 +83,349 @@
 	<string id="st_iqm_hdr_work_survey"><text>HIRING: SURVEY</text></string>
 	<string id="st_iqm_hdr_work_special"><text>HIRING: SPECIAL</text></string>
 
-	<string id="ui_mcm_iqm_enabled"><text>Enable markers</text></string>
-	<string id="ui_mcm_iqm_enabled_desc"><text>Master on/off switch for the floating quest marker cards.</text></string>
+	<!-- ============================================================= General -->
 
-	<string id="ui_mcm_iqm_mark_targets"><text>Card quest targets</text></string>
-	<string id="ui_mcm_iqm_mark_targets_desc"><text>Show a card over the NPC the game is currently pointing you at for a task: the "go talk to X" step and the "return to the giver" turn-ins.</text></string>
-
-	<string id="ui_mcm_iqm_mark_guides"><text>Card the "needs a guide" NPC</text></string>
-	<string id="ui_mcm_iqm_mark_guides_desc"><text>Show a card over the stalker who is currently looking for a guide to escort them (the "Need a guide?" job). Detected via the guide job's own dialogue condition, so it matches exactly when that action is available, and only one stalker offers it at a time. Requires the guide-job system (ships with GAMMA); without it this has no effect.</text></string>
-
-	<string id="ui_mcm_iqm_mark_companions"><text>Card recruitable companions</text></string>
-	<string id="ui_mcm_iqm_mark_companions_desc"><text>Show a card ("LOOKING FOR WORK") over nearby friendly stalkers you could recruit as a companion right now, for free: friendly, part of a squad, and within your companion limit. Detected without a full scan. A party-full check skips it entirely when you can't recruit anyone, then only on-screen stalkers within the appear distance are tested, on a slow 3-second cadence. Uses the game's own recruit-dialog eligibility checks, so the card matches exactly when that dialogue option is available. Requires the companion system (ships with GAMMA); without it this has no effect.</text></string>
-
-	<string id="ui_mcm_iqm_mark_hires"><text>Card stalkers you can hire</text></string>
-	<string id="ui_mcm_iqm_mark_hires_desc"><text>Show a card ("FOR HIRE") over nearby stalkers who would take money to leave their squad and work as your escort, the paid version of the companion dialogue. These are a different set of NPCs from the free recruits: hiring is for neutral stalkers, and only from the factions that sell escort duty (Loners, Freedom, Mercenaries, Bandits). It is also unavailable on the dangerous maps and under Warfare, and only veteran and advanced squads take escort work at all � so this card is genuinely rare, and a stalker without one is not a detection failure. Because the game decides a squad's answer the first time it is asked, the card asks on your behalf when you are already next to them and on-screen, which is what lets it match the dialogue exactly (including the card clearing once a squad turns you down). Uses the same slow 3-second on-screen scan. Requires the paid-companion system (ships with GAMMA); without it this has no effect.</text></string>
-
-	<string id="ui_mcm_iqm_mark_guiders"><text>Card guide NPCs</text></string>
-	<string id="ui_mcm_iqm_mark_guiders_desc"><text>Show a card ("GUIDE" plus the guide glyph) over NPCs offering fast-travel guide services, the ones your PDA marks with the Guide icon. The Service card style option below can switch it to an icon-only chip or plain text. Detected from the engine's own PDA map-spot registry, so it always matches the map legend.</text></string>
-
-	<string id="ui_mcm_iqm_mark_traders"><text>Card service NPCs</text></string>
-	<string id="ui_mcm_iqm_mark_traders_desc"><text>Show a card over traders, technicians, barkeeps and medics, each with its header ("TRADER" / "TECHNICIAN" / "BARKEEP" / "MEDIC") and role glyph. The Service card style option below can switch them to icon-only chips or plain text. Detected from the engine's PDA map-spot registry; the exact service is read from the NPC's actual trade file, so a technician labelled as a trader by the level still shows the technician glyph.</text></string>
-
-	<string id="ui_mcm_iqm_mark_important"><text>Card important characters</text></string>
-	<string id="ui_mcm_iqm_mark_important_desc"><text>Show a card ("VIP" plus a star glyph) over story and faction important characters, the ones your PDA marks with the Important Character or quest-NPC icon. The Service card style option below can switch it to an icon-only chip or plain text. Off by default, since busy hubs already show plenty of cards.</text></string>
-
-	<string id="ui_mcm_iqm_mark_work"><text>Card NPCs with work available (Experimental)</text></string>
-	<string id="ui_mcm_iqm_mark_work_desc"><text>EXPERIMENTAL: this option queries the game's task system, a heavy lookup the base game only runs when a dialogue or the PDA taskboard opens. The checks are cached and strictly rationed, but if you notice stutter around camps, turn this off. Shows a card ("HIRING", plus the job kind when known, such as "HIRING: BOUNTY" or "HIRING: MUTANT HUNT") over any friendly stalker who would actually offer you a task if you asked. The card matches the dialogue exactly: no card means "Nothing at the moment", a card means a job is on offer. It also hides while you already hold the maximum number of tasks from that NPC. Answers come from the task system's own per-NPC memory (refreshed every 1.5 in-game hours); NPCs not yet in it are checked one at a time on a slow budget (see "Actively check for work" on the Advanced tab).</text></string>
-
-	<string id="ui_mcm_iqm_faction_colors"><text>Use faction colours</text></string>
-	<string id="ui_mcm_iqm_faction_colors_desc"><text>Tint each card (the leader line, edge bar, header text and head node) with the NPC's faction colour instead of the default gold accent. Colours match the faction palette used by the GAMMA DB site. NPCs of a factionless community (e.g. zombies, monsters) keep the gold accent.</text></string>
-
-	<string id="ui_mcm_iqm_faction_icons"><text>Show faction emblems</text></string>
-	<string id="ui_mcm_iqm_faction_icons_desc"><text>Show the NPC's faction emblem on the state cards (quest turn-in, "needs a guide", recruitable companion, stalker for hire), inlined before the text. Service and important-character cards keep their role glyph (trader, medic, guide, etc.) instead. The emblems are the game's own PDA faction patches (from G.A.M.M.A. UI, so they match the faction-relations screen and any HD patch mod you have installed). NPCs of a factionless community show no emblem.</text></string>
-
-	<string id="ui_mcm_iqm_short_ranks"><text>Abbreviate NPC ranks</text></string>
-	<string id="ui_mcm_iqm_short_ranks_desc"><text>Shorten a long military rank at the start of an NPC's name so it fits the card: "Senior Sergeant Abdurakhmanov" becomes "Snr Sgt Abdurakhmanov". Only the leading rank is abbreviated; the surname is left alone. Mostly affects Duty and Military stalkers.</text></string>
-
-	<string id="ui_mcm_iqm_role_style"><text>Service card style</text></string>
-	<string id="ui_mcm_iqm_role_style_desc"><text>How the service/important cards (trader, technician, barkeep, medic, guide, important character) are drawn. "Icon chip": a compact plate with just the role glyph. "Text + icon": the full card with header, name and the glyph. "Text only": the full card with no glyph. The glyphs are bundled with the mod, so this works on its own.</text></string>
-	<string id="ui_mcm_lst_iqm_style_text"><text>Text only</text></string>
-	<string id="ui_mcm_lst_iqm_style_mixed"><text>Text + icon</text></string>
-	<string id="ui_mcm_lst_iqm_style_chip"><text>Icon chip</text></string>
+	<string id="ui_mcm_iqm_enabled"><text>Enable</text></string>
+	<string id="ui_mcm_iqm_enabled_desc"><text>Master switch for the whole mod.</text></string>
 
 	<!-- Reveal hotkey. The modifier values and the first three mode values are MCM's own
 	     "mcm_kb_mod_*" / "mcm_kb_mode_*" ids, so their labels come from MCM's string
 	     table and must not be repeated here. Only the captions and the fourth mode
 	     (hold-to-show, which MCM has no equivalent for) are ours. -->
-	<string id="ui_mcm_iqm_reveal_mode"><text>Reveal activation mode</text></string>
-	<string id="ui_mcm_iqm_reveal_mode_desc"><text>What the reveal key does. The first three flip the cards on and off with a simple press, a double tap or a long press; their tap window and press time are the shared ones from MCM's own Key Binds settings, so they match every other mod that uses them. "Hold to show" instead keeps the cards up only while the key is held down, so the world stays clean until you ask. Detection keeps running while the cards are hidden either way, so they reappear instantly with no rescan, and a card's chirp and entrance animation are not replayed. Has no effect until a key is bound above.</text></string>
-	<string id="ui_mcm_lst_iqm_reveal_hold"><text>Hold to show</text></string>
 
 	<!-- MCM copies every key_bind into its global "Key Binds" page, where this caption
 	     appears alongside every other mod's, so it names the mod as MCM's docs ask. -->
-	<string id="ui_mcm_iqm_reveal_key"><text>Reveal cards (Immersive Quest Markers)</text></string>
-	<string id="ui_mcm_iqm_reveal_key_desc"><text>The key that shows and hides the cards, using the activation mode below. Left unbound (the default) the cards are always shown whenever they qualify, which is the behaviour from before the hotkey existed.</text></string>
+	<string id="ui_mcm_iqm_reveal_key"><text>Reveal nameplates (Immersive Quest Markers)</text></string>
+	<string id="ui_mcm_iqm_reveal_key_desc"><text>Shows and hides nameplates. Unbound (the default) means always shown.</text></string>
 
-	<string id="ui_mcm_iqm_reveal_no_mcm"><text>The reveal hotkey needs MCM 1.6.0 or newer. Update MCM to bind a key; until then the cards are always shown.</text></string>
+	<string id="ui_mcm_iqm_reveal_mode"><text>Mode</text></string>
+	<string id="ui_mcm_iqm_reveal_mode_desc"><text>How the key acts. Press, double tap and long press toggle nameplates on and off; their timings come from MCM's own Key Binds page. "Hold to show" keeps them up only while the key is held. Detection keeps running while they are hidden, so nothing is rescanned when they return.</text></string>
+	<string id="ui_mcm_lst_iqm_reveal_hold"><text>Hold to show</text></string>
 
-	<string id="ui_mcm_iqm_show_node"><text>Show head node dot</text></string>
-	<string id="ui_mcm_iqm_show_node_desc"><text>Draw the small dot at the NPC's head where the leader line begins. Turn off for just the line and card.</text></string>
+	<string id="ui_mcm_iqm_reveal_no_mcm"><text>The hotkey needs MCM 1.6.0 or newer. Until then nameplates are always shown.</text></string>
 
-	<string id="ui_mcm_iqm_node_pulse"><text>Pulse the node glow</text></string>
-	<string id="ui_mcm_iqm_node_pulse_desc"><text>Gently breathe the soft glow halo around the head node dot (a slow, subtle pulse) to draw the eye to the objective. The dot itself stays steady. Turn off for a completely static glow.</text></string>
+	<string id="ui_mcm_iqm_dim_hold"><text>Fade duration (0.1s)</text></string>
+	<string id="ui_mcm_iqm_dim_hold_desc"><text>Fades nameplates and waypoint markers down while the weapon is busy, so they sit out of the way of the sights. Triggered by aiming, firing, taking fire, reloading and clearing a jam; this is how long it lasts after the last of those. Aiming holds the fade until the sights come down. 0 turns the whole feature off. Default 15 (1.5s).</text></string>
 
-	<string id="ui_mcm_iqm_sound_alert"><text>PDA chirp on sighting</text></string>
-	<string id="ui_mcm_iqm_sound_alert_desc"><text>Play a subtle PDA alert beep the first time each NPC's card comes into view. A per-NPC cooldown stops brief glances or the NPC ducking behind cover from re-triggering it.</text></string>
+	<string id="ui_mcm_iqm_dim_level"><text>Faded opacity (%)</text></string>
+	<string id="ui_mcm_iqm_dim_level_desc"><text>How far down they fade, as a percentage of normal. They stay readable rather than disappearing, so nothing pops in and out mid-firefight. 0 hides them completely. Default 35.</text></string>
 
-	<string id="ui_mcm_iqm_sound_vol"><text>PDA chirp volume</text></string>
-	<string id="ui_mcm_iqm_sound_vol_desc"><text>Loudness of the PDA sighting chirp (0 = silent, 1 = full). Only applies when "PDA chirp on sighting" is on.</text></string>
+	<string id="ui_mcm_iqm_dim_cards"><text>Fade nameplates</text></string>
+	<string id="ui_mcm_iqm_dim_cards_desc"><text>Include the NPC nameplates in the fade. Default on.</text></string>
+
+	<string id="ui_mcm_iqm_dim_beacons"><text>Fade waypoint markers</text></string>
+	<string id="ui_mcm_iqm_dim_beacons_desc"><text>Include the through-wall waypoint markers in the fade. Default on.</text></string>
+
+	<string id="ui_mcm_iqm_noise"><text>Interference in the Zone</text></string>
+	<string id="ui_mcm_iqm_noise_desc"><text>During an emission and inside a psi zone, the overlay stops holding still: the marks tear sideways in bands, their outlines separate into a coloured fringe, the range readout starts printing the wrong digit, and at the worst of it the whole thing drops out for a beat at a time. It builds and fades with the emission itself, eases off when you are under cover, and settles as soon as you are clear. Default on.</text></string>
+
+	<string id="ui_mcm_iqm_noise_amt"><text>Interference strength (%)</text></string>
+	<string id="ui_mcm_iqm_noise_amt_desc"><text>How hard it pushes. Scales how far the marks move and how wide the colour fringe gets; it does not change the order the effects arrive in. Below about 50 the tear stops being visible on a low-resolution screen. Default 100.</text></string>
+
+	<string id="ui_mcm_iqm_noise_giveup"><text>Let it cut out entirely</text></string>
+	<string id="ui_mcm_iqm_noise_giveup_desc"><text>At the very peak of an emission or a strong psi field, allow the overlay to stop drawing altogether instead of fading to a faint floor. Atmospheric, but a marker that is gone looks exactly like a marker that failed, so it is off by default and the marks stay just visible instead. Default off.</text></string>
+
+	<string id="ui_mcm_iqm_route_gap"><text>Chevron spacing (m)</text></string>
+	<string id="ui_mcm_iqm_route_gap_desc"><text>Metres of path between direction marks. Shared by both route views: it also sets how dense the minimap trail is. Default 3.</text></string>
+
+	<string id="ui_mcm_iqm_route_flow"><text>Flow speed (0.1 m/s)</text></string>
+	<string id="ui_mcm_iqm_route_flow_desc"><text>Slides the route marks toward your objective instead of holding them on fixed ground. 0 is off. 15 is a walking pace; past 40 the run reads as a flicker. Default 0.</text></string>
+
+	<string id="ui_mcm_iqm_map_icons"><text>This mod's map icons (needs restart)</text></string>
+	<string id="ui_mcm_iqm_map_icons_desc"><text>Replace the PDA map and minimap spot icons, and the PDA symbols legend, with this mod's own. Off keeps whatever the rest of your setup draws. The game reads icon definitions once at startup, so a change applies at the next launch, not on loading a save.</text></string>
+	<string id="ui_mcm_iqm_map_task_kinds"><text>Mutant hunts and bounties</text></string>
+	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>A skull on a mutant hunt, a red reticle on a bounty. Both return to the plain task marker once the objective is done and the job only needs handing in. Applies immediately, and turning it off puts every marker back. Needs "This mod's map icons".</text></string>
+	<string id="ui_mcm_iqm_map_spot_names"><text>Name the NPCs on the map</text></string>
+	<string id="ui_mcm_iqm_map_spot_names_desc"><text>Put an NPC's own name in the tooltip you get by hovering their pin on the PDA map, alongside what they do: traders, technicians, bartenders, medics, guides and important characters. Applies immediately, and turning it off puts the plain wording back.</text></string>
+	<string id="ui_mcm_iqm_map_hide_companions"><text>No squad dot on your companions</text></string>
+	<string id="ui_mcm_iqm_map_hide_companions_desc"><text>Your own companions keep drawing the ordinary faction squad dot on the PDA map and the minimap, a step behind your own arrow, telling you where somebody you are walking with is. This takes it off. Every other squad in the Zone is untouched. Applies immediately, and turning it off puts the dots straight back.</text></string>
+	<!-- The composed map tooltip. %s1 is the NPC's name, %s2 the role word the game
+	     already uses for that pin ("Trader", "Technician", "Bartender", "Medic").
+	     Reorder the two if that reads better in your language. -->
+	<string id="st_iqm_spot_named"><text>%s - %s</text></string>
+	<string id="ui_mcm_iqm_debug_log"><text>Diagnostic logging</text></string>
+	<string id="ui_mcm_iqm_debug_log_desc"><text>Write IQM debug lines to the console and log. For troubleshooting.</text></string>
+
+	<!-- ========================================================== Nameplates -->
+
+	<string id="ui_mcm_iqm_mark_targets"><text>Quest targets</text></string>
+	<string id="ui_mcm_iqm_mark_targets_desc"><text>NPCs a task points you at: the "go talk to X" step and the turn-in.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guides"><text>Needs a guide</text></string>
+	<string id="ui_mcm_iqm_mark_guides_desc"><text>The stalker currently asking to be escorted. Only one offers it at a time. Read from the guide job's own dialogue condition, so it matches exactly when that option is available.</text></string>
+
+	<string id="ui_mcm_iqm_mark_companions"><text>Recruitable companions</text></string>
+	<string id="ui_mcm_iqm_mark_companions_desc"><text>Friendly stalkers you can recruit for free right now: in a squad, and within your companion limit. Uses the game's own recruit-dialogue checks, so the nameplate matches when that option is available.</text></string>
+
+	<string id="ui_mcm_iqm_mark_hires"><text>Stalkers for hire</text></string>
+	<string id="ui_mcm_iqm_mark_hires_desc"><text>Stalkers who will take money to escort you, the paid version of the companion dialogue. Genuinely rare: only neutral stalkers, only from Loners, Freedom, Mercenaries and Bandits, only veteran and advanced squads, never on the dangerous maps or under Warfare. A stalker without one is not a detection failure.</text></string>
+
+	<string id="ui_mcm_iqm_mark_guiders"><text>Guides</text></string>
+	<string id="ui_mcm_iqm_mark_guiders_desc"><text>NPCs offering fast travel. Read from the PDA map-spot registry, so it always matches the map legend.</text></string>
+
+	<string id="ui_mcm_iqm_mark_traders"><text>Services</text></string>
+	<string id="ui_mcm_iqm_mark_traders_desc"><text>Traders, technicians, barkeeps and medics, each with its own header and glyph. The trade is read from the NPC's actual trade file, so a technician the level labels as a trader still shows the technician glyph.</text></string>
+
+	<string id="ui_mcm_iqm_mark_important"><text>Important characters</text></string>
+	<string id="ui_mcm_iqm_mark_important_desc"><text>Story and faction VIPs, the ones your PDA marks with the Important Character icon. Off by default: busy hubs already show plenty.</text></string>
+
+	<string id="ui_mcm_iqm_mark_work"><text>Work available (experimental)</text></string>
+	<string id="ui_mcm_iqm_mark_work_desc"><text>Friendly stalkers who would offer you a task if you asked, with the job kind when known ("HIRING: BOUNTY"). No nameplate means "Nothing at the moment". Experimental: this queries the task system, a heavy lookup the base game only runs when a dialogue or the taskboard opens. Checks are cached and rationed, but turn it off if camps stutter.</text></string>
+
+	<string id="ui_mcm_iqm_faction_colors"><text>Faction colours</text></string>
+	<string id="ui_mcm_iqm_faction_colors_desc"><text>Tint the nameplate with the NPC's faction colour instead of the accent. Factionless NPCs keep the accent.</text></string>
+
+	<string id="ui_mcm_iqm_faction_icons"><text>Faction emblems</text></string>
+	<string id="ui_mcm_iqm_faction_icons_desc"><text>Show the NPC's faction patch on quest, guide, companion and hire nameplates. Service and VIP nameplates keep their role glyph instead.</text></string>
+
+	<string id="ui_mcm_iqm_role_style"><text>Service style</text></string>
+	<string id="ui_mcm_iqm_role_style_desc"><text>How service and VIP nameplates are drawn. Icon chip is a compact plate with just the glyph.</text></string>
+	<string id="ui_mcm_lst_iqm_style_text"><text>Text only</text></string>
+	<string id="ui_mcm_lst_iqm_style_mixed"><text>Text + icon</text></string>
+	<string id="ui_mcm_lst_iqm_style_chip"><text>Icon chip</text></string>
+
+	<string id="ui_mcm_iqm_short_ranks"><text>Abbreviate ranks</text></string>
+	<string id="ui_mcm_iqm_short_ranks_desc"><text>"Senior Sergeant Abdurakhmanov" becomes "Snr Sgt Abdurakhmanov". Only the leading rank is shortened.</text></string>
 
 	<string id="ui_mcm_iqm_appear_dist"><text>Appear distance (m)</text></string>
-	<string id="ui_mcm_iqm_appear_dist_desc"><text>How far away the card starts to fade in as you approach. Beyond this it is hidden.</text></string>
+	<string id="ui_mcm_iqm_appear_dist_desc"><text>Range at which the nameplate starts to fade in. Hidden beyond it.</text></string>
 
-	<string id="ui_mcm_iqm_full_dist"><text>Full-opacity distance (m)</text></string>
-	<string id="ui_mcm_iqm_full_dist_desc"><text>Within this range the card is fully solid. Between this and the appear distance it fades. Keep it below the appear distance.</text></string>
+	<string id="ui_mcm_iqm_los_check"><text>Line of sight</text></string>
+	<string id="ui_mcm_iqm_los_check_desc"><text>Hide the nameplate when the NPC is behind cover. Needs the shared demonized_geometry_ray utility (bundled with many GAMMA mods); without it this has no effect.</text></string>
 
-	<string id="ui_mcm_iqm_los_check"><text>Line-of-sight check</text></string>
-	<string id="ui_mcm_iqm_los_check_desc"><text>Hide the card when the NPC is behind a wall or other cover, instead of showing through it. Requires the shared demonized_geometry_ray utility (bundled with many GAMMA mods, including both Catspaw addons); without it this setting has no effect.</text></string>
+	<string id="ui_mcm_iqm_focus_mode"><text>Focus on the crosshair</text></string>
+	<string id="ui_mcm_iqm_focus_mode_desc"><text>Fade out nameplates away from the centre of the screen, so only the person you are looking at is named. Off shows every nameplate at once, as before. Ambient only leaves the objective, guide, recruit and hire nameplates always visible and focuses the service and HIRING ones. All but objective also focuses the guide, recruit and hire nameplates. Everything focuses the objective too.</text></string>
 
-	<string id="ui_mcm_iqm_los_rate"><text>Line-of-sight check rate (ms)</text></string>
-	<string id="ui_mcm_iqm_los_rate_desc"><text>How often each NPC's line of sight is re-tested. Lower reacts faster to going behind cover but costs more performance; higher is cheaper but slower to hide. Default 150.</text></string>
+	<string id="ui_mcm_lst_iqm_focus_off"><text>Off</text></string>
+	<string id="ui_mcm_lst_iqm_focus_ambient"><text>Ambient only</text></string>
+	<string id="ui_mcm_lst_iqm_focus_state"><text>All but objective</text></string>
+	<string id="ui_mcm_lst_iqm_focus_all"><text>Everything</text></string>
 
-	<string id="ui_mcm_iqm_los_grace"><text>Line-of-sight grace (ms)</text></string>
-	<string id="ui_mcm_iqm_los_grace_desc"><text>How long the card keeps showing after the NPC slips behind cover, to stop flicker from brief or partial occlusions (a doorway, a passing object). Higher is steadier but lingers longer through cover; 0 hides the instant line of sight is lost. Default 250.</text></string>
+	<string id="ui_mcm_iqm_focus_radius"><text>Focus radius (%)</text></string>
+	<string id="ui_mcm_iqm_focus_radius_desc"><text>How far from the crosshair a nameplate still counts as focused, as a percentage of half the screen height -- the same scale as the waypoint markers' centre falloff, so 50 here is the same circle as 50 there. Aiming down sights narrows what this covers in the world, since the view is magnified into the same circle.</text></string>
 
-	<string id="ui_mcm_iqm_head_lift"><text>Anchor vertical offset (m)</text></string>
-	<string id="ui_mcm_iqm_head_lift_desc"><text>Nudge the node up (+) or down (-) from the NPC's left-shoulder bone. The default (0) sits right on the shoulder near the neck; negative drops it toward the mid-left torso.</text></string>
+	<string id="ui_mcm_iqm_focus_soft"><text>Soft edge (%)</text></string>
+	<string id="ui_mcm_iqm_focus_soft_desc"><text>How much of the radius is a fade rather than a boundary. 0 makes nameplates pop as they cross the edge; 100 fades from the very centre outward.</text></string>
 
-	<string id="ui_mcm_iqm_head_side"><text>Anchor horizontal offset (m)</text></string>
-	<string id="ui_mcm_iqm_head_side_desc"><text>Manual sideways nudge along the NPC's own body axis, toward their right (+) or left (-). Tracks their facing as they turn. Added on top of the auto shoulder placement below.</text></string>
+	<string id="ui_mcm_iqm_focus_floor"><text>Unfocused opacity (%)</text></string>
+	<string id="ui_mcm_iqm_focus_floor_desc"><text>How visible a nameplate outside the circle stays. 0 hides it completely; raise it to quieten the rest of the screen rather than clear it.</text></string>
 
-	<string id="ui_mcm_iqm_auto_side"><text>Auto shoulder side (no body crossing)</text></string>
-	<string id="ui_mcm_iqm_auto_side_desc"><text>Automatically place the node on whichever shoulder sits on the card's side of the screen, so the leader line meets the near shoulder instead of crossing the NPC's body. Both shoulders are tested on-screen and the one toward the card is picked, so it works at any camera angle and NPC facing. Turn off to place the node purely with the manual offset above.</text></string>
+	<string id="ui_mcm_iqm_sound_alert"><text>PDA chirp</text></string>
+	<string id="ui_mcm_iqm_sound_alert_desc"><text>Beep the first time each NPC's nameplate comes into view. A per-NPC cooldown stops brief glances re-triggering it.</text></string>
 
-	<string id="ui_mcm_iqm_side_amt"><text>Auto shoulder distance (m)</text></string>
-	<string id="ui_mcm_iqm_side_amt_desc"><text>How far onto the shoulder the auto placement pushes the node (roughly a torso half-width). Only used when Auto shoulder side is on.</text></string>
+	<!-- ---- Nameplates: Advanced ---- -->
 
-	<string id="ui_mcm_iqm_card_off_x"><text>Card offset X (px)</text></string>
-	<string id="ui_mcm_iqm_card_off_x_desc"><text>Horizontal distance from the head to the card. The card flips to the other side automatically near the screen edge.</text></string>
+	<string id="ui_mcm_iqm_col_a"><text>Alpha</text></string>
+	<string id="ui_mcm_iqm_col_a_desc"><text>Master alpha of the accent: line, edge bar, header and node.</text></string>
+	<string id="ui_mcm_iqm_col_r"><text>Red</text></string>
+	<string id="ui_mcm_iqm_col_r_desc"><text>Red channel of the accent (0-255). Default 224.</text></string>
+	<string id="ui_mcm_iqm_col_g"><text>Green</text></string>
+	<string id="ui_mcm_iqm_col_g_desc"><text>Green channel of the accent (0-255). Default 196.</text></string>
+	<string id="ui_mcm_iqm_col_b"><text>Blue</text></string>
+	<string id="ui_mcm_iqm_col_b_desc"><text>Blue channel of the accent (0-255). Default 122, a soft desaturated gold.</text></string>
 
-	<string id="ui_mcm_iqm_card_off_y"><text>Card offset Y (px)</text></string>
-	<string id="ui_mcm_iqm_card_off_y_desc"><text>How far above the head the card floats.</text></string>
+	<string id="ui_mcm_iqm_card_off_x"><text>Offset X (px)</text></string>
+	<string id="ui_mcm_iqm_card_off_x_desc"><text>Horizontal distance from the head to the nameplate. It flips side automatically near the screen edge.</text></string>
 
-	<string id="ui_mcm_iqm_line_thick"><text>Leader line thickness (px)</text></string>
-	<string id="ui_mcm_iqm_line_thick_desc"><text>Thickness of the diagonal line connecting the head to the card.</text></string>
+	<string id="ui_mcm_iqm_card_off_y"><text>Offset Y (px)</text></string>
+	<string id="ui_mcm_iqm_card_off_y_desc"><text>How far above the head the nameplate floats.</text></string>
 
-	<string id="ui_mcm_iqm_line_a"><text>Leader line opacity</text></string>
-	<string id="ui_mcm_iqm_line_a_desc"><text>Opacity of the leader line at full visibility (0 = invisible, 255 = solid).</text></string>
+	<string id="ui_mcm_iqm_card_a"><text>Opacity</text></string>
+	<string id="ui_mcm_iqm_card_a_desc"><text>Opacity of the dark plate at full visibility (0-255).</text></string>
 
-	<string id="ui_mcm_iqm_card_a"><text>Card opacity</text></string>
-	<string id="ui_mcm_iqm_card_a_desc"><text>Opacity of the dark card plate at full visibility (0 = invisible, 255 = solid).</text></string>
+	<string id="ui_mcm_iqm_show_node"><text>Show node</text></string>
+	<string id="ui_mcm_iqm_show_node_desc"><text>Draw the dot at the NPC where the leader line begins.</text></string>
 
-	<string id="ui_mcm_iqm_node_size"><text>Head node size (px)</text></string>
-	<string id="ui_mcm_iqm_node_size_desc"><text>Full size of the round dot at the NPC's head, reached when you are within the full-opacity distance. Ignored when Show head node dot is off.</text></string>
+	<string id="ui_mcm_iqm_node_pulse"><text>Pulse glow</text></string>
+	<string id="ui_mcm_iqm_node_pulse_desc"><text>Slowly breathe the halo around the node. The dot itself stays steady.</text></string>
 
-	<string id="ui_mcm_iqm_node_min"><text>Head node min size (far)</text></string>
-	<string id="ui_mcm_iqm_node_min_desc"><text>How small the dot shrinks at the appear distance, as a fraction of its full size. It grows smoothly to full size as you approach. 1.0 = no distance scaling.</text></string>
+	<string id="ui_mcm_iqm_node_size"><text>Node size (px)</text></string>
+	<string id="ui_mcm_iqm_node_size_desc"><text>Full size of the node dot, reached inside the full-opacity distance.</text></string>
+
+	<string id="ui_mcm_iqm_node_min"><text>Node size at range</text></string>
+	<string id="ui_mcm_iqm_node_min_desc"><text>How small the dot shrinks at the appear distance, as a fraction of full size. 1.0 = no distance scaling.</text></string>
+
+	<string id="ui_mcm_iqm_line_thick"><text>Line thickness (px)</text></string>
+	<string id="ui_mcm_iqm_line_thick_desc"><text>Thickness of the leader line from the node to the nameplate.</text></string>
+
+	<string id="ui_mcm_iqm_line_a"><text>Line opacity</text></string>
+	<string id="ui_mcm_iqm_line_a_desc"><text>Opacity of the leader line at full visibility (0-255).</text></string>
+
+	<string id="ui_mcm_iqm_head_lift"><text>Vertical offset (m)</text></string>
+	<string id="ui_mcm_iqm_head_lift_desc"><text>Nudge the node up (+) or down (-) from the NPC's shoulder bone. 0 sits on the shoulder near the neck.</text></string>
+
+	<string id="ui_mcm_iqm_head_side"><text>Horizontal offset (m)</text></string>
+	<string id="ui_mcm_iqm_head_side_desc"><text>Nudge the node along the NPC's own body axis, right (+) or left (-). Tracks their facing. Added on top of the auto placement below.</text></string>
+
+	<string id="ui_mcm_iqm_auto_side"><text>Auto shoulder side</text></string>
+	<string id="ui_mcm_iqm_auto_side_desc"><text>Put the node on whichever shoulder is on the nameplate's side of the screen, so the leader line does not cross the NPC's body.</text></string>
+
+	<string id="ui_mcm_iqm_side_amt"><text>Shoulder distance (m)</text></string>
+	<string id="ui_mcm_iqm_side_amt_desc"><text>How far onto the shoulder the auto placement pushes the node, roughly a torso half-width.</text></string>
 
 	<string id="ui_mcm_iqm_smoothing"><text>Smoothing</text></string>
-	<string id="ui_mcm_iqm_smoothing_desc"><text>How quickly the card eases toward the NPC's head. 1 = instant (snaps / jitters), lower = smoother but laggier. Framerate-independent. Default 0.35.</text></string>
+	<string id="ui_mcm_iqm_smoothing_desc"><text>How quickly the nameplate eases toward the NPC. 1 = instant, lower = smoother but laggier. Framerate-independent. Default 0.35.</text></string>
 
 	<string id="ui_mcm_iqm_snap_dist"><text>Snap distance (px)</text></string>
-	<string id="ui_mcm_iqm_snap_dist_desc"><text>Position jumps larger than this teleport instead of gliding, so the card doesn't slide across the screen when the NPC's head first appears or moves suddenly.</text></string>
+	<string id="ui_mcm_iqm_snap_dist_desc"><text>Position jumps larger than this teleport instead of gliding, so the nameplate does not slide across the screen when the NPC first appears.</text></string>
 
-	<string id="ui_mcm_iqm_col_a"><text>Accent colour: alpha</text></string>
-	<string id="ui_mcm_iqm_col_a_desc"><text>Master alpha of the accent (line / edge bar / header / node).</text></string>
-	<string id="ui_mcm_iqm_col_r"><text>Accent colour: red</text></string>
-	<string id="ui_mcm_iqm_col_r_desc"><text>Red component of the accent colour (0-255).</text></string>
-	<string id="ui_mcm_iqm_col_g"><text>Accent colour: green</text></string>
-	<string id="ui_mcm_iqm_col_g_desc"><text>Green component of the accent colour (0-255).</text></string>
-	<string id="ui_mcm_iqm_col_b"><text>Accent colour: blue</text></string>
-	<string id="ui_mcm_iqm_col_b_desc"><text>Blue component of the accent colour (0-255). Defaults give a soft desaturated gold (224, 196, 122).</text></string>
+	<string id="ui_mcm_iqm_full_dist"><text>Full-opacity distance (m)</text></string>
+	<string id="ui_mcm_iqm_full_dist_desc"><text>Inside this range the nameplate is solid; between it and the appear distance it fades. Keep it below the appear distance.</text></string>
 
-	<string id="ui_mcm_iqm_work_probe"><text>Actively check for work</text></string>
-	<string id="ui_mcm_iqm_work_probe_desc"><text>Let the work detector query the task system for NPCs it hasn't seen an answer for yet (at most one NPC every 0.3 s, nearest first). This does exactly what opening the NPC's dialogue does, including rolling whether they have a task this cycle, just a little earlier: their offered task is decided when the card appears rather than when you talk. Turn off to make the detector purely passive. Cards then only appear for NPCs whose work status the game has already determined, e.g. you talked to them within the last 1.5 in-game hours, or the PDA job scan covered them.</text></string>
+	<string id="ui_mcm_iqm_los_rate"><text>Check rate (ms)</text></string>
+	<string id="ui_mcm_iqm_los_rate_desc"><text>How often each NPC's line of sight is re-tested. Lower reacts faster and costs more. Default 150.</text></string>
 
-	<string id="ui_mcm_iqm_debug_log"><text>Diagnostic logging</text></string>
-	<string id="ui_mcm_iqm_debug_log_desc"><text>Write IQM diagnostic lines (line-of-sight checks, card-slot overflow, sound playback, per-slot coords) to the console/log. For troubleshooting; off by default.</text></string>
+	<string id="ui_mcm_iqm_los_grace"><text>Grace (ms)</text></string>
+	<string id="ui_mcm_iqm_los_grace_desc"><text>How long the nameplate lingers after cover breaks line of sight, to stop flicker from doorways and passing objects. 0 hides instantly. Default 250.</text></string>
+
+	<string id="ui_mcm_iqm_sound_vol"><text>Chirp volume</text></string>
+	<string id="ui_mcm_iqm_sound_vol_desc"><text>0 = silent, 1 = full.</text></string>
+
+	<string id="ui_mcm_iqm_work_probe"><text>Active checking</text></string>
+	<string id="ui_mcm_iqm_work_probe_desc"><text>Query the task system for NPCs with no known answer yet, at most one every 0.3 s, nearest first. This does what opening their dialogue does, just earlier: their offered task is decided when the nameplate appears rather than when you talk. Off makes the detector passive, showing only NPCs the game has already decided.</text></string>
+
+	<!-- ==================================================== Waypoint markers -->
+
+	<string id="ui_mcm_iqm_mark_beacon"><text>Your selected task</text></string>
+	<string id="ui_mcm_iqm_mark_beacon_desc"><text>The objective of the task you picked on the PDA, the one your map draws a bracket around. Drawn through walls, and parked at the screen edge when it is behind you. Carries the same reticle that marker wears on the map. There is only ever one: change the selection and it follows, and with nothing selected nothing is marked. Shows at any range, and works for an objective that is not an NPC. Needs "Quest targets".</text></string>
+
+	<string id="ui_mcm_iqm_beacon_handin"><text>Only when ready to hand in</text></string>
+	<string id="ui_mcm_iqm_beacon_handin_desc"><text>Mark the selected task only once its objective is done and the marker has moved to whoever you report back to. On by default. This is a difficulty setting: at the earlier stages the marker is an exact live position through a wall, so on a bounty it hands you the part of the task that was the challenge. Turn it off to have the marker follow the objective at every stage. Either way the ground route still leads to the objective.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_targets"><text>Every hand-in, not just the selected one</text></string>
+	<string id="ui_mcm_iqm_beacon_targets_desc"><text>Mark everyone who is waiting on a finished job of yours, not only the task you picked on the PDA. On by default, and it is what decides whether a turn-in outranks a shop on the same person: with this off the hand-in role carries no marker, so the marker falls to whatever else that NPC is -- trader, technician, barkeep, medic -- and you get REPORT BACK on the card with a trader glyph through the wall. Rides the distance below, unlike your selected task. Needs "Quest targets".</text></string>
+
+	<string id="ui_mcm_iqm_beacon_dist"><text>Guide / service distance (m)</text></string>
+	<string id="ui_mcm_iqm_beacon_dist_desc"><text>Range of the guide and service markers above. Meant to find someone you are already near, not to navigate the map. Never drops below the appear distance. Your selected task and your own waypoint ignore it and show at any range. Default 60.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_guiders"><text>Guides</text></string>
+	<string id="ui_mcm_iqm_beacon_guiders_desc"><text>Also mark fast-travel guides. Off by default.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_traders"><text>Services</text></string>
+	<string id="ui_mcm_iqm_beacon_traders_desc"><text>Also mark traders, technicians, barkeeps and medics, each with its PDA map glyph. Off by default.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_waypoint"><text>Your placed waypoint</text></string>
+	<string id="ui_mcm_iqm_beacon_waypoint_desc"><text>Mark the waypoint you placed with Personal Adjustable Waypoint, carrying the same ring your PDA map draws. The one marker with no distance limit, since you chose the position. Hidden once you are standing on it.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_party"><text>Your companions</text></string>
+	<string id="ui_mcm_iqm_beacon_party_desc"><text>Also mark the companions travelling with you, wearing the same bust your PDA map puts on them. Off by default. They are the last thing offered a slot, so a companion can never push a quest turn-in or a shop off the screen, and they use the guide / service distance above.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_color"><text>Colour</text></string>
+	<string id="ui_mcm_iqm_beacon_color_desc"><text>What tints the marker. Map icon gives each one the colour its PDA map spot carries, so the colour you learn on the map is the colour you look for through the wall. The third option is the same, except turn-ins take the quest giver's faction colour. Custom puts every marker on its own colour, set by the three channels in Advanced below, and leaves the nameplates on the accent. Guides and your own waypoint always keep the accent.</text></string>
+	<string id="ui_mcm_lst_iqm_bcol_accent"><text>Accent</text></string>
+	<string id="ui_mcm_lst_iqm_bcol_mapicon"><text>Map icon</text></string>
+	<string id="ui_mcm_lst_iqm_bcol_faction"><text>Map icon + faction turn-ins</text></string>
+	<string id="ui_mcm_lst_iqm_bcol_custom"><text>Custom</text></string>
+
+	<!-- ---- Waypoint markers: Advanced ---- -->
+
+	<string id="ui_mcm_iqm_beacon_range"><text>Range readout</text></string>
+	<string id="ui_mcm_iqm_beacon_range_desc"><text>Show the distance in metres under the glyph.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_rsize"><text>Readout size (%)</text></string>
+	<string id="ui_mcm_iqm_beacon_rsize_desc"><text>Height of the metre figures, as a percentage of the marker size. Default 40.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_name"><text>NPC name</text></string>
+	<string id="ui_mcm_iqm_beacon_name_desc"><text>Print the NPC's name above the marker. Off by default: the name is the one part that cannot follow the size slider, because the engine draws text at a fixed size picked from your resolution. Near the default marker size the two agree.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_size"><text>Marker size (px)</text></string>
+	<string id="ui_mcm_iqm_beacon_size_desc"><text>Glyph size on the badge. The badge, arrow and spacing all scale from it, so it is the one knob for overall marker size. Default 14.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_edge"><text>Edge inset (px)</text></string>
+	<string id="ui_mcm_iqm_beacon_edge_desc"><text>How far in from the screen edge an off-screen marker parks. Larger keeps it clear of the HUD corners.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_a"><text>Opacity</text></string>
+	<string id="ui_mcm_iqm_beacon_a_desc"><text>Opacity of the marker and its range readout (0-255).</text></string>
+
+	<string id="ui_mcm_iqm_beacon_r"><text>Red</text></string>
+	<string id="ui_mcm_iqm_beacon_r_desc"><text>Red channel of the marker's own colour (0-255). Used only with Colour set to Custom above; the accent is used otherwise. Default 224, the accent's own red, so Custom starts where the gold is and you shift it from there.</text></string>
+	<string id="ui_mcm_iqm_beacon_g"><text>Green</text></string>
+	<string id="ui_mcm_iqm_beacon_g_desc"><text>Green channel of the marker's own colour (0-255). Default 196.</text></string>
+	<string id="ui_mcm_iqm_beacon_b"><text>Blue</text></string>
+	<string id="ui_mcm_iqm_beacon_b_desc"><text>Blue channel of the marker's own colour (0-255). Default 122. The badge keyline is artwork and is not tinted, so a dark colour keeps its edge against sky.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_ctr"><text>Centre falloff (%)</text></string>
+	<string id="ui_mcm_iqm_beacon_ctr_desc"><text>Shrink and fade a marker as it nears the crosshair, so it gets out of the way of whatever you are looking at. The value is the radius, as a percentage of half your screen height: 35 reaches about a sixth of the screen height out from the crosshair, 100 reaches the top and bottom edges. Applies only to markers on screen (one parked at an edge is already far from the centre), and never to the waypoint you placed yourself, which is meant to sit dead centre while you walk to it. 0 turns the feature off. Default 35.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_ctr_a"><text>Centre opacity (%)</text></string>
+	<string id="ui_mcm_iqm_beacon_ctr_a_desc"><text>How far down a marker fades at the very centre, as a percentage of normal. It stays visible rather than disappearing, so nothing pops in and out as you turn. 0 hides it completely. The size floor is fixed and much shallower (three quarters), because a badge shrunk further stops reading as a glyph. Default 20.</text></string>
+
+	<string id="ui_mcm_iqm_beacon_ctr_size"><text>Shrink as well as fade</text></string>
+	<string id="ui_mcm_iqm_beacon_ctr_size_desc"><text>Whether a marker near the centre also gets smaller, or only fades. On by default. Turn it off to keep every marker at its normal size, so your eye does not have to find it again as it changes. The fade cannot be switched off here; set Centre falloff to 0 for that.</text></string>
+
+	<!-- (The range readout's metre suffix used to live here as ui_mcm_iqm_beacon_unit.
+	     It is drawn from the iqm_digits sheet since R2.30, so it is art rather than a
+	     string, and not localisable - which cost nothing: the font it would have been
+	     drawn in is the one the engine gives no per-language texture.) -->
+
+	<!-- ======================================================= Route: ground -->
+
+	<string id="ui_mcm_iqm_mark_route"><text>Enable</text></string>
+	<string id="ui_mcm_iqm_mark_route_desc"><text>Draw a line along the ground to your selected task's target, with chevrons for direction. Follows walkable terrain and fades behind cover. Select another task in the PDA and it follows. With no task selected it falls back to the nearest objective NPC. Needs "Quest targets".</text></string>
+
+	<!-- Summoning the route. The modifier values are MCM's own "mcm_kb_mod_*" ids, so their
+	     labels come from MCM's string table and are not repeated here. -->
+	<string id="ui_mcm_iqm_route_reveal"><text>When it is drawn</text></string>
+	<string id="ui_mcm_iqm_route_reveal_desc"><text>"Summoned" is the default: the line appears while you hold the key, holds for a moment after you let go, then fades. Nothing is recalculated when it comes back, so summoning it repeatedly is free. "Follow nameplates" draws it whenever the nameplates are up. "Always" ignores the key entirely.</text></string>
+	<string id="ui_mcm_lst_iqm_route_rv_always"><text>Always</text></string>
+	<string id="ui_mcm_lst_iqm_route_rv_cards"><text>Follow nameplates</text></string>
+	<string id="ui_mcm_lst_iqm_route_rv_summon"><text>Summoned</text></string>
+
+	<string id="ui_mcm_iqm_route_dwell"><text>Hold after release (0.1s)</text></string>
+	<string id="ui_mcm_iqm_route_dwell_desc"><text>How long the line stays up after the key comes up, before it fades. This is what lets a tap work rather than making you hold the key down. 0 fades it the moment you let go. Default 20 (2.0s).</text></string>
+
+	<!-- MCM copies every key_bind into its global "Key Binds" page, where this caption
+	     appears alongside every other mod's, so it names the mod as MCM's docs ask. -->
+	<string id="ui_mcm_iqm_route_key"><text>Summon route (Immersive Quest Markers)</text></string>
+	<string id="ui_mcm_iqm_route_key_desc"><text>The key that summons the route. Unbound (the default) borrows the nameplate key, where a tap will also toggle the nameplates; give the route its own key and it stops touching them, so you can leave nameplates up and pulse the route on its own.</text></string>
+
+	<string id="ui_mcm_iqm_route_summon_unbound"><text>Summoned needs a key: bind one here, or the nameplate hotkey on the General page. Until then the route is drawn all the time.</text></string>
+
+	<string id="ui_mcm_iqm_route_dist"><text>Drawn ahead (m)</text></string>
+	<string id="ui_mcm_iqm_route_dist_desc"><text>How much of the line is drawn, measured along the path from where you stand. Not a limit on how far the target may be. The minimap trail has its own distance. Default 50.</text></string>
+
+	<string id="ui_mcm_iqm_route_shape"><text>Mark shape</text></string>
+	<string id="ui_mcm_iqm_route_shape_desc"><text>Which mark is painted on the floor. All three point the way. Arrowhead is a solid triangle and the widest. It also sits flattest on uneven ground, because each mark is drawn as a single quad and a shallower shape matches the ground better. The chevrons trade some of that for a sharper point. The small one reads as a tick at distance. Costs nothing either way. Default Chevron - large.</text></string>
+	<string id="ui_mcm_lst_iqm_shape_arrow"><text>Arrowhead</text></string>
+	<string id="ui_mcm_lst_iqm_shape_chevtight"><text>Chevron - large</text></string>
+	<string id="ui_mcm_lst_iqm_shape_chevsharp"><text>Chevron - small</text></string>
+
+	<string id="ui_mcm_iqm_route_pulse"><text>Ground mark pulse</text></string>
+	<string id="ui_mcm_iqm_route_pulse_desc"><text>Make the marks on the ground brighten and dim, as a wave that travels along the route towards your objective, so the pulse carries direction the same way the marks do. It only ever brightens: at the bottom of each cycle a mark sits at exactly the colour you set, so your route colour is unchanged. Marks are drawn over the scene rather than in it, so this cannot light the ground or bloom. The amount scales with how much room your colour has left to brighten, so it stays visible on dark and light colours alike. At 10 a mark reaches as bright as that colour goes. 0 turns it off. Default 6.</text></string>
+	<string id="ui_mcm_iqm_route_a"><text>Opacity</text></string>
+	<string id="ui_mcm_iqm_route_a_desc"><text>Opacity of the line and its chevrons (0-255). Stretches behind cover draw at a fraction of this.</text></string>
+
+	<string id="ui_mcm_iqm_route_r"><text>Red</text></string>
+	<string id="ui_mcm_iqm_route_r_desc"><text>Red channel of the route colour (0-255). Default 176, a light olive picked to sit in the scene without disappearing into the ground.</text></string>
+	<string id="ui_mcm_iqm_route_g"><text>Green</text></string>
+	<string id="ui_mcm_iqm_route_g_desc"><text>Green channel of the route colour (0-255). Default 196.</text></string>
+	<string id="ui_mcm_iqm_route_b"><text>Blue</text></string>
+	<string id="ui_mcm_iqm_route_b_desc"><text>Blue channel of the route colour (0-255). Default 124.</text></string>
+
+	<string id="ui_mcm_iqm_route_xray"><text>Show through walls</text></string>
+	<string id="ui_mcm_iqm_route_xray_desc"><text>Fade the stretches behind walls and rises instead of hiding them. Recommended on: the interesting part of a route is usually the part going round something. The minimap trail is unaffected.</text></string>
+
+	<!-- ====================================================== Route: minimap -->
+
+	<string id="ui_mcm_iqm_mark_minimap"><text>Enable</text></string>
+	<string id="ui_mcm_iqm_mark_minimap_desc"><text>Show the route as a trail of marks on the HUD minimap. Independent of the ground line: either, both or neither. With both on they agree, being two views of one route. Better than the ground line when the route is behind a building, and the only one that works if your setup cannot draw the world-space line at all.</text></string>
+
+	<string id="ui_mcm_iqm_minimap_dist"><text>Drawn ahead (m)</text></string>
+	<string id="ui_mcm_iqm_minimap_dist_desc"><text>How much of the route the trail covers, measured along the path. Separate from the ground line's distance, and cheap to raise since both views come from one route. Default 50.</text></string>
+
+	<string id="ui_mcm_iqm_minimap_style"><text>Mark style</text></string>
+	<string id="ui_mcm_iqm_minimap_style_desc"><text>Arrows point the way the route goes. Dots are quieter on a cluttered map. Costs nothing either way. Default Arrows.</text></string>
+	<string id="ui_mcm_lst_iqm_mm_arrows"><text>Arrows</text></string>
+	<string id="ui_mcm_lst_iqm_mm_dots"><text>Dots</text></string>
+
+	<string id="ui_mcm_iqm_minimap_size"><text>Mark size</text></string>
+	<string id="ui_mcm_iqm_minimap_size_desc"><text>Size of each trail mark. The minimap is small, so this range is too: at the top a single mark is a tenth of the map's width. Default 8.</text></string>
+
+	<string id="ui_mcm_iqm_minimap_r"><text>Red</text></string>
+	<string id="ui_mcm_iqm_minimap_r_desc"><text>Red channel of the trail colour (0-255). Separate from the ground route's, since this is read off a map against terrain and other mods' spots. White by default. The black outline is artwork and is not tinted.</text></string>
+	<string id="ui_mcm_iqm_minimap_g"><text>Green</text></string>
+	<string id="ui_mcm_iqm_minimap_g_desc"><text>Green channel of the trail colour (0-255).</text></string>
+	<string id="ui_mcm_iqm_minimap_b"><text>Blue</text></string>
+	<string id="ui_mcm_iqm_minimap_b_desc"><text>Blue channel of the trail colour (0-255).</text></string>
 
 </string_table>

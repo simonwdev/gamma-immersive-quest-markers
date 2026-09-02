@@ -3,14 +3,74 @@
 -- ======================================================================
 --  MCM only discovers on_mcm_load in scripts whose filename ends in
 --  "mcm.script", so the menu lives here. The logic and live option-change
---  handling are in iqm_markers.script; defaults come from
---  iqm_markers.DEFAULTS so there is a single source of truth.
+--  handling are in iqm_core.script.
+--
+--  THE MENU IS NO LONGER WRITTEN HERE (R2.46). It is BUILT, row by row, from
+--  iqm_core.OPTIONS -- one ordered registry that carries each option's key,
+--  page, default, widget type, range and precondition, and from which
+--  iqm_core.DEFAULTS and iqm_core.PAGE_OF are derived as well. Before that
+--  an option had to be declared in four places that nothing checked for agreement,
+--  and the two most dangerous disagreements are silent: an option whose menu page
+--  and PAGE_OF entry differ reads its default for every player for ever, and a
+--  default restated at a call site goes on being wrong until somebody measures it
+--  (four had drifted by the time this was collapsed). What is left in this file is
+--  the part that is genuinely the MENU's: the widget shapes, the colours, and the
+--  precondition closures -- because every one of those reads an MCM storage path,
+--  and reading storage is this file's business, not the registry's.
+--
+--  LAYOUT: one subpage per FEATURE -- General, Nameplates, Waypoint
+--  markers, Route: ground, Route: minimap -- each opened by the mod banner
+--  and then broken into captioned sections, with that feature's fine tuning in
+--  an "Advanced" section at the foot of its own page.
+--
+--  This replaced a Core/Advanced split (R2.24), which divided the menu by how
+--  fiddly an option was rather than by what it configured, and so cut every
+--  feature in half: the route's on/off sat on one page and its colour on the
+--  other, and a minimap-only player had to work across both tabs to set up one
+--  trail. Difficulty is a section now; the page is the feature.
+--
+--  A section is a "title" caption -- an MCM support element, so it carries no val,
+--  adds no storage key, and the hint loop at the bottom skips it. Each caption is
+--  preceded by a "line" rule -- except where there is no group above it to be
+--  separated from, which is the page's first caption and a caption directly under
+--  another one.
+--
+--  The rules travelled with every caption until R2.44, when they were dropped: a rule
+--  above the page's opening caption is a rule against the banner -- furniture rather
+--  than structure, and the one the eye caught. They come back here as a SEPARATOR
+--  rather than a decoration, drawn only where there is something above to separate
+--  from, which is a different rule from "one per caption" and does not reintroduce the
+--  one that was wrong. The long pages are what make it worth having: on Nameplates a
+--  reader scrolls past nine captions, and colour alone says a group changed without
+--  saying where one ends.
+--
+--  Storage paths are "iqm/<page>/<id>", so reordering options WITHIN a page is
+--  free but moving one across pages changes where its value is stored. The move
+--  off Core/Advanced therefore needed a migration; see WAS_CORE in
+--  iqm_core.script. Which page a key belongs to is the registry's own `page`
+--  field, which read_config builds the same path from -- so the two can no longer
+--  disagree, which is what they used to do silently.
 -- ======================================================================
+
+-- Section captions are the accent gold the cards use (clr is {a,r,g,b}), so the
+-- menu is tinted like the thing it configures.
+local HDR_CLR = {255, 224, 196, 122}
+-- The "Advanced" caption that opens the fine-tuning half of each page, and the
+-- sub-captions under it. Deliberately a DIFFERENT colour from the topic headers
+-- above: within a page the reader has two things to tell apart -- what a group
+-- configures, and whether they are past the everyday settings -- and giving both
+-- the same gold would leave the tier invisible.
+local ADV_CLR = {255, 150, 140, 120}
+-- The "you need X switched on" notes, in MCM's own warning amber.
+local NOTE_CLR = {255, 225, 175, 0}
+-- Registry rows name a colour rather than carrying one, because which gold a caption
+-- takes is a menu decision and the registry is a list of options.
+local CLR = { adv = ADV_CLR, note = NOTE_CLR }
 
 -- MCM >= 1.6.0 feature test: key_bind, the kb_mod_* option types and the
 -- double_tap/key_hold/get_mod_key helpers all arrived together, and ui_mcm.key_hold is
 -- the check every other GAMMA mod uses for them. On older MCM the key_bind row simply
--- isn't drawn and ui_mcm.get returns nil for it, so iqm_markers falls back to its
+-- isn't drawn and ui_mcm.get returns nil for it, so iqm_core falls back to its
 -- reveal_key default (-1, unbound) and the cards stay always-on.
 --
 -- Declared here (not inside on_mcm_load) so the precondition closures below capture it,
@@ -18,125 +78,196 @@
 -- on_mcm_load is called by MCM itself and so is guaranteed to be late enough.
 local mcm_keybinds = nil
 
+-- ======================================================================
+--  PRECONDITIONS, and the rule about what may have one (R2.59)
+-- ======================================================================
+--  A ROW THAT CONFIGURES SOMETHING IS ALWAYS SHOWN. Only two kinds of row are still
+--  gated, and neither is a setting:
+--
+--    * THE INSTALL. paw_here / party_here / has_keybinds / no_keybinds. A row for
+--      Personal Adjustable Waypoint's marker in an install with no PAW is a switch on
+--      nothing, and a key_bind row on MCM below 1.6.0 cannot be drawn at all. These
+--      cannot change while the player is in the menu, so gating on them has no cost.
+--    * THE NOTES. no_targets, route_summon_unbound. A note's TEXT is only true in one
+--      state -- "the route has nothing to point at", "the summon has no key of its own"
+--      -- so showing it unconditionally would make the menu assert something false.
+--      Hiding a sentence that does not apply is not the same act as hiding a control.
+--
+--  EVERYTHING ELSE WENT. Around forty rows rode another SETTING: the route and minimap
+--  pages rode their own on/off switch and the quest-target cards, the dim's three rows
+--  rode dim_hold, the marker rows rode their card role, the centre falloff's floor rode
+--  its radius. Each of those looked tidy in isolation and the collection was not: MCM
+--  evaluates a precondition when it BUILDS a page, not while the player is on it, so a
+--  row that a gate reveals DOES NOT APPEAR until the menu is closed and reopened. The
+--  result was a menu you could not read at a glance and could not trust -- switch the
+--  route on and its dozen controls are still missing; the only way to see what a feature
+--  offers is to set it, back out, and come back in.
+--
+--  What gating bought was never correctness. A hidden row keeps its stored value and the
+--  code gates on it anyway (iqm_taskspot re-tests map_icons for exactly this reason), so
+--  the rows were only ever tidiness -- and an inert slider costs a line of reading, while
+--  a page that changes shape between visits costs a trip through the menu. Nothing here
+--  reads a value that its feature's own switch does not already gate in code.
+--
+--  Every closure below still reads a storage path or a namespace, which is why they live
+--  in this file rather than in the registry: reading storage is the menu's business.
+local function on_targets()  return ui_mcm.get("iqm/cards/mark_targets") end
+local function on_route()    return ui_mcm.get("iqm/worldview/mark_route") end
+local function route_page()  return on_targets() and on_route() end
+local function no_keybinds() return not mcm_keybinds end
+local function has_keybinds() return mcm_keybinds end
+
+-- Personal Adjustable Waypoint, the mod that places the waypoint. A presence test and
+-- not an option: with no PAW there is no waypoint to mark, so the row would be a switch
+-- on nothing. It reads a namespace rather than a storage path, which is what makes it one
+-- of the two kinds of gate that survived.
+local function paw_here() return tasks_placeable_waypoints ~= nil end
+-- ...and the companion marker's, which rides the mod that keeps the party list the same
+-- way the row above rides PAW. Not a card role and deliberately not derived from one:
+-- there is no companion card, so there is nothing on the cards page for it to follow.
+local function party_here() return axr_companions ~= nil end
+
+-- The registry's `pre` field is a NAME out of this table. A name rather than the closure
+-- itself because the closures read storage paths, which is this file's concern -- and
+-- because a registry that could hold functions could hold one that reaches for ui_mcm at
+-- parse time, which is exactly the load-order trap on_mcm_load exists to sit after.
+--
+-- Non-local so the mcm harness can check that every name the registry uses resolves to
+-- something here. A file local could not be tested, and the failure it would hide is the
+-- quiet direction: an unresolved name leaves an EMPTY precondition list, which MCM reads
+-- as "always show".
+PRE = {
+	-- THE INSTALL: four gates on what the player has, not on what they have set.
+	has_keybinds = has_keybinds,
+	no_keybinds  = no_keybinds,
+	paw_here     = paw_here,
+	party_here   = party_here,
+	-- THE NOTES: two gates on state, kept because their text is a claim rather than a
+	-- control. The two "you need quest target nameplates" notes stand in for a route
+	-- page's controls, and used to REPLACE them; the controls are now always there, so
+	-- what the note adds is the reason none of them will do anything yet.
+	no_targets   = function() return not on_targets() end,
+	-- ...and the note that says what an unbound summon does. Kept for the same reason and
+	-- with the same nil guards: it names a state -- summoned, with no key on either side
+	-- of the fallback -- and outside that state the sentence is simply untrue. `nil == 2`
+	-- is merely false, while `nil < 0` is an error, which is why only the comparisons are
+	-- coerced.
+	route_summon_unbound = function()
+		return route_page() and ui_mcm.get("iqm/worldview/route_reveal") == 2
+		       and (ui_mcm.get("iqm/worldview/route_key") or -1) < 0
+		       and (ui_mcm.get("iqm/general/reveal_key") or -1) < 0
+	end,
+}
+
+-- The stock Anomaly options plate, at the size 3DSS and the scope mods use it at
+-- (z_3d_scopes_mcm.script:24). This mod shipped a custom 1024x64 plate until R2.44;
+-- ui_options_slider_player is what most of GAMMA's settings pages open with, so the
+-- menu now reads as one of them rather than as its own thing. MCM overlays the page
+-- title on it, which is why the title is not baked into the art.
+--
+-- The 512x50 is explicit and so goes through the widescreen factor Register_Slide
+-- applies to a given size (ui_mcm.script:1188). That is deliberate -- it is what the
+-- mods this matches do, so matching them means matching the scaling too.
+local function banner(id, text)
+	return { id = id, type = "slide", link = "ui_options_slider_player", text = text,
+	         size = {512, 50}, spacing = 20 }
+end
+
+-- A row's precondition list, resolved from its name. An unknown name would otherwise
+-- leave `precondition` empty, which MCM reads as "always show" -- a typo would quietly
+-- un-gate a row instead of breaking. So it hides the row and says why: visible in game,
+-- and the mcm harness asserts every name in the registry resolves here.
+local function pre_of(o)
+	if not o.pre then return nil end
+	local fn = PRE[o.pre]
+	if not fn then
+		printf("[IQM] MCM: unknown precondition '%s' on %s -- row hidden",
+			tostring(o.pre), tostring(o.key or o.id or o.section))
+		fn = function() return false end
+	end
+	return { fn }
+end
+
+-- One registry record -> one MCM row.
+--
+-- `val` is derived rather than stored: MCM's val is 1 for a boolean and 2 for
+-- everything else, and every check in this menu is val 1 while every track, list,
+-- key_bind and radio is val 2. Storing it would be storing the type twice.
+--
+-- "kb_mod" is the one type that cannot be a literal: ui_mcm.kb_mod_radio only exists
+-- from MCM 1.6.0, and on older builds the row falls back to a plain horizontal radio
+-- (which the has_keybinds precondition hides anyway -- the fallback is so the table
+-- still builds).
+local function row(o)
+	if o.section then
+		return { id = "hdr_" .. o.section, type = "title", text = o.text,
+		         clr = CLR[o.clr] or HDR_CLR, precondition = pre_of(o) }
+	end
+	if o.type == "desc" then
+		return { id = o.id, type = "desc", text = o.text,
+		         clr = CLR[o.clr] or HDR_CLR, precondition = pre_of(o) }
+	end
+	local t = o.type
+	if t == "kb_mod" then t = mcm_keybinds and ui_mcm.kb_mod_radio or "radio_h" end
+	return { id = o.key, type = t, val = (o.type == "check") and 1 or 2, def = o.def,
+	         min = o.min, max = o.max, step = o.step, prec = o.prec,
+	         content = o.content, hint = o.hint, precondition = pre_of(o) }
+end
+
 function on_mcm_load()
 	mcm_keybinds = ui_mcm and ui_mcm.key_hold
-	local d = iqm_markers and iqm_markers.DEFAULTS or {}
-	-- Two subpages (tabs): "Core" (the everyday switches) and "Advanced" (fine tuning,
-	-- styling, colour, motion, perf rates). Which key sits on which tab is mirrored from
-	-- iqm_markers.CORE_KEYS, which read_config uses to build the "iqm/<tab>/<key>" path.
+
+	-- One page per registry entry in iqm_core.PAGES, each opening with its banner,
+	-- and every option row dropped onto the page it names. The registry's order IS the
+	-- menu's order, so nothing here decides where a row goes.
+	--
 	-- NOTE: the top-level node must NOT have sh (sh marks a leaf PAGE whose gr holds
 	-- options; a folder of subpages is a plain node whose children carry sh).
-	local menu = {
-		id = "iqm", gr = {
+	local menu, gr_of = { id = "iqm", gr = {} }, {}
+	for _, p in ipairs(iqm_core.PAGES) do
+		local gr = { banner(p.banner, p.btext) }
+		gr_of[p.id] = gr
+		menu.gr[#menu.gr + 1] = { id = p.id, sh = true, text = p.text, gr = gr }
+	end
 
-			{ id = "core", sh = true, text = "ui_mcm_iqm_tab_core", gr = {
-				{ id = "title",        type = "slide", text = "ui_mcm_menu_iqm", size = {512, 50}, spacing = 20 },
-				{ id = "enabled",         type = "check", val = 1, def = d.enabled },
-				{ id = "mark_targets",    type = "check", val = 1, def = d.mark_targets },
-				{ id = "mark_guides",     type = "check", val = 1, def = d.mark_guides },
-				{ id = "mark_companions", type = "check", val = 1, def = d.mark_companions },
-				{ id = "mark_hires",      type = "check", val = 1, def = d.mark_hires },
-				{ id = "mark_guiders",    type = "check", val = 1, def = d.mark_guiders },
-				{ id = "mark_traders",    type = "check", val = 1, def = d.mark_traders },
-				{ id = "mark_important",  type = "check", val = 1, def = d.mark_important },
-				{ id = "mark_work",       type = "check", val = 1, def = d.mark_work },
-				{ id = "faction_colors",  type = "check", val = 1, def = d.faction_colors },
-				{ id = "faction_icons",   type = "check", val = 1, def = d.faction_icons },
-				{ id = "appear_dist",     type = "track", val = 2, min = 2, max = 60, step = 1, def = d.appear_dist },
-				{ id = "los_check",       type = "check", val = 1,                              def = d.los_check },
-				{ id = "sound_alert",     type = "check", val = 1,                              def = d.sound_alert },
-
-				-- Reveal hotkey: the stock MCM trio (key_bind + kb_mod_radio modifier +
-				-- kb_mod_radio activation mode), the same shape Ammo Check and the rest of
-				-- GAMMA use. Every VALUE label is one of MCM's own string ids
-				-- ("mcm_kb_mod_*" / "mcm_kb_mode_*"), so this mod ships none of them --
-				-- ui_mcm's Register_List falls back to "ui_mcm_lst_<value>" out of MCM's
-				-- table. Only the three captions are ours.
-				--
-				-- Value 3, hold-to-show, is the one exception and the one label we still
-				-- ship: MCM has no equivalent (its mcm_kb_mode_hold is a long press that
-				-- fires once, which is value 2 here), and showing the cards only while the
-				-- key is physically down is a distinct behaviour worth keeping.
-				--
-				-- There is deliberately no "always" value: an unbound key already means
-				-- always shown (reveal_visible in iqm_markers returns true for key < 0), so
-				-- it would only duplicate it. The explicit hints on the modifier and mode
-				-- rows pull MCM's captions and keep the hint loop below from overwriting
-				-- them. All three rows need MCM >= 1.6.0; the precondition hides them on
-				-- older builds (where ui_mcm.kb_mod_radio is nil anyway) in favour of the
-				-- note underneath.
-				{ id = "reveal_key", type = "key_bind", val = 2, def = d.reveal_key,
-				  precondition = { function() return mcm_keybinds end } },
-				{ id = "reveal_mod", type = mcm_keybinds and ui_mcm.kb_mod_radio or "radio_h",
-				  val = 2, def = d.reveal_mod, hint = "mcm_kb_modifier",
-				  precondition = { function() return mcm_keybinds end }, content = {
-					{ 0, "mcm_kb_mod_none" },
-					{ 1, "mcm_kb_mod_shift" },
-					{ 2, "mcm_kb_mod_ctrl" },
-					{ 3, "mcm_kb_mod_alt" },
-				}},
-				{ id = "reveal_mode", type = "list", val = 2, def = d.reveal_mode,
-				  precondition = { function() return mcm_keybinds end }, content = {
-					{ 0, "mcm_kb_mode_press" },
-					{ 1, "mcm_kb_mode_dtap" },
-					{ 2, "mcm_kb_mode_hold" },
-					{ 3, "iqm_reveal_hold" },
-				}},
-				{ id = "reveal_no_mcm", type = "desc", text = "ui_mcm_iqm_reveal_no_mcm",
-				  clr = {255, 225, 175, 0}, precondition = { function() return not mcm_keybinds end } },
-			}},
-
-			{ id = "advanced", sh = true, text = "ui_mcm_iqm_tab_advanced", gr = {
-				{ id = "title_adv",    type = "slide", text = "ui_mcm_iqm_tab_advanced", size = {512, 50}, spacing = 20 },
-
-				{ id = "work_probe",   type = "check", val = 1,                                     def = d.work_probe },
-
-				{ id = "show_node",    type = "check", val = 1,                                     def = d.show_node },
-				{ id = "node_pulse",   type = "check", val = 1,                                     def = d.node_pulse },
-				{ id = "node_size",    type = "track", val = 2, min = 4,   max = 24,   step = 1,    def = d.node_size },
-				{ id = "node_min",     type = "track", val = 2, min = 0.2, max = 1,    step = 0.05, def = d.node_min },
-
-				{ id = "sound_vol",    type = "track", val = 2, min = 0,   max = 1,    step = 0.05, def = d.sound_vol },
-
-				{ id = "role_style", type = "list", val = 2, def = d.role_style, content = {
-					{ 0, "iqm_style_text" },
-					{ 1, "iqm_style_mixed" },
-					{ 2, "iqm_style_chip" },
-				}},
-
-				{ id = "short_ranks",  type = "check", val = 1,                                     def = d.short_ranks },
-
-				{ id = "full_dist",    type = "track", val = 2, min = 1,   max = 60,   step = 1,    def = d.full_dist },
-				{ id = "los_rate",     type = "track", val = 2, min = 50,  max = 500,  step = 10,   def = d.los_rate },
-				{ id = "los_grace",    type = "track", val = 2, min = 0,   max = 1000, step = 10,   def = d.los_grace },
-
-				{ id = "head_lift",    type = "track", val = 2, min = -1,  max = 1,    step = 0.01, prec = 2, def = d.head_lift },
-				{ id = "head_side",    type = "track", val = 2, min = -1,  max = 1,    step = 0.01, prec = 2, def = d.head_side },
-				{ id = "auto_side",    type = "check", val = 1,                                                def = d.auto_side },
-				{ id = "side_amt",     type = "track", val = 2, min = 0,   max = 0.5,  step = 0.01, prec = 2, def = d.side_amt },
-
-				{ id = "card_off_x",   type = "track", val = 2, min = 0,   max = 300,  step = 5,    def = d.card_off_x },
-				{ id = "card_off_y",   type = "track", val = 2, min = 0,   max = 200,  step = 5,    def = d.card_off_y },
-				{ id = "line_thick",   type = "track", val = 2, min = 1,   max = 6,    step = 1,    def = d.line_thick },
-				{ id = "line_a",       type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.line_a },
-				{ id = "card_a",       type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.card_a },
-
-				{ id = "smoothing",    type = "track", val = 2, min = 0.02, max = 1,   step = 0.01, def = d.smoothing },
-				{ id = "snap_dist",    type = "track", val = 2, min = 50,  max = 600,  step = 10,   def = d.snap_dist },
-
-				{ id = "col_a",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_a },
-				{ id = "col_r",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_r },
-				{ id = "col_g",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_g },
-				{ id = "col_b",        type = "track", val = 2, min = 0,   max = 255,  step = 5,    def = d.col_b },
-
-				{ id = "debug_log",    type = "check", val = 1,                                     def = d.debug_log },
-			}},
-		}
-	}
+	for _, o in ipairs(iqm_core.OPTIONS) do
+		local gr = gr_of[o.page]
+		if gr then
+			-- A rule above every caption that has a GROUP above it to be separated from.
+			-- Two things disqualify one, and both are "there is nothing up there":
+			--
+			--   * it opens the page. #gr counts what is already on the page and the banner
+			--     is always element 1, so #gr > 1 is the test. Cards and Waypoint markers
+			--     both open on a caption, and a rule against the banner is the shape that
+			--     got the rules removed in the first place (R2.44).
+			--   * the row above is itself a caption. On Nameplates the "Advanced" header
+			--     is immediately followed by "Accent", with no rows in between; ruling
+			--     off an empty group would draw two lines one row apart and read as a
+			--     mistake rather than as a division.
+			--
+			-- The rule carries the caption's OWN precondition, because one left behind by a
+			-- hidden section would separate two groups that are in fact adjacent -- and the
+			-- sections most likely to be hidden (the waypoint page's head, the work probe)
+			-- are exactly the ones a stray rule would point at.
+			if o.section and #gr > 1 and gr[#gr].type ~= "title" then
+				gr[#gr + 1] = { id = "line_" .. o.section, type = "line",
+				                precondition = pre_of(o) }
+			end
+			gr[#gr + 1] = row(o)
+		else
+			-- A page the menu does not have is an option nothing can ever set, and
+			-- read_config would still look for it at "iqm/<that page>/<key>".
+			printf("[IQM] MCM: option '%s' names unknown page '%s' -- dropped",
+				tostring(o.key or o.id or o.section), tostring(o.page))
+		end
+	end
 
 	-- Caption/description keys: MCM's default would include the subpage in the key
-	-- ("ui_mcm_iqm/core/<id>"), but the shipped translations use the flat
-	-- "ui_mcm_iqm_<id>" ids, so point every value option's hint at those.
+	-- ("ui_mcm_iqm/cards/<id>"), but the shipped translations use the flat
+	-- "ui_mcm_iqm_<id>" ids, so point every value option's hint at those. Support
+	-- elements (line/title/slide/desc) have no val and are skipped, and a row that
+	-- already set one keeps it -- which is how the reveal modifier borrows MCM's own
+	-- caption and description wholesale.
 	for _, page in ipairs(menu.gr) do
 		for _, o in ipairs(page.gr) do
 			if o.val and not o.hint then o.hint = "iqm_" .. o.id end

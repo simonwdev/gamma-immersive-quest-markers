@@ -1,0 +1,582 @@
+-- ======================================================================
+--  Immersive Quest Markers: interference
+-- ======================================================================
+-- What the overlay does when the Zone is pushing back. During an emission and inside a
+-- psi zone the marks tear sideways, their ink separates into a coloured fringe, the range
+-- readout starts printing the wrong digit, and at the worst of it the whole thing drops
+-- out. The point is not the effect: it is that a mark which can be interfered WITH is a
+-- mark that is being rendered by something, rather than a UI convention drawn on top of
+-- the game. Imperfection as characterisation.
+--
+-- THIS FILE IS THE ENVELOPE, NOT THE EFFECT. It reads the world, decides how hard the
+-- overlay is being leaned on, and publishes ONE number. What that number does to pixels
+-- belongs to iqm_cards, because iqm_cards owns the drawing -- the same division iqm_beacon
+-- states as "WHAT IS NOT OURS: the drawing". Nothing here touches a widget.
+--
+-- ----------------------------------------------------------------------
+-- THE SEAM
+--
+-- CONFIG IS PULLED, as everywhere else: iqm_core.read_config ends by calling
+-- apply_config() below, and this file reaches over for the three options it owns.
+--
+-- `N` IS PUBLISHED BY REFERENCE, through state(). iqm_cards binds THE TABLE once in its
+-- own apply_config and reads fields off it forever -- the arrangement beacon_roles uses,
+-- and for the same reason: one writer (tick, below), one reader, and no refresh path to
+-- forget. N is mutated and NEVER REBOUND. Rebinding it would leave every reader holding
+-- last game's table, which is the failure that contract exists to prevent.
+--
+-- WE ARE TICKED, not self-driving. iqm_core.render calls tick() next to the combat dim's
+-- ease, ahead of every early return in that function, for exactly the reason SUP's note
+-- gives: an envelope parked behind the PDA gate freezes at whatever interrupted it and
+-- then eases on from there minutes later. Registering our own actor_on_update would work
+-- and would put a second per-frame callback in the registry to keep in step with the
+-- first; there is no second thing for it to do.
+-- ----------------------------------------------------------------------
+
+-- Only the two the frame path actually uses. The trigonometry and the rounding live with
+-- the drawing, in iqm_cards -- nothing here places anything.
+local exp = math.exp
+local time_global = time_global
+
+-- ----------------------------------------------------------------------
+-- Tiers
+-- ----------------------------------------------------------------------
+-- The effects are STAGED by pressure, not scaled by it. Scaled together, every effect
+-- grows at once and the result reads as a wobbly UI -- the marks are simply less steady
+-- than they were. Staged, each threshold adds a new KIND of failure on top of the last,
+-- which is what degradation looks like: noisy, then noisy and mistinted, then
+-- intermittent, then gone. Each tier keeps the ones below it.
+--
+-- These are constants and not options on purpose. What the player gets a say in is
+-- whether the feature runs at all, how hard it pushes (noise_amt scales the amplitudes,
+-- not the thresholds) and whether the last tier is allowed to take the marks away. The
+-- ORDER of the tiers is the design, the same way the combat dim's rates are fixed and
+-- only its depth and duration are settings.
+local T_TEAR   = 0.15   -- horizontal band tear begins
+local T_CHROMA = 0.40   -- ink separates: the dark copies retint and lean the other way
+local T_DROP   = 0.70   -- whole-overlay dropout, a beat at a time
+local T_GIVE   = 0.90   -- it gives up (floored unless noise_giveup is on)
+
+-- Peak tear amplitude in TRUE ui units (iqm_cards applies UI_KX -- see amp below). 7 is
+-- chosen against the engine's whole-pixel flooring, which iqm_beacon's CTR_Q note records:
+-- every widget's position is floored to a screen pixel independently, so a displacement
+-- worth less than a pixel lands on some widgets and not others and reads as shimmer rather
+-- than tear. UI space is 1024x768 scaled to the screen, so at 1080p one ui unit is about
+-- 1.4 vertical pixels and 7 is a ~10 px tear at full pressure. Below about 3 the effect
+-- stops being legible as displacement at all.
+local TEAR_MAX  = 7
+-- ...and the fringe's own offset, in the same units, applied AGAINST the tear. Much
+-- smaller: this is a chromatic edge on the ink, not a second copy of the text. Past about
+-- 2 it stops reading as a fringe and starts reading as a legibility bug.
+local FRINGE_MAX = 1.75
+
+-- The fringe hue, and the reason there is only one. A real chromatic split has two
+-- channels leaning opposite ways; we have exactly one spare draw per glyph (the dark copy
+-- every text, line and plate already carries), so we get one side of the split and the
+-- glyph's own ink is the other. Cyan against the accent gold is the pair that reads most
+-- clearly as a separation rather than as a colour choice.
+local FR_R, FR_G, FR_B = 90, 210, 225
+
+-- ----------------------------------------------------------------------
+-- Bands
+-- ----------------------------------------------------------------------
+-- The tear is a per-ROW displacement: every widget hands P() its own y, so an offset
+-- keyed on y is a horizontal band tear and needs to know nothing about what it is
+-- placing. NB bands, each holding a signed offset, regenerated on a beat.
+--
+-- ODD, and not a power of two, so the band boundaries do not land on the same rows as a
+-- card's own internal layout (header at +6, name at +20 -- see draw_slot). With 8 bands at
+-- 96 units the two lines of a card sat in one band on every card on screen and the whole
+-- card slid as a unit, which reads as the card being nudged rather than torn.
+local NB     = 9
+local BAND_H = 71          -- ui units per band; 9 * 71 = 639, so the bands drift up the
+                           -- 768-unit screen instead of tiling it exactly
+local BEAT   = 90          -- ms a band pattern holds before it is redrawn
+
+-- The pattern generator, and it is a HASH rather than math.random for two reasons. Random
+-- re-rolls every band on every call, which shimmers -- real interference holds a band still
+-- for a beat and then moves it, which is what BEAT is for. And a hash of (band, beat) is
+-- deterministic, so a harness can assert on a specific frame of the effect; a random one
+-- can only be eyeballed.
+--
+-- Deliberately small constants. The obvious integer hashes multiply up past 2^53 where a
+-- double stops being exact and the "randomness" becomes a precision artefact that differs
+-- by platform. Everything here stays under 2.4e8. The distribution is mediocre and nine
+-- bands of visual noise do not care.
+local function h(a, b)
+	local n = (a * 1597 + b * 51749) % 65536
+	return ((n * 3571) % 65536) / 65536
+end
+
+-- ----------------------------------------------------------------------
+-- The emission's shape
+-- ----------------------------------------------------------------------
+-- Knots on surge_manager's own timeline, which arrives as _EVENT.surge.time (seconds since
+-- the emission began, 0..surge_time, rewritten once per REAL second). Lerped between.
+--
+-- The times are that script's stage boundaries and not invented: 0 begins, 25 siren, 30
+-- rockets, 47 impact, 50-75 rumble in, 80 first earthquake, 100-106 the quake ramp, 108
+-- and 120 the first wave, 156 and 168 the second, 200-209 the quakes fading, 222 ends.
+-- Following the game's own curve is the whole point -- an overlay that peaks at the waves
+-- is in step with the weather, the rumble and the camera shake, and one on a private curve
+-- of its own is a second unrelated drama running alongside them.
+local SURGE = {
+	{   0, 0.10 },   -- the pressure drop before anything is audible
+	{  25, 0.25 },   -- siren
+	{  47, 0.45 },   -- impact approaches
+	{  50, 0.70 },   -- ...and lands
+	{  80, 0.75 },   -- first earthquake
+	{ 106, 0.85 },   -- quake ramp tops out
+	{ 120, 1.00 },   -- first wave
+	{ 168, 1.00 },   -- second wave; held between the two rather than dipping
+	{ 200, 0.85 },   -- quakes begin to fade
+	{ 222, 0.15 },   -- over
+}
+
+-- How much of the emission gets through when the player is in a surge cover.
+--
+-- 0.75, AND IT WAS 0.3 UNTIL PLAY CORRECTED IT (R2.59b). The original number came from
+-- treating cover as a choice the player makes to opt out of the weather -- so damping it
+-- hard seemed like shelter working. It is not a choice: **outside during an emission you
+-- die.** Sheltering is the only survivable state, which means the uncovered branch is
+-- essentially unreachable in ordinary play, and tuning the emission around it tuned the
+-- whole feature around a state players never occupy.
+--
+-- What that produced, measured in game at the 100 Rads bar: uncovered pressure 0.77 damped
+-- to 0.23. At the emission's PEAK, sheltered, pressure would be 1.0 * 0.3 = 0.30 -- above
+-- the tear threshold and below T_CHROMA -- so an entire emission spent correctly, indoors,
+-- was a one-pixel wobble and nothing else. No fringe, no corruption, ever. The feature's
+-- showcase event was the one time it was suppressed to nothing.
+--
+-- So SHELTERED IS THE NORMAL CASE and gets the real thing: a peak of 0.75 reaches tear,
+-- chroma and dropout. Being caught outside is the rare extreme and is the only way to reach
+-- the give-up tier, which is exactly the right place for it -- the overlay failing
+-- completely while the Zone kills you is not a usability problem.
+--
+-- Still not 1.0. Shelter should mean something, and the difference between 0.75 and 1.0 is
+-- the difference between "the marks are struggling" and "the marks are gone".
+local SURGE_COVER = 0.75
+
+-- A psi storm, flat. Flat because its manager publishes a clock but its duration is not a
+-- number this file can trust (it is set from the storm's own delta, and GAMMA's Short Psi
+-- Storms overrides it), so a curve fitted to it would be fitted to an assumption. High
+-- because a psi storm is not ambient -- it is the sky trying to kill you.
+local STORM_LVL = 0.75
+-- ...and the vortex, which is. Within VORTEX_R metres of one, full pressure.
+local VORTEX_LVL, VORTEX_R = 1.0, 60
+
+-- A psi-hostile level, as a floor under everything else (G.A.M.M.A. Psy Fields in the
+-- North). Small on purpose, and this is not timidity: that mod is a DEATH TIMER, not an
+-- ambience -- it subtracts 999 psy health twenty-three seconds after it fires. Anything
+-- heavier hung off it would be an effect the player is never alive long enough to watch.
+local NORTH_LVL = 0.12
+
+-- A telepathic hit: the spike, and how long it holds before the release curve takes it
+-- down. Every psi source in the game arrives this way -- an anomaly field, a controller's
+-- tube, a burer, the Brain Scorcher, a vortex -- so this one callback is the wide net.
+-- It is an INSTANT and not a state, which is why it feeds the envelope instead of being
+-- one: the overlay takes a knock and then recovers.
+local SPIKE_LVL, SPIKE_MS = 0.65, 700
+
+-- Attack fast, release slowly -- the combat dim's asymmetry, and for the same reason
+-- stated the other way round. A knock has to land on the frame it happens or it reads as
+-- the overlay lagging; the recovery is the part the player watches, and a recovery as
+-- quick as the knock turns a psi field into a strobe.
+local RISE_TAU = 120     -- ms easing up toward the target
+local FALL_TAU = 900     -- ms ...and back down
+
+-- ----------------------------------------------------------------------
+-- Corruption duty cycles
+-- ----------------------------------------------------------------------
+-- How often a beat is a CORRUPT one, ramped across the tier from T_CHROMA to full pressure.
+-- These are the numbers that make text and icon corruption an effect rather than a lie, and
+-- the reason is the same for both: the mark spends most of its beats CORRECT.
+--
+-- A header that reads "REP0RT BACK" steadily is the overlay telling you something false and
+-- looking like a bug. The same header alternating with the right one eleven times a second
+-- is a signal fighting through, and the player reads the correct one because it is the one
+-- that keeps coming back. So the duty cycle stays well under half even at full pressure --
+-- resolve-on-beat is not a garnish on this feature, it is what makes it safe.
+--
+-- THE ICON'S IS LOWER THAN THE TEXT'S, deliberately. A wrong letter in a word you know is
+-- self-evidently a wrong letter; a wrong ROLE GLYPH is a different claim about who somebody
+-- is, and there is no spelling to give it away. Same tier, so it is visible in ordinary play
+-- rather than only at the extremes, but a third of the airtime.
+local TX_DUTY_LO, TX_DUTY_HI = 0.15, 0.45
+local IC_DUTY_LO, IC_DUTY_HI = 0.07, 0.22
+
+-- The dropout beat, and its floor. A dropout is a whole-overlay blink and not a per-mark
+-- one: marks blinking independently reads as some of them being broken, whereas the whole
+-- set cutting out together reads as the feed cutting out -- which is the thing being
+-- described. It also cannot hide one specific objective while its neighbours show, which
+-- per-mark dropout can and which would be genuinely misleading.
+local DROP_FLOOR = 0.12
+-- ...and how much of the beat pattern is a dropout at all, at T_DROP and at 1.0. Even at
+-- full pressure it is not every beat: an overlay that is off more than it is on is not
+-- intermittent, it is off, and the give-up tier is what says that properly.
+local DROP_MIN, DROP_MAX = 0.12, 0.45
+
+-- What the give-up tier leaves behind with noise_giveup OFF, which is the default. A FLOOR
+-- AND NOT A HIDE, for the reason ctr_fade states at length and dim_level states again: a
+-- marker that is gone is indistinguishable from a marker the mod failed to draw, and the
+-- player cannot tell an atmospheric effect from a bug in the thing they are relying on to
+-- find the objective. 0 is reachable, through the option, for anyone who wants it.
+local GIVE_FLOOR = 0.15
+
+-- ----------------------------------------------------------------------
+-- Live state
+-- ----------------------------------------------------------------------
+-- ONE table, for the reason SUP is one: a .script body is a single Lua function with 198
+-- locals to spend, and a feature that is three options, nine bands and eight pieces of
+-- live state costs exactly one name this way.
+--
+--   on/amt/giveup  config mirrors, refreshed in apply_config. `on` false is OFF
+--   p              the eased pressure, 0..1. THE published number
+--   tgt            this poll's target, before easing
+--   amp            tear amplitude in TRUE ui units, 0 when there is nothing to draw.
+--                  iqm_cards multiplies by UI_KX -- ui x-space is stretched by it, so an
+--                  amplitude that skips it tears wider on an ultrawide than on 16:9
+--   fr             fringe offset, same units, 0 below T_CHROMA
+--   af             alpha multiplier: 1, or the dropout / give-up floor
+--   ce             corruption epoch, bumped once a beat while the readout is corrupting.
+--                  iqm_cards folds it into the cache key that already rebuilds the digit
+--                  list, so a corrupted readout costs the same InitTexture that a changed
+--                  metre count does and nothing per frame
+--   txk/ick        the TEXT and ICON corruption keys, and they are keys rather than the
+--                  bare "is this beat corrupt" booleans on purpose. 0 means clean; anything
+--                  else is a seed that picks WHICH corruption. iqm_cards caches the last one
+--                  it applied, so a clean beat following a clean beat compares equal and
+--                  rebuilds nothing -- where a bare boolean plus `ce` would rebuild on every
+--                  beat, which for text means SetText and four AdjustWidthToText per card
+--                  eleven times a second. Two independent rolls, so the text and the icon do
+--                  not flip in lockstep and read as one event.
+--   B              the nine band offsets, -1..1
+--   bi             beat counter, the hash's second input
+--   bt             time_global ms the current beat expires at
+--   spike          time_global ms a telepathic hit's spike holds until
+--   slow           ...and when the next signal poll is due
+--   t              last tick's tg, for a framerate-independent ease
+--   src            which source is winning, for the debug line only
+local N = {
+	on = true, amt = 1, giveup = false,
+	p = 0, tgt = 0, amp = 0, fr = 0, af = 1, ce = 0, txk = 0, ick = 0, drop = false,
+	B = {}, bi = 0, bt = 0, spike = 0, slow = 0, t = 0, src = "",
+}
+for i = 1, NB do N.B[i] = 0 end
+
+-- The signal sources, bound in on_game_start. Every one is SOFT: _EVENT is base
+-- _g.script and always there, but a GAMMA without Psy Fields in the North, or a psi
+-- storm manager under a different name, must leave this file publishing a flat 0 rather
+-- than erroring on the frame path.
+local EV       = nil   -- _EVENT, the base event table. Bound, never copied
+local SURGE_M  = nil   -- surge_manager, for pos_in_cover
+local ANT      = nil   -- sr_psy_antenna, for the psi zone's own intensity
+local NORTH    = nil   -- grok_psy_fields_in_the_north
+local DEBUG    = false
+local _dbg_t   = 0
+
+-- How far between two knots `t` sits, as a level. Linear: the knots ARE the shape, and
+-- smoothing between them would round off the impact at 50, which is the one edge in the
+-- whole curve that should be an edge.
+local function surge_level(t)
+	if not t then return 0 end
+	local n = #SURGE
+	if t <= SURGE[1][1] then return SURGE[1][2] end
+	if t >= SURGE[n][1] then return SURGE[n][2] end
+	for i = 1, n - 1 do
+		local a, b = SURGE[i], SURGE[i + 1]
+		if t < b[1] then
+			local f = (t - a[1]) / (b[1] - a[1])
+			return a[2] + (b[2] - a[2]) * f
+		end
+	end
+	return 0
+end
+
+-- The psi zone's contribution.
+--
+-- sr_psy_antenna.psy_antenna is `false` outside every psi-antenna restrictor and the
+-- instance inside one, and `sound_intensity_base` is the TARGET intensity, accumulated
+-- across overlapping zones and stepped on zone_enter / zone_leave.
+--
+-- THE TARGET AND NOT `sound_intensity`, which is the same number already smoothed and is
+-- the obvious thing to read. Two reasons not to. It is a side effect of an AUDIO feature:
+-- its update is gated on `not no_mumble` (sr_psy_antenna:199), so a zone that suppresses
+-- the psi mumble freezes it at whatever it last held -- silently, and only on some zones.
+-- And its inertia is the curve someone picked for a sound fade, where interference wants
+-- RISE_TAU and FALL_TAU. Reading the raw target and easing it ourselves costs nothing and
+-- removes both problems.
+local function antenna_level()
+	local pa = ANT and ANT.psy_antenna
+	if not pa then return 0 end
+	local b = pa.sound_intensity_base or 0
+	local hi = pa.hit_intensity or 0
+	if hi > b then b = hi end
+	return (b > 1) and 1 or ((b > 0) and b or 0)
+end
+
+-- Everything the world is doing, as one target. MAX and not a sum: max means "whatever is
+-- worst right now", it cannot compound past 1, and it needs no normalising. A sum would
+-- let two mild sources -- a hostile level and a distant field -- add up to a reading that
+-- neither of them justifies, and would then need a clamp that hides exactly that.
+-- Whichever bid is highest wins, and it carries its name for the debug line. Two file
+-- locals rather than a closure over `poll`'s scope: a local function defined inside poll
+-- is a fresh closure on every poll, which is an allocation four times a second for the
+-- life of the game -- small, and exactly the kind of small this file has no reason to pay.
+local _best, _src = 0, ""
+local function bid(v, name)
+	if v > _best then _best, _src = v, name end
+end
+
+local function poll(tg)
+	_best, _src = 0, ""
+
+	if EV then
+		local sg = EV.surge
+		-- GATED ON .state, and this is not belt-and-braces. SetEvent("surge","time",...)
+		-- only runs inside the started branch, so .time is not cleared when an emission
+		-- ends -- it just stops being written. Read it ungated and the last emission's
+		-- final second stands for the hours between emissions: a permanently maxed
+		-- overlay, from a missing `and`.
+		if sg and sg.state then
+			local lvl = surge_level(sg.time)
+			-- Sheltered? A once-a-poll question and never a per-frame one: pos_in_cover
+			-- walks the level's cover restrictors calling :inside() on each.
+			if lvl > 0 and SURGE_M then
+				local m = SURGE_M.get_surge_manager and SURGE_M.get_surge_manager()
+				local ac = db and db.actor
+				if m and m.pos_in_cover and ac then
+					if m:pos_in_cover(ac:position()) then lvl = lvl * SURGE_COVER end
+				end
+			end
+			bid(lvl, "surge")
+		end
+
+		local ps = EV.psi_storm
+		if ps and ps.state then
+			bid(STORM_LVL, "storm")
+			-- .vortex is the vortex's sound position while one is live and `false` when it
+			-- ends, so the type test IS the presence test -- and it has to be a type test
+			-- rather than a truth test, because `false` is a legitimate stored value here
+			-- (SetEvent stores it: its guard is `v2 ~= nil`, not `if v2`).
+			local vp = ps.vortex
+			local ac = db and db.actor
+			if ac and type(vp) == "userdata" then
+				local d = ac:position():distance_to(vp)
+				if d < VORTEX_R then
+					bid(VORTEX_LVL * (1 - d / VORTEX_R), "vortex")
+				end
+			end
+		end
+	end
+
+	bid(antenna_level(), "psi_zone")
+
+	if NORTH and NORTH.psy_damage == 1 then bid(NORTH_LVL, "north") end
+
+	if tg < N.spike then bid(SPIKE_LVL, "psi_hit") end
+
+	N.tgt, N.src = _best, _src
+end
+
+-- Redraw the band pattern, and roll the beat's dropout. Once every BEAT ms.
+local function beat(tg, p)
+	N.bi = (N.bi + 1) % 4096            -- kept small: the hash's inputs stay exact
+	N.bt = tg + BEAT
+	for i = 1, NB do
+		-- -1..1, and biased so most bands sit near zero: a pattern where every band is
+		-- displaced hard is a sheared picture, whereas a few strong bands against mostly
+		-- still ones is interference. Cubing does that and keeps the sign.
+		local v = h(i, N.bi) * 2 - 1
+		N.B[i] = v * v * v
+	end
+	if p >= T_CHROMA then N.ce = (N.ce + 1) % 4096 end
+
+	-- The text and icon rolls, and the RESOLVE-ON-BEAT is the `or 0` on each: a beat that
+	-- loses its roll publishes 0, which is "draw it correctly". So the mark snaps back to
+	-- the truth several times a second and the corruption reads as something failing to
+	-- render rather than as the overlay asserting something false.
+	--
+	-- Ramped across the tier from T_CHROMA like everything else, so the first corruptions
+	-- are a rare stutter and only near full pressure is it frequent.
+	if p >= T_CHROMA then
+		local f = (p - T_CHROMA) / (1 - T_CHROMA)
+		-- Distinct hash rows (NB+2, NB+3) so the two are independent of each other AND of
+		-- the dropout roll on NB+1. Sharing a row would flip text and icon together, which
+		-- reads as one event rather than as two things going wrong in the same weather.
+		N.txk = (h(NB + 2, N.bi) < (TX_DUTY_LO + (TX_DUTY_HI - TX_DUTY_LO) * f)) and N.ce or 0
+		N.ick = (h(NB + 3, N.bi) < (IC_DUTY_LO + (IC_DUTY_HI - IC_DUTY_LO) * f)) and N.ce or 0
+	else
+		N.txk, N.ick = 0, 0
+	end
+
+	-- The dropout roll for this beat. Ramped across the tier so the first blinks are rare
+	-- and the last are frequent, rather than dropout arriving all at once at T_DROP.
+	if p >= T_DROP then
+		local f = (p - T_DROP) / (1 - T_DROP)
+		local odds = DROP_MIN + (DROP_MAX - DROP_MIN) * f
+		N.drop = h(NB + 1, N.bi) < odds
+	else
+		N.drop = false
+	end
+end
+
+--- Ease the envelope and derive everything drawn from it. Called from iqm_core.render on
+--  every frame the mod runs at all, ahead of its early returns (see the seam note).
+--
+--  With the feature off this is one compare. With it on and nothing happening it is a
+--  compare, a poll every 250 ms and an ease -- no allocation, and nothing per widget.
+function tick(tg)
+	if not N.on then return end
+
+	-- The signals move at 1 Hz (both managers rewrite their clocks once per real second)
+	-- and the antenna's intensity crawls, so polling them four times a second is already
+	-- finer than anything they can say. The EASE is per frame; the READ is not.
+	if tg >= N.slow then
+		N.slow = tg + 250
+		poll(tg)
+	end
+
+	local dt = tg - N.t
+	-- Clamped against hitches and against a first frame measured from zero, exactly as
+	-- the combat dim and the card fade clamp theirs.
+	if dt < 1 then dt = 1 elseif dt > 100 then dt = 100 end
+	N.t = tg
+	-- `p` IS TRUE PRESSURE, 0..1, AND noise_amt IS NOT IN IT. That was the bug (found in
+	-- game, R2.59a): easing toward `N.tgt * N.amt` scales the pressure, and every tier
+	-- threshold is a comparison against the pressure -- so the strength slider silently
+	-- moved all four of them, which is the opposite of what it is documented to do.
+	--
+	-- Both ends were broken, and the low end was worse. At noise_amt 10 no source can push
+	-- p past 0.1 while T_TEAR is 0.15, so the whole feature was DEAD -- the bottom quarter of
+	-- the slider did nothing at all rather than being subtle. At 200 the emission's impact
+	-- (true pressure 0.45) read as 0.90 and the overlay gave up there instead of at the
+	-- waves, which is the tier ORDER destroyed by a setting that is not allowed to touch it.
+	--
+	-- So the slider scales what is DRAWN (see below) and the envelope stays a measurement of
+	-- the world. No clamp is needed on the way in: every source is already <= 1 -- the knot
+	-- table tops out at 1, the antenna is clamped in antenna_level, and the rest are
+	-- constants -- so a max over them cannot exceed 1 either.
+	local tgt = N.tgt
+	N.p = N.p + (tgt - N.p) * (1 - exp(-dt / ((tgt < N.p) and FALL_TAU or RISE_TAU)))
+	local p = N.p
+
+	-- Below the first tier there is nothing to draw and nothing to keep warm. Landed on
+	-- exactly 0/1 rather than approached, for the reason SMN's note gives: these are read
+	-- as "is the feature doing anything at all", and a residue of 0.003 would keep every
+	-- reader doing full work for a displacement nobody can see.
+	if p < T_TEAR then
+		N.amp, N.fr, N.af, N.drop, N.ce, N.txk, N.ick = 0, 0, 1, false, 0, 0, 0
+		return
+	end
+
+	if tg >= N.bt then beat(tg, p) end
+
+	-- Amplitudes ramp from their tier, not from zero, so nothing pops into existence at
+	-- full strength the instant a threshold is crossed -- and THIS is where noise_amt
+	-- applies, on what is drawn rather than on the pressure that decides what is drawn.
+	local ft = (p - T_TEAR) / (1 - T_TEAR)
+	N.amp = TEAR_MAX * ft * N.amt
+	N.fr  = (p >= T_CHROMA) and (FRINGE_MAX * (p - T_CHROMA) / (1 - T_CHROMA) * N.amt) or 0
+	-- CLEARED ON THE WAY DOWN, and it has to be cleared HERE rather than in beat(): ce is a
+	-- monotonic counter, and beat() only bumps it while the corruption tier holds. Left
+	-- alone it would keep its last non-zero value for ever, which reads as the range
+	-- readout still lying long after the psi field is behind you -- and, because a stuck ce
+	-- is a stable cache key, lying the SAME way permanently. A wrong number that never
+	-- corrects itself is the one failure mode this feature must not have.
+	if p < T_CHROMA then N.ce, N.txk, N.ick = 0, 0, 0 end
+
+	-- The alpha side takes noise_amt too, as the DEPTH of the dip rather than as a scale on
+	-- the floor: `1 - (1 - floor) * amt` leaves a 10% player barely dipping where a 100% one
+	-- goes to the floor. Without it the slider would move the geometry and leave the overlay
+	-- blinking fully out regardless, which is not what "strength" means.
+	--
+	-- CLAMPED AT 1 on the way up, because these are floors and there is nothing below them
+	-- to reach: 200% already doubles the tear, and letting it past 1 here would drive af
+	-- NEGATIVE and hand a negative alpha to GetARGB.
+	local amtc = N.amt
+	if amtc > 1 then amtc = 1 end
+	if N.giveup and p >= T_GIVE then
+		N.af = 1 - amtc
+	elseif p >= T_GIVE then
+		N.af = 1 - (1 - GIVE_FLOOR) * amtc
+	elseif N.drop then
+		N.af = 1 - (1 - DROP_FLOOR) * amtc
+	else
+		N.af = 1
+	end
+
+	if DEBUG and tg - _dbg_t > 1000 then
+		_dbg_t = tg
+		-- printf substitutes %s and nothing else, so every number is pre-formatted --
+		-- a %.2f here would print raw and shift every argument after it.
+		iqm_util.dbg_out("-IQM-NOISE: p=%s src=%s amp=%s af=%s",
+			string.format("%.3f", p), N.src,
+			string.format("%.2f", N.amp), string.format("%.2f", N.af))
+	end
+end
+
+--- The live state table, for iqm_cards. Bound ONCE by the caller and read forever: this
+--  returns the same table for the life of the process and tick() only ever mutates it.
+function state()
+	return N
+end
+
+--- The fringe hue, so the one file that tints with it does not keep a second opinion
+--  about what colour a chromatic fringe is.
+function fringe_rgb()
+	return FR_R, FR_G, FR_B
+end
+
+--- The band geometry, for whoever indexes N.B. Published rather than restated over there,
+--  because the two have to agree exactly: N.B has NB entries and an index built from the
+--  wrong BAND_H reads the wrong band, or past the end of the table. Bound into file locals
+--  by the caller's apply_config, so the per-widget path pays a local read and not a call.
+--
+--  Returns 1/BAND_H rather than BAND_H: the caller divides by it on every widget it places,
+--  and a reciprocal handed over once turns every one of those into a multiply.
+function band_geom()
+	return NB, 1 / BAND_H
+end
+
+--- PULLED, not pushed: iqm_core calls this at the end of read_config.
+function apply_config()
+	local C = iqm_core.config()
+	DEBUG    = C.debug_log and true or false
+	N.on     = C.noise and true or false
+	N.amt    = (C.noise_amt or 100) / 100
+	N.giveup = C.noise_giveup and true or false
+	-- Switched off at runtime, the published state has to go to REST, not stay wherever it
+	-- was when the option changed. Every reader gates on these, so a stale amp would leave
+	-- the last frame's tear frozen on screen until the feature was switched back on.
+	if not N.on then
+		N.p, N.tgt, N.amp, N.fr, N.af, N.drop, N.ce, N.txk, N.ick = 0, 0, 0, 0, 1, false, 0, 0, 0
+	end
+end
+
+function on_game_start()
+	-- Bound here rather than at file scope: sr_psy_antenna and the rest are other mods'
+	-- namespaces, and a file-scope read would let load order decide whether we saw a
+	-- half-built one. By on_game_start every script is whole.
+	EV      = _EVENT
+	SURGE_M = surge_manager
+	ANT     = sr_psy_antenna
+	NORTH   = grok_psy_fields_in_the_north
+	-- Type 4 is telepatic (ALife::EHitType, alife_space.h) -- the numeric literal for the
+	-- reason SUP.HIT uses numerics: `hit.telepatic` is an engine table read, and this is a
+	-- callback registered before anything guarantees it.
+	--
+	-- Note the exact complement of SUP.on_hit one file over: the combat dim lists the five
+	-- ways a FIGHT hurts you and deliberately excludes telepatic as "the environment, not
+	-- combat". This is the feature that cares about precisely what that one excludes.
+	RegisterScriptCallback("actor_on_before_hit", on_hit)
+end
+
+--- A telepathic hit stamps the spike. Filtered hard: actor_on_before_hit fires for ALL
+--  damage, and the radiation and burn ticks fire every frame -- an unfiltered handler
+--  would pin the overlay at SPIKE_LVL for as long as the player stood in a hot spot.
+function on_hit(s_hit)
+	if N.on and s_hit and s_hit.type == 4 then
+		N.spike = time_global() + SPIKE_MS
+	end
+end

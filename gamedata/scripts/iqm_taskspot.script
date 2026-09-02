@@ -1,0 +1,288 @@
+-- ======================================================================
+--  Immersive Quest Markers: task-KIND map spots
+-- ======================================================================
+--  Puts a skull on a mutant hunt's PDA pin and turns a bounty's reticle red,
+--  while the job is still outstanding, and puts the task's own marker back the
+--  moment it is done and owed to somebody.
+--
+--  WHY THIS IS A MODULE AND NOT A COLOUR. A map spot's art and tint are attributes
+--  on its <texture> element in map_spots.xml, read once when that file is parsed.
+--  There is no runtime tint on a map spot and no per-task one -- every task sharing a
+--  location TYPE shares its appearance -- so the only way to say "this pin is a mutant
+--  hunt" is to point that task at a different type. iqm_map_spots.xml declares the two
+--  new types; this file decides which tasks wear them.
+--
+--  HOW IT HOOKS: it doesn't. CGameTask::ChangeMapLocation is remove-then-recreate and
+--  fully re-entrant (GameTask.cpp:126-135), and set/get/change_map_location are all
+--  bound to Lua (GameTask_script.cpp:41-59), so a poller that compares wanted against
+--  actual and calls change_map_location on the difference needs no monkey-patch, no
+--  unlocalizer and no override of task_objects.script. That is rung 0 of the hook tree
+--  and it is available here only because the engine happens to expose the setter; the
+--  alternative was wrapping CGeneralTask:check_task, which every other task mod also
+--  wants to wrap.
+--
+--  WHAT IT COSTS, and the one visible artefact. Vanilla re-applies a task's OWN spot
+--  whenever the target changes (task_objects.script:219), so after a target change our
+--  type is clobbered until the next pass -- up to SYNC_MS of vanilla icon. That is not
+--  worth chasing, because the target change that matters is the one at hand-in, where
+--  vanilla's answer and ours agree: the objective is done, task_kind has gone nil, and
+--  the vanilla marker is exactly what should be there. The blips are on the changes
+--  nobody is looking at.
+--
+--  THE SAVE HAZARD, and how it is closed. A task's location type STRING is written into
+--  the save (SLocationKey::save, map_manager.cpp:62) and rebuilt through CMapLocation's
+--  constructor on load, which R_ASSERTs on a type map_spots.xml does not declare
+--  (map_location.cpp:105) -- an engine fatal that no pcall catches. Left alone, that means
+--  a save taken while a bounty is flagged red will not load with this mod removed.
+--
+--  It is not left alone. revert_for_save (below) puts every flagged task back on its own
+--  type inside the engine's pre-save callback, fourteen lines before the registry is
+--  serialised, so NO SAVE EVER CONTAINS ONE OF THESE NAMES and the mod can be deleted at
+--  any moment. Three further guards back that up:
+--    * the type names are never handed out unless the DXML splice that declares them
+--      actually PUT THEM IN THE DOM (see `declared`), so an install without the modded
+--      exes' DXML support, or with a stale copy of iqm_map_spots.xml, gets vanilla spots
+--      instead of a crash;
+--    * the feature refuses to run at all without marshal, since that is what the pre-save
+--      callback rides on (see apply_config);
+--    * switching the feature off REVERTS every task still wearing one of ours, rather
+--      than just ceasing to apply new ones -- which is why the pass below runs even
+--      when the feature is off, and why it cannot be short-circuited on a flag that
+--      does not survive a save. This is also the manual escape hatch: untick the option,
+--      save, and the save is clean whatever else has gone wrong.
+--  Personal Adjustable Waypoint carries the same hazard for its own ~100 types and does
+--  not close it, so this is stricter than the pack's normal rather than looser.
+-- ======================================================================
+
+-- Kind -> location type. The type names are declared in
+-- gamedata/configs/ui/iqm_map_spots.xml and spliced into map_spots*.xml by
+-- modxml_n_iqm_map_icons; the keys are iqm_scan.task_kind's vocabulary.
+local SPOT = {
+	mutant = "iqm_task_mutant",
+	bounty = "iqm_task_bounty",
+	-- THERE WAS A `hostage` KEY HERE UNTIL R2.55, the bounty's mark in azure, sharing its
+	-- atlas cell and differing only in tint. It is gone because iqm_scan now answers "bounty"
+	-- for the rescue functor outright: a rescue and a contract turned out to differ only in
+	-- the verb, and the verb is the part the player does not act on - either way the job is
+	-- to kill the people at that pin. The reasoning is at STATUS_KIND in iqm_scan.script;
+	-- reinstating it means a key here, a type in ui/iqm_map_spots.xml, and a pointer.
+	--
+	-- The envelope. Its stage 1 target is the person you are taking the package to, which
+	-- is the same shape of mark as the two above and reads as the same reticle without a
+	-- glyph to separate them. See iqm_task_delivery in ui/iqm_map_spots.xml.
+	delivery = "iqm_task_delivery",
+	-- THE LAST TWO ARE THE SAME MARK ON TWO TYPES, and neither is a kind of JOB like the
+	-- three above. Both mean "this pin is landing on top of something the map already
+	-- draws", so both wear the reticle with its middle removed and ring that thing instead
+	-- of covering it.
+	--
+	-- THEY POINTED AT ONE TYPE UNTIL R2.55 AND THAT WAS A BUG. The shared type had no
+	-- static_border, which is not a styling choice -- it is the engine's entire active-task
+	-- indicator, and show_static_border is a silent no-op when the element is absent
+	-- (map_spot.cpp:140-146). Selecting a stash task did nothing visible, so it read as an
+	-- unclickable pin. The border is right for every case except PAW's, which brings its own
+	-- animated ring to the same object; so the two keys now name two types that differ in
+	-- exactly that one element. Full argument on both types in ui/iqm_map_spots.xml.
+	--
+	-- The keys were already separate, for an unrelated reason that still holds: iqm_beacon
+	-- dresses a marker by kind, and BEACON_ICON.waypoint is a real glyph -- the player's own
+	-- pin, which their own placed waypoint should keep drawing through a wall. `open` has no
+	-- entry there and falls through to the ordinary task glyph, which is right for a stash
+	-- task and would be wrong if it borrowed the waypoint's. That the split was already
+	-- expressed here is why fixing the bug cost one string.
+	waypoint = "iqm_task_waypoint",
+	open     = "iqm_task_open",
+
+	-- HAND-IN: objective done, the marker has moved onto the task giver, go and collect.
+	--
+	-- The one kind here that is a state rather than a job, which is why iqm_scan answers it
+	-- ahead of everything else and never caches it -- see handin_state there. The others are
+	-- properties of the section and latch for the session; this one has to be able to turn
+	-- back off, and it does when the task completes and the location goes away.
+	--
+	-- IT REPLACED A BORROWED MARKER. Until R2.58 this state was drawn by
+	-- gamma-active-task-ui-enhancements, which set atue_return_task_location itself while
+	-- this mod merely re-textured it. That arrangement looked fine and had a hole in it:
+	-- uninstall ATUE and the marker disappeared, because the meaning lived over there and
+	-- only the picture lived here. Both live here now. The re-texturing stays in
+	-- modxml_n_iqm_map_icons and is still correct for anyone running ATUE -- with it
+	-- installed its spot wins, since OURS below deliberately refuses to take another mod's
+	-- pin, and the player sees the same green diamond either way.
+	handin   = "iqm_task_handin",
+}
+
+-- The reverse set, and it is what makes this safe to run alongside other task mods.
+-- A task's spot is only ever touched when it currently carries either the type the
+-- TASK ITSELF declares (t.spot -- i.e. nobody has moved it) or one of ours (i.e. we
+-- moved it). Anything else means another mod owns that pin right now -- ATUE's
+-- return-task spot is the live example in GAMMA -- and it is left exactly alone.
+-- Without this the pass would happily overwrite ATUE's marker with a vanilla one on
+-- its very first tick.
+local OURS = {}
+for _, v in pairs(SPOT) do OURS[v] = true end
+
+-- PUBLISHED for modxml_n_iqm_map_icons, which probes the parsed DOM for every one of these
+-- before it will let the declared flag go true. It used to probe a single representative
+-- name, which passed on exactly the stale-XML case the probe exists to catch -- a deployed
+-- iqm_map_spots.xml a version behind HAS the older types and not the newest. Handing the
+-- list over rather than restating it there is what stops that recurring: this module is
+-- the one that names these to change_map_location, so it is the one that knows them.
+spot_types = SPOT
+
+-- 750 ms. The upper bound on how long a task can wear the wrong pin after a target
+-- change, and it only ever costs a glance at the PDA -- there is no frame-rate reason
+-- to go faster, and no accuracy reason either, since nothing here is drawn in the
+-- world. The pass itself is a table lookup and a string compare per ACTIVE task
+-- (typically under thirty, even in GAMMA), so this is cheap enough to run
+-- unconditionally, which the revert-on-disable promise above requires it to be.
+local SYNC_MS = 750
+
+local on = false        -- feature switched on AND the mod's map art in use
+local next_t = 0
+-- Bound in on_game_start: iqm_scan owns the classification and modxml_n_iqm_map_icons
+-- owns the promise that the types exist. Both are read through their namespaces rather
+-- than copied, because `declared` is only set when the engine first parses
+-- map_spots.xml, which happens in game -- long after this file is loaded, and after
+-- on_game_start too.
+local task_kind, task_active = nil, nil
+
+--- Pulled by iqm_core alongside every other module's, in the same order and for the
+--  same reason: one read of the config per change, not one per tick.
+--
+--  GATED ON map_icons as well as its own key. The two new spots are IQM art whichever
+--  way that switch is set -- they live in the mod's own spliced file, not in the
+--  retexture pass -- so nothing technical forces this. It is a consistency call: a
+--  player who has asked for vanilla map icons should not find an acid-green skull among
+--  them. Turning map_icons off therefore reverts these live, without the restart the
+--  retexture itself needs.
+--  iqm_core.config(), NOT iqm_core.C. `C` is a file LOCAL in that module (`:649`), so
+--  `iqm_core.C` is nil and every gate built on it is silently false -- which is exactly
+--  what R2.48 shipped, and why neither the skull nor the red reticle ever appeared. The
+--  accessor is what every other module uses (`iqm_beacon.apply_config:498`).
+--
+--  AND ON USE_MARSHAL, which looks unrelated and is not. The promise below -- that no save
+--  ever contains one of our spot types -- is kept by the save_state callback, and
+--  alife_storage_manager only fires that callback when marshal is present
+--  (`alife_storage_manager.script:162-170`). Without it there is no pre-save hook, so the
+--  types would reach saves with no way back out. Refusing to flag at all is then the only
+--  honest answer: the feature is worth less than the promise. In practice this is never
+--  false -- marshal ships with the engine's lua_extensions and half of Anomaly's own save
+--  path depends on it -- so the guard costs nobody the feature and makes the invariant
+--  something that holds by construction rather than by luck.
+function apply_config()
+	local C = iqm_core and iqm_core.config and iqm_core.config()
+	on = (C and C.enabled and C.map_icons and C.map_task_kinds and USE_MARSHAL) and true or false
+	next_t = 0
+end
+
+--- One pass over the active tasks.
+--
+--  LIVENESS IS iqm_scan.task_active, and it is checked BEFORE get_map_location rather than
+--  after. A task whose locations have been removed holds a null m_map_location, and
+--  GetMapLocation_script hands that shared_str's c_str() straight to luabind
+--  (GameTask.h:120) -- not a road worth walking to find out what it does.
+--
+--  R2.48 invented `t.status == "selected"` for this instead. iqm_scan already had the
+--  answer and had written it as a NEGATIVE test -- not completed, not failed, not
+--  reversed, and the actor still holds the task -- which is the shape it is because that
+--  is how the field actually behaves. Two liveness tests for one question is one of them
+--  being wrong, and it was this one.
+local function sync()
+	local tm = task_manager and task_manager.get_task_manager and task_manager.get_task_manager()
+	local info = tm and tm.task_info
+	if not info then return end
+
+	-- Read per pass, never cached: the splice fires on the frame the engine first
+	-- parses map_spots.xml, which can be any time after this module is loaded. Cached
+	-- at on_game_start it would read nil for the whole session.
+	--
+	-- ONE HAZARD THIS FLAG CANNOT COVER, and it is a MOD-DEVELOPMENT one rather than a
+	-- player one. map_spots.xml is parsed by several CUIXml instances, but the only one
+	-- that decides whether a type EXISTS for the engine is g_uiSpotXml -- built once, on
+	-- the first map location of the process, and freed at DLL detach. This callback cannot
+	-- tell which instance it is patching. So if the deployed iqm_map_spots.xml gains a type
+	-- while the game is ALREADY RUNNING, a later parse (the PDA map window's, say) sets
+	-- this flag true while g_uiSpotXml -- built earlier, from the older file -- has never
+	-- heard of it, and the first change_map_location takes the game down. Loading a save
+	-- does not help: it re-reads .script files but not map_spots.xml.
+	--
+	-- SO g_uiSpotXml HAS TO BE REBUILT, and R2.51 found that the engine can do that without
+	-- the game being closed. This note used to say "restart, full stop", which was true of
+	-- everything that had been tried and not true of the engine.
+	-- CHUDManager::OnScreenResolutionChanged (HUDManager.cpp:464-482) does exactly the two
+	-- things needed and in the right order: xr_delete(g_uiSpotXml), then
+	-- Level().MapManager().ReloadSpots() (map_manager.cpp:309), which re-runs LoadSpot on
+	-- every live location against the DOM the next parse builds. CXml::Load re-reads the
+	-- file from the VFS and fires _G.COnXmlRead on the way past (xrXMLParser.cpp:143 ->
+	-- ScriptXMLInit.cpp:55), so the DXML splice runs again and the new types are in the
+	-- fresh DOM before any location asks for one.
+	-- The trigger is a REAL resolution change, not vid_restart: seqResolutionChanged is
+	-- processed only when the dimensions actually differ (Device_destroy.cpp:99-101 and
+	-- 186-187), so an in-place vid_restart rebuilds nothing.
+	-- The rule for a spot type added while the game is running is therefore: load a save to
+	-- pick up the scripts, then flip the resolution and back to pick up the XML. Between
+	-- those two this flag reads nil and the feature is simply OFF, which is the safe
+	-- intermediate state rather than a hazardous one -- and it is why the flag being a
+	-- namespace global that a script re-read clears is a feature and not an accident.
+	local declared = modxml_n_iqm_map_icons and modxml_n_iqm_map_icons.iqm_task_spots_declared
+
+	for _, t in pairs(info) do
+		local gt = t.t
+		local base = t.spot
+		if gt and base and t.current_target and (not task_active or task_active(t)) then
+			local cur = gt:get_map_location()
+			-- Ours to move, or nobody's? Anything else belongs to another mod.
+			if type(cur) == "string" and (OURS[cur] or cur == base) then
+				local kind = (on and declared and task_kind) and task_kind(t) or nil
+				local want = (kind and SPOT[kind]) or base
+				if want ~= cur then
+					gt:change_map_location(want, t.current_target)
+				end
+			end
+		end
+	end
+end
+
+local function actor_on_update()
+	local tg = time_global()
+	if tg < next_t then return end
+	next_t = tg + SYNC_MS
+	sync()
+end
+
+--- NO SAVE EVER CONTAINS ONE OF OUR SPOT TYPES.
+--
+--  This is what makes the mod safe to remove at any moment, and it turns the save hazard
+--  in the header from a documented risk into one that cannot occur. Every flagged task is
+--  put back on its own type just before the game writes, so what lands on disk is a
+--  vanilla name that any install can load -- with or without this mod.
+--
+--  THE ORDERING IS THE WHOLE TRICK, and it is verifiable rather than hopeful. The engine
+--  calls alife_storage_manager.CALifeStorageManager_before_save at
+--  alife_storage_manager.cpp:75, and serialises the map-location registry at
+--  `registry().save(stream)` on line 89 -- fourteen lines later, same function, same
+--  frame. `save_state` is fired from inside that Lua function (`:170`), so a revert here
+--  is guaranteed to be in the data the engine is about to write. It covers BOTH carriers
+--  of the string: SLocationKey (via `registry().save`) and CGameTask's own m_map_location
+--  (via `objects().save`, line 88), because both are downstream of the callback.
+--
+--  Re-applied on the very next frame -- `next_t = 0` rather than waiting out SYNC_MS -- so
+--  the pins are plain for one frame during an autosave and nobody sees it.
+--
+--  `on` is flipped rather than a second reverting routine being written: "put everything
+--  back" is precisely what a pass with the feature off already does, and the alternative
+--  is two code paths that have to agree about what "everything" means.
+local function revert_for_save()
+	local was = on
+	on = false
+	sync()
+	on = was
+	next_t = 0
+end
+
+function on_game_start()
+	task_kind   = iqm_scan and iqm_scan.task_kind
+	task_active = iqm_scan and iqm_scan.task_active
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("save_state", revert_for_save)
+end

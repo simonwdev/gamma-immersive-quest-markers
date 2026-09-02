@@ -1,0 +1,119 @@
+-- ======================================================================
+--  Immersive Quest Markers: F7 test drivers for the CARD layer
+-- ======================================================================
+-- Split out of iqm_core at R2.44, for one reason worth stating plainly:
+-- iqm_core was sitting at 193 of the 198 locals a .script gets, and going over
+-- is a SYNTAX ERROR AT LOAD -- not a runtime fault in the debug code, but the whole
+-- card/beacon/route feature failing to load at all. Debug scaffolding is the first
+-- thing that should be paying that rent, so it moved here.
+--
+-- Force-card the stalker under the crosshair, bypassing the task/guide/companion
+-- sources, so every card style can be exercised without needing a matching quest.
+-- Reachable two ways:
+--   * the F7 debugger's Execute tab ("IQM: Card as ..." entries, injected below), or
+--   * the Lua execute box: iqm_debug.debug_card("target" | "guide" | "companion")
+-- Same NPC + same role again unpins them; a different role switches the style.
+-- debug_clear() unpins everything.
+--
+-- THE ONE COUPLING BACK INTO iqm_core, and why it is shaped this way:
+--
+--   * `pins` is a NAMESPACE GLOBAL, not a local, because iqm_core.update() reads
+--     it as `iqm_debug.pins` every scan and merges it over the detected roles. A
+--     .script's globals ARE its namespace table (bare `pins = {}` below assigns
+--     iqm_debug.pins), so debug_clear's rebind is visible to the reader immediately.
+--   * iqm_core exports debug_rescan() so a pin applies on the next update instead
+--     of waiting out the scan interval. Calling it is optional -- iqm_core guards
+--     the call -- so this file loading without it is not an error.
+--
+-- Both directions are soft: iqm_core works with this file absent, and this file
+-- works with iqm_core absent. Neither may assume load order.
+
+-- [npc_id] = forced role. Merged into the desired set each scan by iqm_core, so
+-- its stale sweep cannot remove them.
+pins = {}
+
+-- Feedback lands in the F7 debugger's output console when it's around (its
+-- send_output also mirrors to the log), else straight in the log. The body moved
+-- to iqm_util.dbg_out -- five files were carrying the same four lines -- and is
+-- called through the namespace rather than aliased into a local here, because it
+-- only ever runs from a debug action.
+local DBG_ROLES = {
+	target = true, guide = true, companion = true, hire = true,
+	guider = true, trader = true, mechanic = true, barman = true,
+	medic = true, important = true, work = true,
+}
+
+local function rescan()
+	if iqm_core and iqm_core.debug_rescan then iqm_core.debug_rescan() end
+end
+
+function debug_card(role)
+	local obj = level.get_target_obj and level.get_target_obj()
+	if not (obj and (IsStalker(obj) or obj:clsid() == clsid.script_trader) and obj:alive()) then
+		iqm_util.dbg_out("!IQM: no living stalker under the crosshair")
+		return
+	end
+	if not DBG_ROLES[role] then role = "target" end
+	local id = obj:id()
+	if pins[id] == role then
+		pins[id] = nil
+		iqm_util.dbg_out("-IQM: unpinned card on [%s]", obj:name())
+	else
+		pins[id] = role
+		iqm_util.dbg_out("-IQM: pinned [%s] as '%s'", obj:name(), role)
+	end
+	rescan()
+end
+
+function debug_clear()
+	pins = {}
+	rescan()
+	iqm_util.dbg_out("-IQM: all pinned cards cleared")
+end
+
+-- The F7 "Card as Trader" helper cycles through the service glyphs so all four can
+-- be previewed from one button: it pins a random service role, always different
+-- from the one currently on that NPC, so each press visibly changes the icon
+-- (use "Cards Clear" to remove it).
+--
+-- It does NOT reseed the RNG. The old version called math.randomseed(time_global())
+-- on every press, which reseeds the GAME-WIDE generator from a debug button -- a
+-- side effect well outside what previewing an icon should cost. The cycle only has
+-- to differ from the last one, and the "while role == cur" retry gives that without
+-- caring how good the sequence is.
+local SERVICE_ROLES = { "trader", "mechanic", "barman", "medic" }
+function debug_card_service()
+	local obj = level.get_target_obj and level.get_target_obj()
+	-- No alive() here: the crosshair object may be a class without it (physics
+	-- object, restrictor), and dead pins are pruned every scan anyway.
+	local cur = obj and pins[obj:id()]
+	local role = cur
+	while role == cur do role = SERVICE_ROLES[math.random(#SERVICE_ROLES)] end
+	debug_card(role)
+end
+
+-- --------------------------------------------------------------------------
+-- Wiring
+-- --------------------------------------------------------------------------
+-- The launcher's content table lives for the whole game process, so the once-flag
+-- and the guard-and-inject loop live in iqm_util.inject_actions; what stays here is
+-- the list, which was always the only part that differed between the five modules
+-- doing this. hide_ui = 2 closes/unpauses the debugger before the functor runs, so
+-- the card appears (on the NPC still under the crosshair) the moment the menu drops.
+function on_game_start()
+	iqm_util.inject_actions("iqm_debug", {
+		{ name = "IQM: Card as Quest Target", functor = { debug_card, "target" },    hide_ui = 2 },
+		{ name = "IQM: Card as Guide",        functor = { debug_card, "guide" },     hide_ui = 2 },
+		{ name = "IQM: Card as Companion",    functor = { debug_card, "companion" }, hide_ui = 2 },
+		{ name = "IQM: Card as Paid Escort",  functor = { debug_card, "hire" },      hide_ui = 2 },
+		{ name = "IQM: Card as Guide NPC",    functor = { debug_card, "guider" },    hide_ui = 2 },
+		{ name = "IQM: Card as Trader",       functor = { debug_card_service },      hide_ui = 2 },
+		{ name = "IQM: Card as Important",    functor = { debug_card, "important" }, hide_ui = 2 },
+		{ name = "IQM: Card as Has-Work",     functor = { debug_card, "work" },      hide_ui = 2 },
+		{ name = "IQM: Cards Clear",          functor = { debug_clear },             hide_ui = 2 },
+		-- taskwork cache/queue snapshot, for checking what the work detector believes
+		{ name = "IQM: Cards Task-Work Dump", hide_ui = 0, functor = { function()
+			if iqm_taskwork and iqm_taskwork.debug_dump then iqm_taskwork.debug_dump(iqm_util.dbg_out) end
+		end } },
+	})
+end

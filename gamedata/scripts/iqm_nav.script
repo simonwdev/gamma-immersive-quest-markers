@@ -1,0 +1,2433 @@
+-- ======================================================================
+--  Immersive Quest Markers: route driver (F2)
+-- ======================================================================
+-- Decides WHERE the route goes and WHAT state each point of it is in. The
+-- drawing is done by the card layer (iqm_core, IqmCards:draw_route), which
+-- owns the textured-sprite machinery; this module owns everything else:
+--
+--   iqm_route     -- coarse A* on the AI level graph (mechanism, no game state)
+--   THIS          -- who to route to, when, which points to draw, how visible each is
+--   iqm_core   -- projects those points and draws them as sprites
+--
+-- WHY SPRITES AND NOT THE WIRE RENDERER (2026-08-13, after the third in-game
+-- session). The route started on iqm_pathline's debug_render gizmo queue, which
+-- is a 1 px untextured line list with no alpha blending. Three consequences, all
+-- of which showed up on screen:
+--   * no line thickness, so "bold" had to be faked by clustering rails a couple
+--     of centimetres apart -- which at close range is visibly three thin lines
+--   * no alpha, so an occluded stretch could only pop between two solid colours,
+--     in batches of whatever the round-robin cull got to that frame
+--   * the geometry is rebuilt wholesale, so it only updated when the actor
+--     crossed a route point -- i.e. in 2 m steps, which read as lag
+-- The mod already ships a textured, alpha-blended, rotatable sprite layer (the
+-- cards and the beacon) and the art for it (iqm_route_arrow). Projecting
+-- route points onto that gives real thickness, anti-aliased edges, per-sprite
+-- alpha, and -- because it is drawn from the projection every frame -- motion
+-- that is smooth instead of stepped.
+--
+-- The trade, stated plainly: a CUIStatic cannot be perspective-warped, so the
+-- sprites are billboards and do not lie flat on the ground the way the wire did.
+-- Perspective is carried instead by scaling each sprite with its distance, which
+-- is what makes a receding line of arrows read as a path running away from you.
+--
+-- WHAT IT DRAWS. One route at a time, to the current objective NPC -- the same
+-- NPC the hand-in card and beacon mark (iqm_core.route_target, role ==
+-- "target"). Only that role: a painted path to a mechanic is a different feature,
+-- and a single route that swung between candidates would read as a bug.
+--
+-- WHAT IT LOOKS LIKE, and why it is a LINE (revised 2026-08-13, sixth session).
+-- Spaced marks were tried at 4 m and then at 2 m, and neither read as a path: a
+-- run of separate glyphs says "here are some points", and the eye has to do the
+-- joining. It is also the wrong shape for the reference the look is drawn from --
+-- an army map marks an axis of advance with a continuous stroke.
+--
+-- So this module now publishes a POLYLINE rather than a set of marks: consecutive
+-- points are joined by iqm_core into one continuous stroke, with chevrons
+-- riding ON it every gap_m for direction. That is why points are placed by where
+-- the path BENDS (see build_draw_list) rather than at even spacing -- the spacing
+-- of a line's vertices is invisible, and only its shape matters.
+--
+-- Beads were tried and dropped before the marks were: a round dot says "the path
+-- is here", which the line now says continuously.
+--
+-- WHEN IT DRAWS, and HOW FAR (revised 2026-08-13 after the fourth session).
+-- The route is a NAVIGATION aid, so it is drawn whenever there is an objective on
+-- this level, however far away that objective is -- what is limited is how much of
+-- the route you get, not whether you get one. `draw_m` is a length along the path
+-- measured OUT FROM THE PLAYER, so a target 200 m away still gives you the next
+-- 40 m of ground; you simply cannot see the whole way there.
+--
+-- That is the opposite of the earlier arrangement, where the target had to be
+-- within 50 m before anything drew at all -- which meant the route only appeared
+-- once you had essentially already found them, i.e. exactly when it was no longer
+-- needed. Recorded as superseded in docs/ar-navigation.md.
+--
+-- What is left of the gating:
+--   1. Below ARRIVE_D you are standing on top of them and a drawn path is
+--      pointless. Above MAX_TARGET_D the search itself gets expensive enough to be
+--      worth refusing -- a cost guard, not a design limit.
+--   2. The target is visible AND near (within VIS_NEAR). Then the beacon is enough
+--      and a line to their feet is clutter. Visible-and-FAR still draws: being able
+--      to make out a figure across a field tells you nothing about how to walk
+--      there, which is the whole job.
+--   3. Nobody can see it. PDA open or HUD hidden for either view, plus -- for the ground
+--      line, and by default -- the SUMMON: the line is only up in the seconds after the
+--      player asks for it (iqm_core.route_alpha, R2.58). Asked per VIEW rather than once,
+--      since the trail can be drawing while the ground line is faded out.
+-- Gates 2 and 3 simply stop publishing. Nothing is torn down and nothing has to be
+-- un-set in another module, which is what the wire version got wrong twice.
+--
+-- HOW IT KEEPS UP (R2.2e). Searching every frame would be absurd and searching
+-- once would leave a stale line, so:
+--   * walking the route only moves a CURSOR along the existing points
+--   * the goal moving more than GOAL_TOL, or the actor straying more than
+--     DRIFT_TOL off the line, triggers a fresh search, rate-limited to REPATH_MIN
+--   * a new target repaths immediately, ignoring that limit
+--   * a failed search backs off for FAIL_COOL; a merely degenerate one does not
+--
+-- Public API:
+--   iqm_nav.apply_config()    -- re-read iqm_core' config; no MCM of its own
+--   iqm_nav.configure(opts)   -- the same, in the shape the test drivers use
+--   iqm_nav.reset()           -- drop the route (option change, level change)
+--   iqm_nav.update(tg)        -- one tick; called from actor_on_update
+--   iqm_nav.route_draw()      -- the points to draw this frame, or nil
+--   iqm_nav.route_limit(m)    -- how much of that list a view drawing `m` metres wants
+--   iqm_nav.status()          -- table, for the F7 dump and the harness
+
+local floor, sqrt, min, max, exp = math.floor, math.sqrt, math.min, math.max, math.exp
+
+-- Who owns the shared single search in iqm_route. Its own F7 driver owns it under
+-- a different name; see the debug_active() park below.
+local OWNER = "iqm_nav"
+
+-- --------------------------------------------------------------------------
+-- Config mirrors
+-- --------------------------------------------------------------------------
+-- This module holds no MCM options of its own -- iqm_core owns the menu, and
+-- apply_config below reaches over for the handful of values that matter here, the
+-- same arrangement every other iqm_* module now uses. Everything below is
+-- overwritten by set_config().
+local on     = false
+local draw_m = 50      -- metres of PATH drawn, measured out from the PLAYER
+local gap_m  = 10      -- metres between direction chevrons ALONG the line
+local xray   = true    -- occluded arrows fade down instead of disappearing
+-- CONVEYOR SPEED, metres per second, 0 = the marks hold still. See flow_phase.
+local flow   = 0
+-- Is the MINIMAP TRAIL switched on. Only ever read by the visibility gate in update(),
+-- which since R2.58 has to tell the two views apart: the ground line can be faded out by
+-- the summon while the trail is still drawing, and the other way round. `on` above is
+-- either view, so it cannot answer this.
+local mm_on  = false
+local DEBUG  = false
+
+-- --------------------------------------------------------------------------
+-- Tunables (deliberately not MCM options: these are feel, not preference)
+-- --------------------------------------------------------------------------
+local GOAL_TOL    = 3.0    -- m the target may wander before its route is stale
+local DRIFT_TOL   = 5.0    -- m the actor may stray from the line before repathing
+local REPATH_MIN  = 700    -- ms between searches for the same target
+-- Metres the actor must cover before a PARTIAL route is searched for again (R2.33k).
+--
+-- Walking ALONG a route is not drift -- the cursor advances and DRIFT_TOL never trips --
+-- and the goal has not moved either, so nothing retried a route that came back short.
+-- A player put it exactly: it routes through a wall on a fresh load, and once you move
+-- around enough to get a good one "it seems to stick to that". Both halves were true, and
+-- the first was a partial nobody was ever going to retry: the search fails at 59 m and
+-- succeeds at 32 m, so simply walking closer is what fixes it -- if anything asks again.
+--
+-- Only for a PARTIAL. A complete route is already the answer and re-running the search
+-- every ten metres to be told so is pure cost.
+local RETRY_D     = 10.0
+-- What the F7 dump says when a route is withheld because it ends behind something. A
+-- string rather than an inline literal because two branches say it and they must agree.
+local DEAD_WHY    = "drawing (partial route, and its far end cannot see the target)"
+local FAIL_COOL   = 5000   -- ms to wait after a failed search before trying again
+local VIS_RATE    = 200    -- ms between target-visibility rays
+local VIS_GRACE   = 400    -- ms the target must stay visible before the route drops
+-- A* expansions per frame while a search is live. Raised with the budget floor (R2.33h)
+-- so the WALL-CLOCK of a search stays where it was: the floor is what decides how long a
+-- route takes to appear, and 3000 expansions at 40 a frame is 1.2 s of staring at nothing.
+-- The work is bounded by the budget either way; this only decides how it is spread.
+local STEP_BUDGET = 120    -- A* expansions per frame while a search is live
+local PATH_STEP   = 1.0    -- m between route points; line vertices are chosen from them
+-- Path points either side of a chevron that its HEADING is measured across (R2.26c).
+--
+-- It used to be the single leg the chevron landed on, which is PATH_STEP = 1 m long --
+-- and 1 m is far too short a baseline to ask a direction of. densify() lays the points
+-- down at that spacing and clearance() then pushes each one up to CLR_MAX = 0.75 m
+-- sideways to keep it off the walls; that pass smooths its offsets along the path, but a
+-- residual 0.2 m of lateral disagreement between neighbours is ordinary, and over a 1 m
+-- leg 0.2 m is 11 degrees.
+--
+-- Invisible while a chevron sat still. It is not invisible now: the marks SLIDE along the
+-- path as the player walks (R2.22, the phase is measured from the drawn start), so each
+-- one crosses leg after leg and picks up each leg's error in turn -- which reads as the
+-- chevrons rotating as you move, the nineteenth session's first complaint. The bigger the
+-- mark, the more obvious the swing, so R2.26's larger glyph is what surfaced it.
+--
+-- MEASURED IN METRES, NOT IN POINTS, and that is the revert switch: path points are
+-- PATH_STEP = 1 m apart, so CHEV_DIR_M = 3.0 reproduces the old +/-3-point behaviour
+-- exactly. Set it back to 3.0 and nothing about the headings changes.
+--
+-- Metres rather than points because a point count silently changes meaning if PATH_STEP
+-- ever does, and because the quantity the trade is actually about is a DISTANCE:
+--
+--   too short  each mark picks up the lateral noise of the leg it happens to sit on --
+--              the route's points are snapped to navmesh nodes, so a straight path
+--              arrives with a wobble on every one of them. That is the marks rotating
+--              as you move, logged as the nineteenth session's first complaint.
+--   too long   a real corner stops turning the marks until you are past it, so the run
+--              points through the wall you are meant to be going around -- the same
+--              failure as aiming every mark at the target, just softer.
+--
+-- 3.0, AND WIDENING IT WAS TRIED AND MEASURED AND DOES NOT PAY. The conveyor made the
+-- marks' rotation read as motion rather than as a static arrangement, which looks like
+-- fidget and invites exactly this dial. Both sides of the trade, from the nav harness
+-- ("heading steadiness vs corner response"):
+--
+--     baseline    corner error 3 m past a bend    fidget on a wobbly straight
+--       3.0                 7.8 deg                       2.2 deg
+--       4.5                16.9                           3.6
+--       6.0                23.4                           1.9
+--       9.0                29.1                           1.4
+--
+-- 3.0 -> 6.0 buys 0.3 degrees of steadiness for 15.6 degrees of corner error. The
+-- steadiness column is not even monotonic, which is the tell: there is almost no fidget
+-- left to remove, because snap_path takes only the HEIGHT from the navmesh and the node
+-- list is Chaikin-smoothed before it gets here, so the lateral noise this would average
+-- out has already been averaged out. What remains is real curvature -- the route bending
+-- round something -- and averaging over real curvature does not steady a mark, it makes
+-- it turn late, which points it at the thing you are going around.
+--
+-- So the value is unchanged. What is new is that it is in METRES (path points are 1 m
+-- apart, so 3.0 is the old +/-3-point behaviour exactly), that heading_at walks path_s
+-- rather than counting points, and that the harness now prints both columns -- so the
+-- next person tempted by this dial gets the numbers instead of the argument.
+local CHEV_DIR_M  = 3.0
+local LOOK_AHEAD  = 12     -- points scanned ahead when advancing the cursor
+local TARGET_LIFT = 1.0    -- m above the NPC's feet the visibility ray aims at
+-- Hard cap on line vertices, matching the pool in iqm_core (RTE.SEGS). Raised from
+-- 28 with R2.13's angle-based spacing, which needs ~22 vertices for the default 50 m
+-- and ~30 for the 80 m the MCM allows; at 28 the far end of a long route would have
+-- truncated, which is the far end visibly breathing as you walk (R2.11).
+local MAX_DRAW    = 36
+-- Hard cap on chevrons, matching the renderer's pool. It lives HERE rather than there
+-- so the list and the pool cannot disagree.
+--
+-- It binds much harder since R2.16: a chevron is placed at an exact arclength rather
+-- than on a vertex, and the dense styles ask for one every ~3 m, so a 50 m draw wants 16
+-- and an 80 m draw would want 27. 16 is the budget, chosen against the default draw
+-- length, and a longer route simply stops getting chevrons past ~48 m -- where the tail
+-- fade has them at a third of their alpha anyway. Costs two widget pairs each in the
+-- ground styles (each arm is a stroke segment), which is what makes this a real number
+-- rather than a formality.
+local MAX_CHEV    = 16
+local ARROW_LIFT  = 0.25   -- m above the navmesh the line sits
+-- WHERE THE CHEVRONS SIT, and it took three arrangements to get right (R2.29).
+--
+--   1. Phased on the DRAWN START (R2.22). The marks slide with you, which reads as the
+--      route flowing -- but the drawn start is path[cursor], and the cursor advances in
+--      PATH_STEP jumps. So the train sits still while you walk up to it and then lurches
+--      a metre forward onto different path points: measured, a 1.000 m jump twice per
+--      two metres walked, a 12% size sawtooth and a heading resampled with it. That is
+--      what four sessions reported as "the marks change when I move".
+--   2. Phased on ABSOLUTE arclength along the route (R2.19 / R2.28). Each mark is nailed
+--      to its patch of ground, so nothing changes as you walk -- measured at 0.000 m of
+--      movement. It also means the marks do not move at all, which is the other half of
+--      what was asked for and was immediately reported as such.
+--   3. Phased on the ACTOR'S OWN ARCLENGTH, continuously (R2.29). A mark sits at
+--      s_actor + k * gap, so it holds a FIXED distance ahead of you: it flows over the
+--      ground with your step, and because its distance never changes, neither does its
+--      size, its aspect or its angle. Both halves at once, and the reason neither of the
+--      first two could give both is that each quantised or froze the one quantity that
+--      had to be continuous.
+--   4. Phased on absolute arclength, with the CLOCK doing the moving (R2.40, and only
+--      while the conveyor runs). Arrangement 3 is what makes the belt speed wrong: a
+--      mark pinned s_actor + k*gap ahead of you travels over the ground at YOUR speed
+--      plus the belt's, so the run accelerates when you sprint and stalls when you
+--      stop -- which is exactly what a conveyor must not do. Sitting still it ran at
+--      `flow`; at a 4 m/s sprint it ran at flow + 4. Reported as the marks speeding up
+--      with the player.
+--
+--      So with flow > 0 the marks go back on the absolute lattice of arrangement 2 --
+--      n*gap + phase for integer n, in ROUTE arclength, which is nailed to the ground --
+--      and the only thing that moves them is `phase`, which is a clock. Their speed
+--      over the ground is then `flow` m/s and nothing else, whatever the player does.
+--
+--      Arrangement 2's objection does not apply, because it was an objection to marks
+--      that never move at all: at flow = 0 that is still what this file does (the
+--      lattice is not used and arrangement 3 stands), and at flow > 0 the whole run is
+--      in constant motion by construction. What IS inherited from 2 is that a mark's
+--      distance from you now changes -- it flows toward you and slides past -- so its
+--      size and its projected shape change as it comes. That is what a belt looks like
+--      and it is the point, not a regression of R2.29.
+--
+--      The near end stays covered without NEAR_FILL: n0 is the first lattice point at
+--      or ahead of the actor, so the head of the run is always within one gap of his
+--      feet rather than at a fixed multiple of it.
+--
+-- The cost is that the chevrons must be replaced every frame rather than only when the
+-- cursor moves -- the actor's arclength changes continuously, which is the entire point.
+-- That is place_chevrons below, and it is bounded by MAX_CHEV.
+
+-- Where line vertices go. A vertex costs a widget and a projection, and on a
+-- straight it buys nothing -- so one is emitted only when the path has turned
+-- enough to matter, or when SEG_MAX metres have gone by without one.
+--
+-- TURN_TOL is in (1 - cos) units, not radians: the accumulator adds 1 - dot of
+-- consecutive leg directions, which is 0 dead ahead and grows with the angle. That
+-- is all a threshold needs, and it keeps acos off the rebuild path. 0.02 is about
+-- 11 degrees in one leg. It is also deliberately superlinear, so a gentle curve
+-- rides on SEG_MAX (four-metre chords approximate it invisibly) while a doorway
+-- corner trips it on the first leg and gets a vertex ON the corner -- which is what
+-- keeps the stroke going through the gap instead of cutting across the jamb.
+-- Segment length is chosen by ANGLE, not by world distance (R2.13). A constant 4 m
+-- spends the widget budget in inverse proportion to how much screen each widget
+-- covers: the segment at your feet was a slab and the one 40 m out was sub-pixel. At
+-- `distance / SEG_DIV` every segment subtends roughly the same fraction of the view --
+-- about 1/8 radian at SEG_DIV = 8 -- so near bends get short segments that curve and
+-- taper smoothly while far straights stay cheap. It is also what keeps the renderer's
+-- MEASURED thickness (IqmCards:seg_width) from stepping visibly between neighbours: a
+-- quad cannot taper, and the step between two segments is set by their length ratio.
+--
+-- SEG_DIV is a budget decision as much as a look one. It fixes both the angular size
+-- of a segment (1/7 radian, about 8 degrees) and the ratio between the lengths of
+-- neighbouring ones -- which, since thickness goes as 1/distance, is also the step in
+-- thickness across a joint: ~14%, covered by the half-thickness overlap the renderer
+-- already draws. Finer is smoother and costs vertices in proportion; at SEG_DIV = 8 the
+-- 80 m the MCM allows would not fit in MAX_DRAW below.
+local SEG_DIV  = 7.0
+local SEG_MIN  = 1.0    -- m: floor. Also PATH_STEP, below which there is nothing to cut
+local SEG_MAX  = 5.0    -- m: ceiling, so the far end still bends where the path does
+local TURN_TOL = 0.02
+
+-- Metres of path skipped in front of the CAMERA before the stroke starts, and the most
+-- of the drawn length that may go on it.
+--
+-- ZERO since R2.25, i.e. the route starts at your feet again. R2.13 set this to 3 m
+-- because once the thickness was measured from the ground a 45 cm ribbon a metre from
+-- the eye was a slab across the screen -- a real problem, but the trim was the wrong
+-- instrument for it and cost a visible gap between the player and the head of the route
+-- (the tenth session's screenshot: nothing at all on the floor until the first chevron,
+-- several metres out).
+--
+-- The right instrument arrived afterwards and is already in the renderer: the HEAD/HMIN
+-- fade (iqm_cards, RTE.HEAD 1.5 m / HMIN 0.75), which ramps the marks up over the first
+-- few metres of CAMERA DISTANCE. That softens the near plane where the trim only
+-- amputated it, and it is the variable the problem is actually about -- a fact about the
+-- camera, not about how far along the path we start. With both in place the first metres
+-- were being paid for twice: faded AND missing.
+--
+-- The machinery is left live rather than deleted, because it is one number to reinstate.
+--
+-- (Updated R2.50. This note used to cite iqm_core and HEAD 3.5 / HMIN 0.30 -- the module
+-- moved in the R2.45 split and the values were retuned -- and it justified itself partly
+-- on draw_route recovering vertex 1 across the near plane with clip_front. That recovery
+-- is GONE: finding 4.1 in docs/route-perf.md removed the whole projection pass it lived
+-- in, and a vertex behind the camera is now simply excluded from the head fade's reference
+-- distance. Nothing here depends on it -- the borrowed depth clip_front handed back was
+-- never smaller than the neighbour's, which was already in the minimum, so d0 is the same
+-- number either way. The HEAD/HMIN argument above is the whole justification and stands.)
+local NEAR_TRIM = 0.0
+local TRIM_FRAC = 0.4
+
+-- THE LEAD-IN: how far the head of the route may leave the navmesh line to meet the
+-- player, and over how much arclength it blends back onto it (R2.33).
+--
+-- The route is an A* path through the mesh and the marks sit ON it, so strafing does not
+-- move them: step two metres to your right and the whole train stays two metres to your
+-- left, unchanged, until you stray past DRIFT_TOL (5 m) and it repaths. That is what has
+-- been reported for three sessions as the perspective shifting when you strafe, and it is
+-- not the keystone R2.31 measured -- or rather, it is the keystone being DRIVEN. A mark's
+-- affine error depends on where it sits relative to the vanishing point, so a mark that
+-- holds still in the world while the camera slides sideways has its shape swing through
+-- the whole range of that error. A mark that keeps its bearing on you does not: its
+-- error is whatever it is, and it stays there.
+--
+-- So the near end of the drawn line is pulled sideways onto the player and decays back
+-- onto the path over LEAD_M. At the actor's own arclength the offset is the full residual
+-- and the route starts exactly at his feet; LEAD_M along it, the line is where the search
+-- put it. It is the same trick clearance() already plays on this path -- displace the
+-- points laterally, smoothly, and leave the shape alone -- differing only in what is
+-- being avoided.
+--
+-- LEAD_MAX is the safety. The offset is a straight lateral drag with no mesh test on it,
+-- so at some width it walks the head of the line through a wall; 2 m is inside the
+-- corridor widths the Zone is built out of, and past it the head simply stops following
+-- (the line no longer reaches your feet, which is the honest failure -- it is drawn where
+-- it can be walked). Between there and DRIFT_TOL a repath takes over anyway.
+--
+-- To revert: LEAD_M = 0 disables the whole thing in one number, in both the vertices and
+-- the marks, and the route goes back to sitting exactly on the search's answer.
+local LEAD_M   = 8.0
+local LEAD_MAX = 2.0
+
+-- WHEN A PARTIAL ROUTE STOPS CLAIMING TO BE ONE (R2.33g).
+--
+-- A partial is a real walkable path to the closest the search could get, and while that is
+-- a metre or two short it IS the route -- you walk it and you arrive. It stops being the
+-- route when the gap is real: the drawn line then runs confidently up to a wall and ends,
+-- and nothing on screen says "this is as far as I know" rather than "go through here".
+-- That is what a player reported twice, and no amount of search budget fixes it -- a
+-- closest approach that is FLAT across budgets (measured: 6.0 m across 596 and 1500 nodes,
+-- for targets from 16 to 31 m) is a barrier, not a shortfall.
+--
+-- So the tail of such a route fades out. Not suppression: the first twenty metres of a
+-- route to an unreachable target are still the right way to walk, and the beacon still
+-- marks where the target actually is. What goes is the false precision at the end.
+--
+-- Applied to the occlusion TARGET alpha rather than as a separate multiplier, so it eases
+-- in over OCC_TAU with everything else and the chevrons pick it up through RD.ci for free.
+local STUB_TOL = 4.0    -- m short of the goal below which a partial is simply the route
+local STUB_M   = 10.0   -- m of the drawn end the fade runs over
+
+-- A sanity ceiling only. GAMMA's switch_distance is 450 m (alife.ltx), so a target
+-- further off than this is offline and never offered to us in the first place; this
+-- exists so a bad position can't ask for an absurd search rather than to express any
+-- design limit.
+local MAX_TARGET_D = 500
+
+-- Expansion budget for the search, scaled with how far the target is. iqm_route's
+-- own default (1200) was picked when the route was capped at 50 m; a 200 m target
+-- legitimately needs more, and running out used to mean NO route rather than a
+-- shorter one. It now means a partial route (iqm_route.search_partial), so this is
+-- about how far that partial reaches rather than about success or failure.
+--
+-- A FLOOR AND A CURVE since R2.33f, raised again in R2.33h, both measured off a player's
+-- log. It was `400 + 10 * d`, and that shape had the trade backwards: it gives the
+-- SMALLEST allowance to the NEAREST target, when a short route is the one likeliest to
+-- need a real search. A 19.6 m target inside a factory has to find a doorway; a 60 m one
+-- across open ground is nearly a straight line. The log caught it exactly:
+--
+--     aiming at the target itself: target 19.6 m away, budget 596 nodes
+--     gave up after 596 nodes; partial route of 4 points (closest approach 6.0 m)
+--
+-- Three metres from `arrive` and out of budget -- and that partial is what the player saw
+-- running at a wall instead of through the doorway beside it.
+--
+-- THE FLOOR IS THE WHOLE POINT, and it is 3000. A budget derived from the straight-line
+-- distance is a bad proxy for how hard the search is: the target 19 m away behind a wall
+-- may be a 60 m walk, and it is precisely the near target that fails which is hiding a
+-- long detour. 1500 was not enough and the reason it looked like a barrier was a mistake
+-- in reading it -- see the note on `closest` in status(). The 4000 cap is unchanged and is
+-- what bounds the cost; the curve only matters past ~68 m, where crow-flight distance
+-- starts to be the honest measure again.
+--
+-- THE COEFFICIENT AND THE CAP, measured again in R2.33k. A player reported a route through
+-- a wall "on a fresh load", correcting itself once they walked about. It was not about
+-- loading -- it was about DISTANCE, and the same log has both halves for one target:
+--
+--     59.1 m -> gave up after 3000 nodes (closest approach 32.9 m)
+--     32.5 m -> route found, 222 nodes
+--     21.8 m -> route found, 995 nodes
+--     12.9 m -> route found, 477 nodes
+--
+-- The need really does grow with the square (about 1000 expansions at 32 m), so the curve
+-- was right in shape and short by half in size: 0.6 * 59^2 is 2090, under the 3000 floor,
+-- while the measured need there is over 3000. Doubled to 1.2, which puts 59 m at 4480 --
+-- and the cap to 6000, which is ~1.2 s of resumable search at STEP_BUDGET and covers
+-- everything out to about 70 m. Past that a partial is the honest answer, and the retry
+-- below turns it into a real route as you close the distance.
+--
+-- THE FLOOR, MEASURED AT LAST (R2.35). Everything above reasoned about "a target behind a
+-- wall may be a long walk" and then picked 3000 without ever measuring one. Measured now,
+-- live over the devkit bridge, in the Bar: actor at (199.6, 49.2), General Petrenko 16.0 m
+-- away through the wall of the room. BFS over level.vertex_link puts the real walk at
+--
+--     258 hops, ~175 m: 33 m WEST, 56 m north, 42 m east, 43 m back south
+--
+-- -- out of the room and the whole way round the block, for a target 16 m away. This is the
+-- worst case an A* heuristic can be handed: h points straight through the wall for the
+-- entire search, so every expansion is spent pressing against it before the frontier ever
+-- turns the wrong way up the corridor. Sweeping the budget on that exact search:
+--
+--     3000 ..  8000 -> partial, 6.02 m short, 2 points, ends against the wall
+--     9000          -> partial, 3.77 m short, 19 points
+--    10000          -> COMPLETE, 2.89 m (inside `arrive`), 20 points, round the block
+--
+-- 3000 was not close, and the old 6000 cap was never even reached: 300 + 1.2*16^2 is 607,
+-- so the floor was the only term doing anything and the cap was decorative at this range.
+--
+-- RAISING THE FLOOR IS THE FIX, and the arithmetic that says so is about WHO PAYS.
+-- max_nodes is a ceiling, not a target -- A* stops the instant it succeeds -- so three
+-- kinds of search are unaffected by raising it, measured live:
+--
+--   * an easy one              6.4 m target, budget 12000  ->  0 ms (stops in a few nodes)
+--   * a goal off the navmesh   rejected by search_begin    ->  0 ms (never budgeted)
+--   * one already succeeding   unchanged, it stops where it stopped
+--
+-- Only a search that is HARD BUT SOLVABLE spends the new room, and that is precisely the
+-- case that was drawing marks into a wall. The one that genuinely pays is a target inside
+-- the mesh that cannot be reached at all, which is rare -- the common "unreachable" is an
+-- off-mesh goal, and that is free.
+--
+-- The cost where it does bite, measured: 30.3 us per expansion, and the trap route above
+-- explores 9382 of them. At STEP_BUDGET that is 3.6 ms a frame for 1.25 s before the route
+-- appears, and R2.33l keeps the previous route drawn throughout, so it is heat rather than
+-- a gap on screen. STEP_BUDGET went 80 -> 120 in the same change, which is what keeps the
+-- worst case inside the two seconds the harness bounds it to.
+--
+-- AN EARLIER VERSION OF THIS ESCALATED INSTEAD -- kept the 3000 floor and bought 12000 once
+-- per target on a dead end. It was measurably worse and the reason is worth keeping. The
+-- single retry got spent at one position, and once spent it could never re-arm, so a later
+-- ordinary search from a few metres away came back partial and the wall route returned
+-- PERMANENTLY. Caught only because the live esc_id read back as already-consumed while the
+-- marks were still pointing at masonry. Consumable state guarding a thing that must keep
+-- working is the wrong shape; the flat floor has no state to get into a bad one.
+--
+-- Public so a harness can call it: a budget is a number with a SHAPE, and the shape is
+-- what was wrong. See shape_box in iqm_core for the same lesson learned the same way.
+function node_budget(d)
+	local n = 300 + floor(d * d * 1.2)
+	if n < 12000 then n = 12000 end
+	return min(15000, n)
+end
+
+-- The visibility gate only applies this close. Being able to see a figure across a
+-- field says nothing about how to walk there; being able to see one across a room
+-- means a line to their feet is clutter.
+local VIS_NEAR = 25
+
+--- The near edge of the route's band: close enough that a drawn path is pointless.
+--
+--  This USED to be the card's appear distance, on the reasoning that below it the
+--  card is up and doing the job. That was wrong, and wrong in the one case the
+--  feature exists for. The card needs line of sight; the route only draws when the
+--  target has NONE. So for a target round a corner at 9 m, the card could not show
+--  and the route refused to -- leaving a beacon and nothing else, across the whole
+--  band the feature was supposed to own.
+--
+--  There is no need for a card-shaped gate here at all: whenever the card really is
+--  up, the target is visible by definition, and the visibility rule already blanks
+--  the route. All that is left is "you are standing on top of them", which is what
+--  this is. It also keeps the search out of the degenerate case where start and goal
+--  land on the same navmesh node.
+local ARRIVE_D = 4.0
+
+-- Per-bead occlusion. The ribbon version tested points round-robin and applied a
+-- hard verdict, so a sweep's worth of beads changed together and it read as
+-- flicker. Sprites have real alpha, so the verdict is a TARGET and each bead eases
+-- toward it: the round-robin still spreads the ray cost, but what lands on screen
+-- is a fade.
+-- The sweep is budgeted in MILLISECONDS, not in frames. It used to cast a flat
+-- OCC_RATE = 6 rays every frame, which made the ray RATE a function of frame rate and
+-- the sweep PERIOD a function of nothing the fade is tuned against: 360 rays/s and a
+-- 100 ms sweep at 60 fps, but 864 rays/s and a 42 ms sweep at 144 -- 2.4x the cost to
+-- refresh a verdict faster than OCC_TAU can render it -- and 180 rays/s with a 400 ms
+-- sweep at 30, where the fade visibly lags the geometry. A ray is 5 us, ~13x a
+-- projection, so this was the largest single per-frame engine cost in the driver.
+-- Spending n * dt / OCC_SWEEP_MS instead holds the sweep period fixed at every frame
+-- rate, and holds it against SHORT routes too: eight beads used to be swept in 1.3
+-- frames, six rays' worth of work where 1.3 would do.
+local OCC_SWEEP_MS = 100  -- ms for one full round-robin over the drawn beads
+local OCC_MAX  = 12     -- ray ceiling per frame, so a stretched dt cannot sweep at once
+local OCC_TAU  = 90     -- ms time constant of the fade toward a new verdict
+local OCC_LIFT = 0.25   -- m the ray origin is raised off the arrow (see point_occluded)
+local OCC_TOL  = 0.30   -- m of slack at the camera end of the ray
+local DIM_MIN  = 0.22   -- alpha multiplier for an occluded arrow when xray is on
+
+-- How long a tick waits while NOBODY can see the route: the PDA is open, the HUD is
+-- hidden, or -- the common one since R2.58 -- the ground line is not summoned and the
+-- minimap trail is off. With the summon as the default that is MOST FRAMES OF THE SESSION,
+-- so this branch went from an edge case to the normal state and the saving got bigger.
+-- route_draw() returns nil throughout, so every occlusion ray and every chevron
+-- placed in such a frame is work whose only consumer is the next frame's easing.
+-- The tick still RUNS at this cadence (advance, repath, the search) -- what stops
+-- is the drawing half, which is rebuilt from scratch the moment it is wanted again.
+local HIDE_MS  = 250
+
+-- --------------------------------------------------------------------------
+-- State
+-- --------------------------------------------------------------------------
+local tgt_id     = nil     -- the NPC we are routing to
+local tgt_lvid   = nil     -- ...the navmesh node it claims, for a goal whose POSITION is off it
+-- The last answer mesh_goal gave, and the raw target position it was asked about. Declared
+-- up here rather than beside mesh_goal because reset() clears them and is defined first --
+-- a bare assignment there would write module globals and leave the locals untouched.
+local snap_id    = nil     -- target id the cached snap belongs to
+local snap_src   = nil     -- ...where that target was when it was computed
+local snap_pos   = nil     -- ...and where to aim instead. nil = nothing near it is on the mesh
+local tgt_d      = nil     -- ...and how far off it was at the last update (XZ metres)
+local tgt_x, tgt_z = nil, nil   -- ...and where it was, so a consumer can mark the spot
+local goal       = nil     -- where the live route was computed TO (for GOAL_TOL)
+local path       = nil     -- route points, PATH_STEP apart, snapped to the navmesh
+-- Cumulative arclength along `path`, path_s[1] = 0. Built once with the path rather
+-- than accumulated per rebuild, because it is what gives chevron spacing an ABSOLUTE
+-- phase (R2.19): a mark's arclength is a property of the ROUTE, so the marks stay put
+-- on the ground as you walk instead of the whole train sliding along with you.
+local path_s     = nil
+local cursor     = 1       -- index of the first point still ahead of the actor
+local searching  = false   -- do we own a live search in iqm_route
+-- A finished search waiting for its tail (route-perf 4.6). The frame the A* returns
+-- "done" already pays its own expansions, the rebuild and the string pull -- 2.886 ms
+-- measured -- and the tail is another 1.09 ms of smooth, densify, clearance and snap on
+-- top of it. Together that was ~3.9 ms, the worst single frame this feature has, once per
+-- ~25 s of play. Splitting it in two costs one frame of latency on a route the player has
+-- been walking toward for twenty-five seconds.
+--
+-- The whole of the resumption state is the raw node list, because the tail is a pure
+-- function of it -- no cursor, no half-finished pass, nothing to restart mid-way. That is
+-- what makes this the cheap version of slicing rather than the expensive one.
+--
+-- One frame while the route is on screen; up to one HIDE_MS slot while it is blanked,
+-- since update() returns early there and steps the search at 4 Hz anyway. Nothing is
+-- being drawn on that path, so a quarter second before a hidden route is ready costs
+-- nothing that can be seen.
+local pending    = nil     -- { pts, partial, short } between the two frames
+local next_try   = 0       -- earliest tg at which another search may start
+local vis_next   = 0       -- earliest tg for another visibility ray
+local vis_since  = nil     -- tg the target FIRST tested visible (for VIS_GRACE)
+local hidden     = false   -- applied verdict: the target is behind something
+local parked     = false   -- a debug driver has the search; we keep out of the way
+local publish    = false   -- should the sprite layer draw anything this frame
+local partial    = false   -- the live route stops short of the target
+local short_by   = nil     -- ...by how many metres, from iqm_route.search_closest()
+local last_from  = nil     -- where the actor stood when the live route was searched for
+local dead_end   = false   -- the route's far end cannot even SEE the target (R2.33m)
+local why        = "idle"  -- why there is nothing to draw, for the F7 dump
+local occ_i      = 0       -- round-robin cursor over the drawn beads
+local occ_owed   = 0       -- ...and the fractional ray budget it has yet to spend
+local blanked    = false   -- the overlay was hidden the last time we got this far
+local blank_next = 0       -- earliest tg for another tick while it stays hidden
+-- Set on the first tick the overlay comes back. The drawing half was skipped while it
+-- was away, so the stroke is rebuilt rather than nudged, and the alphas are LANDED on
+-- their targets rather than eased -- easing from here would fade the route in out of
+-- whatever occlusion pattern happened to be frozen when it went away.
+local resume     = false
+local occ_snap   = false   -- ...the alpha half of that, consumed by occ_step
+local last_tg    = 0       -- for the frame delta the occlusion fade needs
+
+-- What iqm_core draws. One persistent table, refilled in place: this is read
+-- every frame on the render path, so handing back a fresh table per frame would be
+-- a steady drip of garbage for no reason.
+--
+-- The STROKE, as a vertex list -- point i and point i+1 are the ends of one segment,
+-- which is why nothing here tries to space them evenly:
+--   n       -- how many vertices
+--   p[i]    -- world point (a reference into `path`; never mutated here)
+--   a[i]    -- APPLIED alpha multiplier, 0..1, eased
+--   t[i]    -- the alpha it is easing TOWARD (1 visible, DIM_MIN or 0 occluded)
+--   s[i]    -- ARCLENGTH from the drawn start, in metres (monotonic, s[1] = 0)
+--
+-- The CHEVRONS, as their own list (R2.16). They used to be flags on the vertices
+-- (`c[i]`), which meant a chevron could only ever land ON a vertex -- fine at 10 m
+-- spacing, and useless for the dense styles, where vertices 1-5 m apart would have
+-- scattered them by up to half a gap. They are now placed at exact arclength and
+-- INTERPOLATED along the leg they fall on:
+--   nc      -- how many
+--   cp[i]   -- world point, a persistent vector mutated in place
+--   cdx/cdz -- unit direction of travel there, in XZ (for the mark's heading)
+--   ci[i]   -- index of the vertex whose eased alpha this chevron borrows
+--   cs[i]   -- arclength, in the same frame as s[]
+--
+-- s[] and cs[] exist so the list can be built ONCE at the longest distance any
+-- consumer asked for and each of them stop where it wants: the ground line and the
+-- minimap trail now carry separate drawn distances (R2.24), and building a second
+-- list for the second view would double the per-frame work to say something both
+-- views already agree on. See route_limit.
+--   cn[i]   -- a STABLE id for the mark, for the renderer's texture variant (R2.42)
+local RD = { n = 0, nc = 0, p = {}, src = {}, a = {}, t = {}, s = {},
+             cp = {}, cdx = {}, cdz = {}, ci = {}, cs = {}, cn = {} }
+
+-- The lead-in's live state, recomputed once per frame by lead_apply: the offset vector,
+-- and the arclength it is applied at in full (the actor's own).
+--
+-- LP is a pool of persistent vectors for the vertices near enough to be displaced. RD.p[i]
+-- is a REFERENCE into `path` while the offset there is zero and one of these when it is
+-- not, so a route whose head is already under the player allocates nothing and `path`
+-- itself is never mutated -- the search's answer stays the search's answer. RD.src[i]
+-- keeps that reference either way, because the blend is recomputed from the unmoved point
+-- every frame and RD.p is where the moved one goes.
+local lead_x, lead_z, lead_s = 0, 0, 0
+local LP = {}
+
+-- The body is iqm_util.logger's: seven modules were carrying the same two lines,
+-- differing only in the tag and in which flag gated them. The gate is a FUNCTION
+-- rather than a value because DEBUG is flipped at run time by configure(), and
+-- capturing it once would freeze the logger at whatever it was when the file loaded.
+local say = iqm_util.logger("[IQM-NAV] ", function() return DEBUG end)
+
+local function xz(a, b)
+	local dx, dz = a.x - b.x, a.z - b.z
+	return sqrt(dx * dx + dz * dz)
+end
+
+local function xz2(a, b)
+	local dx, dz = a.x - b.x, a.z - b.z
+	return dx * dx + dz * dz
+end
+
+-- --------------------------------------------------------------------------
+-- Rays
+-- --------------------------------------------------------------------------
+-- The MECHANICS -- one ray_pick built once and re-aimed per cast, and the
+-- cast-toward-the-camera occlusion test over it -- live in iqm_util, because
+-- iqm_pathline was carrying a byte-for-byte copy of both. They are aliased into
+-- locals rather than called through the namespace because point_occluded runs per
+-- route vertex per frame.
+--
+-- One ray serves two jobs here: "can the actor see the target" and "can the actor
+-- see this bit of ground". Deliberately NOT iqm_core' has_los for the first --
+-- that one rides the los_check option (turning it off for cards would silently take
+-- the route with it), needs demonized_geometry_ray, and caches on a path that only
+-- refreshes inside appear_dist, which is the band the route does NOT operate in.
+--
+-- What stays here is the POLICY, which is all the two copies ever disagreed about:
+-- this module passes fixed module constants for lift and tolerance (OCC_LIFT /
+-- TARGET_LIFT / OCC_TOL above -- the route's geometry does not vary), where
+-- iqm_pathline reads them off the per-show() option table. And the warning: an exe
+-- with no ray_pick binding loses the ROUTE here and only the culling there, so each
+-- module hands iqm_util its own message and iqm_util logs each once.
+--
+-- Sharing one ray handle with iqm_pathline is safe: every query sets position,
+-- direction and range immediately before :query(), so nothing carries over but the
+-- flags, and both want flags = 2 (Statics only -- walls and terrain are what make a
+-- route worth drawing; a crate or a passing stalker should not summon one, and
+-- should not chop holes in one either).
+local ray_ready      = iqm_util.ray_ready
+local point_occluded = iqm_util.point_occluded
+local RAY_WARN = "!IQM-NAV: ray_pick missing -- route disabled"
+local _gv = vector()      -- the target, lifted, for the dead-end ray (R2.33p)
+
+--- Throttled, with grace on the way OUT of hiding only. Losing sight of the target
+--  should bring the route up promptly; regaining it for a few frames through a
+--  doorway should not tear the route down and rebuild it the moment you step back.
+--  Asymmetric for the same reason the card/beacon crossover is.
+-- The engine's "no such vertex" id. UP HERE with on_mesh below, for the same reason and
+-- with a sharper edge: moving the function above this constant left `vid ~= INVALID_VID`
+-- comparing against a nil global, which is true for EVERY id -- so on_mesh answered yes
+-- for points with no navmesh under them at all and the goal snap stopped working. Seven
+-- harness checks caught it. A local is only in scope after its declaration, and that
+-- applies to the values a moved function reads as much as to the functions it calls.
+local INVALID_VID = 4294967295
+
+--- Does the navmesh cover this point? Declared UP HERE, above its first caller, and not
+--  beside mesh_goal where it used to live: walk_direct below needs it, and a Lua local is
+--  only in scope after its declaration -- so a reference above it compiles as a global and
+--  is nil at run time. That is R2.32a exactly, which killed the game on load. This time a
+--  harness caught it, because the harness exercises the path.
+local function on_mesh(p)
+	if not (level and level.vertex_id) then return nil end
+	local vid = level.vertex_id(p)
+	if vid and vid ~= INVALID_VID then return vid end
+	return nil
+end
+
+--- Is the way to the target a STRAIGHT WALK -- one probe along the ground from the actor
+--  toward it, stopping wherever the navmesh stops (R2.33j).
+--
+--  This exists because line of sight is not the question the route is about. `VIS_NEAR`
+--  suppresses the route for a target you can see from under 25 m, and the reasoning was
+--  "being able to see one across a room means a line to their feet is clutter" -- true
+--  across a room, and false through a doorway, which is where it was caught: an NPC
+--  visible 18 m away through an open door, with the actual walk being round two concrete
+--  slabs and in through it, and no route drawn because his head was in view.
+--
+--  Seeing a head and knowing the way are different facts, and this asks the second one.
+--  `vertex_in_direction` walks the graph in a straight line and stops where it stops, so
+--  the probe landing near the target means the floor between you is open, and it stopping
+--  short means the way round is not obvious -- which is exactly when the route earns its
+--  place. One call, on the same throttle as the visibility ray it sits beside.
+local _wdir = vector()
+local WALK_TOL = 3.0    -- m the probe may land short and still count as a straight walk
+
+local function walk_direct(apos, tpos)
+	if not (level and level.vertex_in_direction and level.vertex_position) then
+		return true    -- no probe available: fall back to the old visibility-only rule
+	end
+	local avid = on_mesh(apos)
+	if not avid then return false end
+	local dx, dz = tpos.x - apos.x, tpos.z - apos.z
+	local l = sqrt(dx * dx + dz * dz)
+	if l < 1e-3 then return true end
+	_wdir:set(dx / l, 0, dz / l)
+	local v = level.vertex_in_direction(avid, _wdir, l)
+	if not (v and v ~= INVALID_VID) then return false end
+	local p = level.vertex_position(v)
+	if not p or (p.x == 0 and p.y == 0 and p.z == 0) then return false end
+	return xz(p, tpos) <= WALK_TOL
+end
+
+--- Throttled, with grace on the way OUT of hiding only. Losing sight of the target
+--  should bring the route up promptly; regaining it for a few frames through a
+--  doorway should not tear the route down and rebuild it the moment you step back.
+--  Asymmetric for the same reason the card/beacon crossover is.
+--
+--  TWO questions, one verdict (R2.33j): the route is unwanted only when you can both SEE
+--  the target and walk straight to it. Folded in here rather than added as a second gate
+--  so it inherits the throttle and the grace -- a probe flipping on the boundary would
+--  otherwise pop the whole route in and out as you stepped.
+local function refresh_visibility(apos, tpos, tg)
+	if tg < vis_next then return end
+	vis_next = tg + VIS_RATE
+	local plain = (not point_occluded(tpos, device().cam_pos, TARGET_LIFT, OCC_TOL))
+	              and walk_direct(apos, tpos)
+	if not plain then
+		vis_since, hidden = nil, true
+	else
+		vis_since = vis_since or tg
+		if (tg - vis_since) >= VIS_GRACE then hidden = false end
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- The draw list
+-- --------------------------------------------------------------------------
+-- Memo for heading_at, keyed by PATH index. A heading is a pure function of the path and the
+-- index, and a chevron only crosses a 1 m leg about twice a second -- so ~95% of the <=16 calls
+-- a frame were re-deriving last frame's answer, walking path_s out CHEV_DIR_M in each
+-- direction to do it (route-perf 4.5).
+--
+-- `false` and not nil for "computed, and there is no heading here": heading_at legitimately
+-- returns nil at a degenerate point, and nil in the memo means "not computed yet".
+--
+-- CLEARED AT THE ONE SITE THAT INSTALLS A NEW PATH, and never where `cursor` moves -- the
+-- cursor changes which index is drawn, not what the heading at an index is, and clearing on
+-- cursor movement would throw the memo away every metre walked and buy nothing.
+--
+-- There are three sites that assign `path` and only one of them needs this. The other two --
+-- stop() and the search's failure path -- assign NIL, and a nil path cannot produce a wrong
+-- heading because place_chevrons returns on `not (path and path_s)` before heading_at is
+-- reached; the next real path clears the memo on its way in. Clearing there as well was in
+-- the first draft, and both lines were provably unreachable-as-behaviour: deleting either one
+-- left the whole suite green, which is the same shape as 4.4's dead `occ_owed = 0`.
+local HDx, HDz = {}, {}
+local function clear_headings()
+	HDx, HDz = {}, {}
+end
+
+--- The direction of travel at path point `i`, measured across CHEV_DIR_M metres either
+--  side rather than along one leg (R2.26b). Nil when the two ends coincide.
+local function heading_at(i)
+	local hx = HDx[i]
+	if hx ~= nil then
+		if hx == false then return nil end
+		return hx, HDz[i]
+	end
+	local np = #path
+	if np < 2 then HDx[i] = false; return nil end
+	-- Walk out from i until the chord spans CHEV_DIR_M each way, over path_s -- the real
+	-- arclength -- rather than counting points. Near either end this becomes one-sided,
+	-- which is the best answer available there and not a special case.
+	local lo, hi = i, i
+	local si = path_s and path_s[i]
+	if si then
+		while lo > 1 and (si - (path_s[lo] or si)) < CHEV_DIR_M do lo = lo - 1 end
+		while hi < np and ((path_s[hi] or si) - si) < CHEV_DIR_M do hi = hi + 1 end
+	else
+		-- path_s not built yet: fall back to the point count this used to use.
+		lo = max(1, i - 3)
+		hi = min(np, i + 3)
+	end
+	local a, b = path[lo] or path[1], path[hi] or path[np]
+	local dx, dz = b.x - a.x, b.z - a.z
+	local l = sqrt(dx * dx + dz * dz)
+	if l < 1e-4 then HDx[i] = false; return nil end
+	local ux, uz = dx / l, dz / l
+	HDx[i], HDz[i] = ux, uz
+	return ux, uz
+end
+
+--- Project the actor onto path leg `i` -- the fraction along it and the arclength that
+--  lands at. Nil when the leg does not exist or has no length.
+--
+--  File scope, and taking the actor's x/z as NUMBERS, because actor_arclen used to define
+--  this inside itself: a fresh closure allocated on every frame of a route, for a function
+--  whose only per-frame input is two floats (route-perf 4.5).
+local function on_leg(i, ax, az)
+	local a, b = path[i], path[i + 1]
+	if not (a and b) then return nil end
+	local dx, dz = b.x - a.x, b.z - a.z
+	local l2 = dx * dx + dz * dz
+	if l2 < 1e-8 then return nil end
+	local t = ((ax - a.x) * dx + (az - a.z) * dz) / l2
+	return t, (path_s[i] or 0) + t * sqrt(l2)
+end
+
+--- Where the ACTOR is along the path, in metres of arclength -- continuously, not
+--  rounded to the nearest point.
+--
+--  This is the number the whole of R2.29 turns on. `cursor` is the nearest path point
+--  and moves in PATH_STEP jumps; the actor between two of them is somewhere real, and
+--  projecting him onto the leg he is actually on recovers it. Both legs around the
+--  cursor are tried, because the nearest point can be just ahead of him as easily as
+--  just behind, and taking only the forward one would quantise the other half-step --
+--  which is the bug this exists to remove, merely smaller.
+--  Returns the arclength, and -- for the lead-in, which needs to know where the LINE is
+--  at that arclength rather than only how far along it we are -- the leg and the fraction
+--  along it, clamped into [0, 1] so the pair always names a real point on the path.
+local function actor_arclen(ap)
+	if not (path and path_s and ap) then return 0 end
+	local ax, az = ap.x, ap.z
+	local t, sa = on_leg(cursor, ax, az)
+	if t and t >= 0 then
+		if t > 1 then return path_s[cursor + 1] or sa, cursor, 1 end
+		return sa, cursor, t
+	end
+	local t2, sb = on_leg(cursor - 1, ax, az)
+	if t2 and t2 >= 0 and t2 <= 1 then return sb, cursor - 1, t2 end
+	return path_s[cursor] or 0, cursor, 0
+end
+
+--- How much of the lead-in offset applies at ABSOLUTE arclength `s`: 1 at the actor,
+--  falling linearly to 0 LEAD_M further along. Anything behind him gets the full offset,
+--  so the stub of route between the cursor and his feet follows him rather than hinging.
+local function lead_w(s)
+	if LEAD_M <= 0 or (lead_x == 0 and lead_z == 0) then return 0 end
+	local w = 1 - (s - lead_s) / LEAD_M
+	if w <= 0 then return 0 end
+	if w > 1 then return 1 end
+	return w
+end
+
+--- Measure this frame's lead-in offset and re-blend the drawn VERTICES through it.
+--
+--  Measured as the actor's residual off the leg he is standing on -- his position minus
+--  the point actor_arclen projected him onto -- which is by construction perpendicular to
+--  the line and is exactly the distance the old behaviour left the route sitting away
+--  from him. Only XZ: the y stays the path's, so the line keeps draping over the ground
+--  it was snapped to rather than following the actor up a step he is climbing.
+--
+--  The vertices are done here, with the marks, and not in build_draw_list, because the
+--  offset changes with every step while the vertex LIST only changes when the cursor
+--  moves. Both halves of the route have to agree about where the line is on the frame it
+--  is drawn, or the marks float off the stroke.
+local function lead_apply(ap, sa, li, lt)
+	lead_s, lead_x, lead_z = sa, 0, 0
+	if LEAD_M > 0 and path and ap then
+		local a = path[li]
+		local b = path[li + 1] or a
+		if a then
+			local dx = ap.x - (a.x + (b.x - a.x) * lt)
+			local dz = ap.z - (a.z + (b.z - a.z) * lt)
+			local l = sqrt(dx * dx + dz * dz)
+			if l > 1e-3 then
+				-- Past LEAD_MAX the head stops following rather than being dragged
+				-- further: a 5 m drag is a line through a wall, and DRIFT_TOL repaths
+				-- shortly after anyway.
+				if l > LEAD_MAX then dx, dz = dx * LEAD_MAX / l, dz * LEAD_MAX / l end
+				lead_x, lead_z = dx, dz
+			end
+		end
+	end
+	local s0 = path_s and (path_s[cursor] or 0) or 0
+	-- lead_w provably returns 0 for every arclength past lead_s + LEAD_M, and RD.s is
+	-- monotonic, so the vertex it stops mattering at can be found once instead of asked
+	-- per vertex: LEAD_M is 8 m against a route drawn to draw_m, so ~30 of 36 vertices
+	-- used to call it only to be told zero (route-perf 4.5). The STORES still run for
+	-- all of them -- skipping those needs a high-water index whose failure mode is one
+	-- vertex stranded at last frame's offset, which is subtle rather than obvious.
+	local cut = -1
+	if LEAD_M > 0 and (lead_x ~= 0 or lead_z ~= 0) then cut = lead_s + LEAD_M - s0 end
+	for i = 1, RD.n do
+		local p = RD.src[i]
+		if p then
+			local si = RD.s[i] or 0
+			local w = si < cut and lead_w(s0 + si) or 0
+			if w > 0 then
+				local v = LP[i]
+				if not v then v = vector(); LP[i] = v end
+				v:set(p.x + lead_x * w, p.y, p.z + lead_z * w)
+				RD.p[i] = v
+			else
+				RD.p[i] = p        -- back on the line: hand out the path point itself
+			end
+		end
+	end
+end
+
+--- How far the whole run of marks has slid forward this frame, in metres, in [0, gap).
+--
+--  The conveyor. Marks are already scheduled by ARCLENGTH ahead of the actor rather than
+--  pinned to world points, so making them flow is one added term and nothing downstream
+--  changes: the leg lookup, the interpolation, the heading and the fades all take an
+--  arbitrary arclength already.
+--
+--  MODULO THE GAP, which is what makes it seamless rather than a slow drift. When the
+--  phase reaches gap, mark k has arrived exactly where mark k+1 started, so wrapping to 0
+--  reproduces the same picture and the loop is invisible -- PROVIDED the marks are evenly
+--  spaced, which is why NEAR_FILL has to be off while this runs (see mark_at).
+--
+--  time_global() and not time_global_async(): it is stamped once per frame, so every
+--  mark in a frame shares one phase and the run moves rigidly. The async clock advances
+--  DURING the loop and would shear the run by a few microseconds' worth of motion.
+--  Frame-rate independent either way, since this is a clock and not a per-frame step.
+--
+--  IT IS THE ONLY THING THAT MOVES THE RUN (R2.40). place_chevrons puts the marks on an
+--  absolute lattice while flow > 0, so their speed over the ground is d(phase)/dt and the
+--  player's own motion does not enter it. Before that they were scheduled from the actor's
+--  arclength, and the belt ran at flow PLUS his speed.
+--
+--  ...EXCEPT WHEN YOU WOULD OTHERWISE OVERTAKE THEM (R2.42). Decoupling the belt from the
+--  player is one end of a dial with a complaint at each end, and both have now been made:
+--
+--    coupled 1:1 (pre-R2.40)   the gap to each mark is constant, so nothing is ever
+--                              overtaken -- but the belt's speed over the ground is
+--                              yours plus flow, reported as "it speeds up when I move"
+--    decoupled  (R2.40)        the belt runs at exactly flow whatever you do -- but at a
+--                              sprint you close on the marks and walk through them,
+--                              reported as "you can catch up to them"
+--
+--  There is no setting that is both: constant ground speed and constant relative speed are
+--  the same quantity minus the player's, so fixing one varies the other. What there IS is
+--  the observation that the two complaints do not occupy the same range. Walking, flow
+--  already exceeds nothing and the marks pull away; only a SPRINT is fast enough to run
+--  the run down. So the belt keeps its constant speed until that is about to happen, and
+--  from there it is floored at (your speed - CATCH_M):
+--
+--    standing   belt = flow                      unchanged, the R2.40 behaviour
+--    walking    belt = flow                      unchanged (2 m/s walk vs flow 2)
+--    sprinting  belt = your speed - CATCH_M      you gain CATCH_M m/s and no more
+--
+--  So nothing changes at all in the range where the belt already looked right, and the
+--  coupling only appears in the range where the alternative was walking through the marks.
+--  CATCH_M is the whole of the trade: 0 pins the marks a fixed distance ahead at a sprint
+--  (never overtaken, and the belt visibly accelerates with you), and a large value is
+--  R2.40 unchanged. 1.0 m/s means a mark 10 m ahead takes ten seconds to reach, which is
+--  longer than any sprint in the Zone -- so in practice they are not caught, they are
+--  gained on slowly, which is what a thing moving away from you should look like.
+--
+--  THE SPEED IS MEASURED ALONG THE PATH, not from the actor's velocity vector. It is the
+--  derivative of the same arclength the marks are scheduled in, so strafing and looking
+--  around contribute nothing -- only progress along the route, which is the only motion
+--  that closes the gap. It costs no engine call, since actor_arclen already runs.
+--
+--  Marks are still born at the actor's own feet -- the lattice point behind him leaves
+--  the run and the next one is a hair in front of it, so the head of the run is always
+--  within a gap of him -- which is directly under the camera and outside the frustum at
+--  any pitch short of straight down (see mark_at's note). So they appear where they
+--  cannot be seen and slide into view, and no fade-in is needed at the near end; the far
+--  end already has the tail fade.
+-- How fast you may close on the marks, m/s. See the note above; 0 pins them at a fixed
+-- distance when you sprint, large reverts to the flat R2.40 belt.
+local CATCH_M = 1.0
+-- The belt's own odometer, in metres, and the clock it was last advanced at. An INTEGRAL
+-- rather than clock * speed, because the speed is no longer constant -- and integrating is
+-- what keeps it continuous when the speed changes, where recomputing clock * speed(t) would
+-- jump the whole run every time you started or stopped running.
+local flow_s  = 0
+local flow_tg = nil
+-- Smoothed along-path speed. Smoothed because a per-frame difference of arclength is noisy
+-- at 60 Hz (millimetres over milliseconds) and the belt's speed is a thing you can see.
+local flow_v  = 0
+-- ...and the arclength it was measured from. Declared, not assigned bare inside the
+-- function: a bare assignment there writes a MODULE global, which is a different variable
+-- from the local everything else here reads (see the namespace note in the header).
+local flow_last_s = nil
+-- Frames longer than this are not motion, they are a hitch or a load screen, and must not
+-- be integrated as either belt travel or player speed.
+local MAX_DT  = 0.25
+
+--- Advance the odometer. Called once per frame from place_chevrons, before flow_phase.
+local function flow_advance(sa, tg)
+	local last = flow_tg
+	flow_tg = tg
+	if flow <= 0 then flow_v = 0; return end
+	if not last or tg <= last then return end
+	local dt = (tg - last) * 0.001
+	if dt > MAX_DT then dt = MAX_DT end
+
+	-- Along-path speed, from the arclength the marks already live in. A repath moves the
+	-- origin of that arclength, so a step no runner could take is a new path rather than
+	-- a sprint and is dropped -- it would otherwise fling the belt forward by metres.
+	if flow_last_s then
+		local v = (sa - flow_last_s) / dt
+		if v < 0 or v > 12 then v = 0 end
+		-- Frame-rate independent easing, the same shape the occlusion fade uses.
+		flow_v = flow_v + (v - flow_v) * (1 - exp(-dt / 0.30))
+	end
+	flow_last_s = sa
+
+	local speed = flow
+	local keep = flow_v - CATCH_M          -- the least the belt may do to stay ahead
+	if keep > speed then speed = keep end
+	flow_s = flow_s + speed * dt
+end
+
+local function flow_phase(gap)
+	if flow <= 0 or gap <= 0 then return 0 end
+	return flow_s - floor(flow_s / gap) * gap
+end
+
+--- Arclength of the k-th mark ahead of the actor. k = 0 is at his feet.
+--
+--  THE NEAR HOLE (R2.33c). Marks sit at whole multiples of the spacing, so the floor
+--  between the player and the first one is bare -- exactly one gap wide, permanently, and
+--  it opens up on screen the moment you look down. Reported off the amber build as
+--  "under some circumstances and viewing angle it can appear we are missing a marker
+--  near our feet".
+--
+--  The mark at k = 0 does not fill it: it sits on the actor's own position, DIRECTLY
+--  BENEATH the camera, and is outside the frustum at any pitch short of straight down.
+--  That is worth writing down because it refuted the obvious fix -- lowering the
+--  renderer's near cut-off admits a mark nobody can see, and the candidate rendered
+--  pixel-identical to the baseline (tools/route-preview, R2.33c sheet). The hole is a
+--  SCHEDULING problem; the cut-off was never what was hiding it.
+--
+--  So the schedule is 0, gap/2, gap, 2*gap, ... -- one extra mark, in the hole. At the
+--  default 3 m spacing that lands at 1.5 m, which is about where the visible floor starts
+--  when you look down. Two costs, both accepted rather than hidden:
+--
+--    * The run is no longer evenly spaced. The first two intervals are gap/2 and gap.
+--    * Half of a WIDE gap is still wide: at 6 m spacing the extra mark lands at 3 m and
+--      there is a 3 m hole in front of it again. This fixes the default and the settings
+--      near it, not the whole slider. Filling to a fixed near distance instead would work
+--      at every spacing and would break even spacing at every spacing too -- so the
+--      narrower fix is deliberate.
+--
+--  It also costs one of MAX_CHEV, which comes off the far end where the tail fade already
+--  has the marks at a third of their alpha. Revert = NEAR_FILL false.
+--
+--  AND IT IS OFF WHILE THE CONVEYOR RUNS, for two reasons that agree. The hole is a
+--  SCHEDULING artefact of marks sitting at fixed multiples of the spacing, and a moving
+--  run has marks passing through that stretch of floor continuously -- so the thing this
+--  exists to patch is not there. The other reason is forcing: the wrap in flow_phase is
+--  only seamless if the marks are EVENLY spaced, and this deliberately makes the first
+--  two intervals gap/2 and gap. Left on, the run would visibly jerk once per gap.
+local NEAR_FILL = true
+local function mark_at(k, gap)
+	if not NEAR_FILL or flow > 0 then return k * gap end
+	if k <= 1 then return k * gap * 0.5 end     -- 0, then half a gap
+	return (k - 1) * gap
+end
+
+--- Refill the chevron half of RD, from the actor's continuous position (R2.29).
+--
+--  Called EVERY FRAME, unlike the vertex half: the marks hold a fixed distance ahead of
+--  the player, so their world positions change whenever he moves at all. Bounded by
+--  MAX_CHEV and by the drawn length, and the walk over `path` is a rolling index rather
+--  than a search, so this is a couple of hundred arithmetic ops per frame.
+local function place_chevrons(tg)
+	RD.nc = 0
+	if not (path and path_s) then return end
+	-- ONE actor fetch for the frame. actor_arclen and lead_apply each used to call
+	-- db.actor:position() for themselves, back to back, for the same answer (route-perf 4.5).
+	local ap = (db and db.actor) and db.actor:position() or nil
+	-- Ahead of the gap guard, not after it: the lead-in moves the STROKE as well as the
+	-- marks, and `gap_m` of 0 is marks off, not route off. Behind the guard the line would
+	-- quietly stop following you the moment someone turned the chevrons down.
+	local sa, li, lt = actor_arclen(ap)
+	lead_apply(ap, sa, li, lt)
+	-- Ahead of the gap guard, so the odometer and the speed estimate stay live while the
+	-- marks are switched off and neither has to be re-primed when they come back. The
+	-- phase itself is arbitrary -- it is mod the gap and every mark is identical -- so
+	-- what this actually buys is that flow_v is already correct on the first frame back
+	-- rather than easing up from zero.
+	flow_advance(sa, tg)
+	if gap_m <= 0 then return end
+	local phase = flow_phase(gap_m)
+	-- The conveyor's lattice: marks live at n*gap + phase in ROUTE arclength, and n0 is
+	-- the first of those at or ahead of the actor. Recomputed every frame, so as he walks
+	-- past one the run does not shift -- n0 simply names the next one and the mark he has
+	-- passed drops off the back. That is what makes the belt's speed `flow` and only
+	-- `flow`; see arrangement 4 in the note above. Unused at flow = 0.
+	local n0 = (flow > 0) and (floor((sa - phase) / gap_m) + 1) or 0
+	-- How many times the phase has wrapped since the belt started. Every wrap renumbers
+	-- the whole run by one, so this is what RD.cn subtracts to name a mark rather than a
+	-- lattice slot -- see the note there.
+	local wraps = (flow > 0) and floor(flow_s / gap_m) or 0
+	local s0 = path_s[cursor] or 0          -- the drawn start, RD.s[]'s origin
+	local np = #path
+	local i, vi, nc = cursor, 1, 0
+	local k = 0
+	while nc < MAX_CHEV do
+		local sm
+		if flow > 0 then
+			sm = (n0 + k) * gap_m + phase
+		else
+			sm = sa + mark_at(k, gap_m)
+		end
+		k = k + 1
+		local at = sm - s0                  -- the frame s[] and cs[] are measured in
+		if at > draw_m then break end
+		-- ...and stop where the ROUTE stops. Without this the walk below clamps to the
+		-- last leg and every further mark lands on the same point, which shows up as a
+		-- doubled chevron sitting on the target.
+		if sm > (path_s[np] or 0) then break end
+		-- the leg holding this arclength
+		while i < np - 1 and (path_s[i + 1] or 0) < sm do i = i + 1 end
+		if i >= np then break end
+		local a, b = path[i], path[i + 1]
+		if not b then break end
+		local seg = (path_s[i + 1] or 0) - (path_s[i] or 0)
+		local t = (seg > 1e-6) and ((sm - (path_s[i] or 0)) / seg) or 0
+		if t < 0 then t = 0 elseif t > 1 then t = 1 end
+		nc = nc + 1
+		local cp = RD.cp[nc]
+		if not cp then cp = vector(); RD.cp[nc] = cp end
+		local w = lead_w(sm)
+		cp:set(a.x + (b.x - a.x) * t + lead_x * w,
+		       a.y + (b.y - a.y) * t,
+		       a.z + (b.z - a.z) * t + lead_z * w)
+		local hx, hz = heading_at(i)
+		if not hx then
+			local dx, dz = b.x - a.x, b.z - a.z
+			local l = sqrt(dx * dx + dz * dz)
+			if l > 1e-4 then hx, hz = dx / l, dz / l else hx, hz = 1, 0 end
+		end
+		-- ...and the mark points along the BLENDED line, not the path underneath it.
+		-- The blend adds lead * w(s) to every point and w falls at exactly 1/LEAD_M, so
+		-- the curve's tangent picks up -lead/LEAD_M -- an analytic term, not a difference
+		-- of neighbours, so it costs nothing and cannot pick up the lateral noise CHEV_DIR_M
+		-- exists to average out. Bounded by LEAD_MAX/LEAD_M, about 14 degrees: the near
+		-- marks angle back toward the line, which is the turn you are actually being asked
+		-- to make.
+		if w > 0 then
+			local bx, bz = hx - lead_x / LEAD_M, hz - lead_z / LEAD_M
+			local bl = sqrt(bx * bx + bz * bz)
+			if bl > 1e-4 then hx, hz = bx / bl, bz / bl end
+		end
+		RD.cdx[nc], RD.cdz[nc] = hx, hz
+		RD.cs[nc] = at
+		-- A STABLE ID for this mark, for the renderer's texture variant (R2.42). It has to
+		-- name the mark rather than the slot, or the picture changes under a mark every
+		-- time the run shifts by one -- which while flowing is once a gap.
+		--
+		-- MINUS THE WRAP COUNT, and R2.42 got this wrong (R2.43b). The bare lattice index
+		-- is NOT stable for a travelling mark, and the reason is the wrap itself: a mark
+		-- sits at n*gap + phase, so as phase runs 0 -> gap it advances a whole gap, and at
+		-- the wrap phase returns to 0 while the picture stays put -- which it can only do
+		-- by every mark taking the index of the one ahead of it. That renumbering is what
+		-- makes the conveyor seamless, and it means a mark that has not moved relative to
+		-- the run gains 1 on its index once per gap travelled. With gap 3 and flow 1.5
+		-- that is a new texture every two seconds, which is what was reported.
+		--
+		--     t=0.0s  phase=0  n0=0   mark at  0   raw id 0
+		--     t=2.5s  phase=5  n0=0   mark at  5   raw id 0    (same mark, travelling)
+		--     t=5.0s  phase=0  n0=1   mark at 10   raw id 1    (same mark, renumbered)
+		--
+		-- floor(flow_s / gap) counts exactly those renumberings, so subtracting it undoes
+		-- them and leaves a number that belongs to the mark for as long as the mark exists.
+		--
+		-- Still, the lattice is not in use and marks hold a fixed distance ahead, so the
+		-- slot IS the identity -- mark k is the same mark frame after frame. Each regime's
+		-- id is the thing that does not move in that regime.
+		--
+		-- k - 1, not k: it was incremented immediately after `sm` was computed, so the
+		-- mark being placed is k - 1.
+		RD.cn[nc] = (flow > 0) and (n0 + k - 1 - wraps) or (k - 1)
+		-- borrow the eased alpha of the vertex at or before it; rolling, since both
+		-- lists run forward in arclength
+		while vi < RD.n and (RD.s[vi + 1] or 0) <= at do vi = vi + 1 end
+		RD.ci[nc] = (RD.n > 0) and vi or 1
+	end
+	RD.nc = nc
+end
+
+-- --------------------------------------------------------------------------
+--- Refill RD from `path`, starting at the cursor (plus NEAR_TRIM, which is 0). Called when
+--  the path changes or the cursor advances -- NOT per frame; the per-frame work is the
+--  alpha easing below, which touches the same arrays without rebuilding them.
+--
+--  Vertices, not marks. `path` is sampled every PATH_STEP so it drapes over ground,
+--  which is far finer than a drawn line needs on a straight: emitting all of it
+--  would spend a widget per metre to draw something identical. So a vertex goes in
+--  when the path has TURNED enough (TURN_TOL since the last one) or when the segment
+--  has run as far as its distance allows (`seg_allow`, R2.13) -- corners get vertices,
+--  straights stay cheap, and detail is spent in proportion to the screen area it
+--  covers rather than evenly along the ground.
+--
+--  Chevrons are placed at exact ARCLENGTH along the path and interpolated onto the leg
+--  they land on, so their spacing is in metres and has nothing to do with where the
+--  vertices happened to fall (R2.16 -- they used to be flags on the vertices, which
+--  capped their resolution at the vertex spacing). Their PHASE is measured from the drawn
+--  start, so they slide with you; PHASE_ABS anchors them to the route instead, and the
+--  note below says why that lost.
+--
+--  Alpha is deliberately carried over by slot rather than reset. A cursor advance
+--  shifts every vertex down one index, so slot i inherits what was its neighbour's
+--  alpha -- near enough that nothing visibly jumps, where resetting to 0 would
+--  make the whole route re-fade in every couple of metres walked.
+local function build_draw_list(cam, tg)
+	RD.n, RD.nc = 0, 0
+	if not (path and cam) then return end
+
+	local n = 0
+	local acc  = 0                  -- arclength from the drawn start
+	local vacc = 0                  -- arclength since the last vertex
+	local turn = 0                  -- accumulated (1 - cos) since the last vertex
+	local pdx, pdz                  -- unit direction of the previous path leg
+	local allow = SEG_MIN           -- segment length permitted at the last vertex
+
+	-- Tracked by INDEX, not by comparing RD.p[n] to the point: vector is luabind
+	-- userdata with no __eq, so `==` on two of them is a hard script error.
+	local emitted = nil
+
+	--- How long a segment may be, starting from this point: distance / SEG_DIV, so it
+	--  subtends a roughly constant angle. Measured in 3D from the CAMERA, which is what
+	--  the renderer divides by, rather than in XZ from the actor.
+	local function seg_allow(p)
+		local dx, dy, dz = p.x - cam.x, p.y - cam.y, p.z - cam.z
+		local s = sqrt(dx * dx + dy * dy + dz * dz) / SEG_DIV
+		if s < SEG_MIN then return SEG_MIN end
+		if s > SEG_MAX then return SEG_MAX end
+		return s
+	end
+
+	local function emit(i, at)
+		n = n + 1
+		emitted = i
+		-- src is the point the SEARCH produced and p is where it gets drawn; lead_apply
+		-- writes the second from the first every frame. They are the same reference until
+		-- the lead-in has something to say, which is the ordinary case.
+		RD.src[n] = path[i]
+		RD.p[n] = path[i]
+		-- `at` was carried unused until R2.24; it is the arclength AT path[i] at every
+		-- call site, which is exactly what a consumer needs to stop at its own distance.
+		RD.s[n] = at
+		if RD.t[n] == nil then RD.t[n] = 1 end
+		if RD.a[n] == nil then RD.a[n] = 0 end
+		vacc, turn = 0, 0
+		allow = seg_allow(path[i])
+	end
+
+	-- Skip the stretch under the camera (see NEAR_TRIM). Bounded two ways: never more
+	-- than TRIM_FRAC of what would be drawn, and never past the second-to-last point,
+	-- so a short route loses a little of its head rather than all of itself.
+	local start, trim = cursor, 0
+	local trim_max = min(NEAR_TRIM, draw_m * TRIM_FRAC)
+	while start < #path - 1 do
+		local p = path[start]
+		local dx, dy, dz = p.x - cam.x, p.y - cam.y, p.z - cam.z
+		if (dx * dx + dy * dy + dz * dz) >= (NEAR_TRIM * NEAR_TRIM) then break end
+		local l = xz(path[start], path[start + 1])
+		if trim + l > trim_max then break end
+		trim, start = trim + l, start + 1
+	end
+
+	emit(start, 0)
+	local last = start
+	for i = start + 1, #path do
+		if n >= MAX_DRAW then break end
+		local a, b = path[i - 1], path[i]
+		local dx, dz = b.x - a.x, b.z - a.z
+		local l = sqrt(dx * dx + dz * dz)
+		if acc + l > draw_m then break end
+
+		-- The bend is at path[i - 1], BETWEEN the previous leg and this one -- so
+		-- when it trips the threshold, the corner is the point we just came from,
+		-- not the one we are looking at. Emitting `i` instead would put the vertex a
+		-- PATH_STEP past the corner and let the chord from the previous vertex cut
+		-- straight across it, which through a doorway means the stroke crossing the
+		-- jamb. This is the whole reason vertex placement is turn-driven.
+		if l > 1e-4 then
+			dx, dz = dx / l, dz / l
+			if pdx then
+				local d = pdx * dx + pdz * dz
+				if d < 1 then turn = turn + (1 - d) end
+			end
+		end
+		-- Close the run BEFORE overshooting rather than after crossing, so `allow` is
+		-- a real maximum and not just a threshold. Tested after, a leg that lands the
+		-- run at 3.9 m is followed by one taking it to 4.9 -- and the path's legs are
+		-- only PATH_STEP long on a straight, so an overshoot of nearly a full step is
+		-- the normal case, not an edge one. (A single path leg longer than `allow`
+		-- still yields one long segment: there is no intermediate point to cut at,
+		-- which is also why SEG_MIN below PATH_STEP does not buy extra vertices.)
+		if turn >= TURN_TOL or vacc + l > allow then
+			if emitted ~= i - 1 then
+				emit(i - 1, acc)      -- acc is still the arclength AT path[i - 1]
+			end
+		end
+
+		acc, vacc = acc + l, vacc + l
+		if l > 1e-4 then pdx, pdz = dx, dz end
+		last = i
+		if i == #path then emit(i, acc) end
+	end
+	-- Close the stroke on the last point actually walked. Without this the line
+	-- stops at the last EMITTED vertex, so it ends up to a segment short of draw_m
+	-- and, worse, the shortfall changes as the cursor advances -- the far end would
+	-- visibly breathe in and out by that much as you walked.
+	if n > 0 and n < MAX_DRAW and last > start and emitted ~= last then
+		emit(last, acc)
+	end
+
+	RD.n = n
+	if occ_i > n then occ_i = 0 end
+	-- The chevrons hang off the vertices' arclengths for their alpha, so they are placed
+	-- after them -- and again every frame from update(), which is what makes them flow.
+	place_chevrons(tg)
+end
+
+--- Does the dead-end fade apply this frame, and over what arclengths. Returns the
+--  cursor's arclength and the drawn line's far end, or nil when there is nothing to fade.
+--
+--  1 everywhere unless the route really does stop short AND the drawn line's end IS that
+--  dead end -- a long route capped at draw_m ends in open path, not in a barrier, and
+--  fading it would be a lie in the other direction.
+--
+--  This used to be stub_at(i), asked once PER VERTEX from two loops in occ_step -- 36 x
+--  60/s = 2,160 calls a second, none of whose four early exits or two arclengths depend on
+--  i at all, and on a partial route (the normal outcome) each ran the full body including
+--  a `#` on a path of hundreds of 1 m samples. Only `RD.s[i]` was ever per-vertex, so the
+--  verdict is taken once a frame here and the loops do the one subtraction themselves
+--  (route-perf 4.5).
+local function stub_frame()
+	if not (partial and short_by and short_by > STUB_TOL) then return nil end
+	if not (path_s and RD.n > 0) then return nil end
+	local s0 = path_s[cursor] or 0
+	local last = s0 + (RD.s[RD.n] or 0)
+	if ((path_s[#path] or last) - last) > 1.0 then return nil end   -- ends mid-path
+	return s0, last
+end
+
+--- Re-test the arrows this frame's budget pays for and ease each one toward its verdict.
+--  The easing is the whole point: the round-robin still spreads the ray cost over frames,
+--  but an arrow's alpha slides rather than snapping, so a sweep landing all at once is
+--  invisible.
+local function occ_step(tg, dt, cam)
+	local n = RD.n
+	if n == 0 then return end
+	if ray_ready(RAY_WARN) then
+		-- Owed rays accumulate fractionally so a budget below one ray per frame is not
+		-- rounded away to nothing: at 144 fps a 36-bead route earns 2.88, casting 2 rays
+		-- on some frames and 3 on others for the same 360/s a 60 fps frame gets.
+		occ_owed = occ_owed + n * dt / OCC_SWEEP_MS
+		local rays = floor(occ_owed)
+		-- The whole earned amount comes off the accumulator BEFORE the cap, so anything the
+		-- cap refuses to spend is DROPPED rather than banked. update() already floors a
+		-- stretched dt to 16 past 500 ms, but 500 ms still earns five whole sweeps, and
+		-- paying that debt off over the frames that follow would charge the cost of the
+		-- hitch to the recovery. The verdicts are stale either way; the ease covers it.
+		occ_owed = occ_owed - rays
+		local cap = n < OCC_MAX and n or OCC_MAX
+		if rays > cap then rays = cap end
+		if rays > 0 and cam then
+			local lit = xray and DIM_MIN or 0
+			for _ = 1, rays do
+				occ_i = (occ_i % n) + 1
+				RD.t[occ_i] = point_occluded(RD.p[occ_i], cam, OCC_LIFT, OCC_TOL) and lit or 1
+			end
+		end
+	end
+	-- The dead-end fade multiplies the occlusion verdict HERE rather than where that verdict
+	-- is written, because the verdict is only written when a geometry ray is available --
+	-- and `demonized_geometry_ray` is an optional dependency. Folded in there, a route to an
+	-- unreachable target would have gone on drawing itself as a confident line for anyone
+	-- without that mod, which is precisely the install least able to tell. It is also
+	-- per-vertex per frame rather than round-robin, so the fade appears at once instead of
+	-- over a sweep's worth of frames.
+	local ss0, slast = stub_frame()
+
+	-- First frame back from a hidden overlay: land, do not ease. The eased alphas are
+	-- as old as the moment the overlay went away, and easing out of them would play a
+	-- fade-in of a stale occlusion pattern over a route the player has just asked to
+	-- see -- at OCC_TAU that is visible, and it is wrong twice over because the ray
+	-- verdicts it is fading FROM were computed somewhere the player no longer stands.
+	if occ_snap then
+		occ_snap = false
+		for i = 1, n do
+			local t = RD.t[i] or 1
+			if ss0 then
+				local from_end = slast - (ss0 + (RD.s[i] or 0))
+				if from_end < STUB_M then t = t * from_end / STUB_M end
+			end
+			RD.a[i] = t
+		end
+		return
+	end
+	if dt <= 0 then return end
+	local k = 1 - exp(-dt / OCC_TAU)
+	if k > 1 then k = 1 end
+	for i = 1, n do
+		local t = RD.t[i] or 1
+		if ss0 then
+			local from_end = slast - (ss0 + (RD.s[i] or 0))
+			if from_end < STUB_M then t = t * from_end / STUB_M end
+		end
+		-- SNAP once the gap is under half an 8-bit alpha step. The ease is exponential and
+		-- so never actually arrives: a settled route went on multiply-adding all 36
+		-- vertices forever, for differences the packed ARGB cannot represent. Snapped, the
+		-- settled loop is 36 compares (route-perf 4.5).
+		local a = RD.a[i]
+		local d = t - a
+		if d < 0.002 and d > -0.002 then RD.a[i] = t else RD.a[i] = a + d * k end
+	end
+end
+
+--- The per-frame DRAWING half of a tick: refresh the list, place the marks, step the
+--  occlusion fade. Split out of update() because it is exactly the work that has no
+--  consumer while the overlay is hidden, and both of update()'s live branches skip it
+--  the same way (see the note on HIDE_MS).
+--
+--  `moved` says the cursor advanced this frame, which is the only thing that changes
+--  WHICH vertices are drawn; the marks move with the player regardless, and
+--  build_draw_list places them itself.
+local function draw_tick(tg, dt, moved)
+	-- ONE camera fetch for the frame: build_draw_list and occ_step each used to call
+	-- device() for themselves (route-perf 4.5). Read HERE and not in update(), so the
+	-- blanked path -- which skips this whole function -- does not start paying for it.
+	local cam = device().cam_pos
+	if resume then
+		-- Coming back from hidden: whatever is in RD was built where the player stood
+		-- when the overlay went away, so rebuild it rather than trusting `moved`.
+		resume, occ_snap = false, true
+		build_draw_list(cam, tg)
+	elseif moved and cursor < #path then
+		build_draw_list(cam, tg)
+	else
+		place_chevrons(tg)
+	end
+	occ_step(tg, dt, cam)
+end
+
+--- The points to draw this frame, or nil. Returned by reference; the caller reads
+--  it immediately on the render path and must not hold on to it.
+function route_draw()
+	if not (on and publish and RD.n > 0) then return nil end
+	return RD
+end
+
+--- Where the target is, as of the last update: XZ metres to it, and its x and z.
+--
+--  The three fields of status() that a per-frame consumer actually wants. status()
+--  builds a fresh ~20-entry hash every call and measures the snap distance on the way
+--  through, which is right for the F7 dump and the harness and pure garbage for
+--  iqm_minimap, which called it once a frame to read exactly these.
+--
+--  `d` is nil until the first target resolves, and nil again the moment there is no
+--  objective -- a consumer has to handle that either way, so it is not worth inventing
+--  a zero for.
+function route_target()
+	return tgt_d, tgt_x, tgt_z
+end
+
+--- How much of the published list a consumer wanting `dist` metres should draw:
+--  returns (n, nc), always <= RD.n / RD.nc.
+--
+--  The list is built at the LONGEST distance any view asked for (see configure), so
+--  a view with a shorter one has to stop early rather than draw to the end. Called
+--  on the render path, once per view per frame -- a forward scan over at most
+--  MAX_DRAW entries, on a monotonic array, which is cheaper than the branchier
+--  binary search would be at n <= 36.
+--
+--  A vertex is kept when it is AT or before the limit, and at least two are always
+--  returned when the list has them: a stroke needs both ends of one segment, and a
+--  distance shorter than the first segment should give a stub rather than nothing.
+--
+--  Cutting on a vertex means the shorter view stops UP TO ONE SEGMENT short of what
+--  it asked for, and by a varying amount as you walk (the same far-end breathing the
+--  emit at the end of build_draw_list exists to stop). Interpolating an exact end
+--  point instead would mean mutating RD from a read-only accessor that two consumers
+--  call in the same frame, so the honest fix is that both views' distances are
+--  approximate to a segment -- which at SEG_MAX is 5 m out of 20-80.
+function route_limit(dist)
+	local n, nc = RD.n, RD.nc
+	if not dist or n == 0 then return n, nc end
+
+	local kn = n
+	for i = 1, n do
+		if RD.s[i] and RD.s[i] > dist then kn = i - 1; break end
+	end
+	if kn < 2 then kn = min(2, n) end
+	if kn >= n then return n, nc end
+
+	-- Chevrons are cut at the same arclength, not at the kept vertex's: the last
+	-- vertex sits wherever the path last bent, so cutting there would drop up to a
+	-- segment's worth of marks that are still on drawn ground. They must also stay
+	-- within kn, since ci[] indexes the vertex list for their alpha.
+	local knc = nc
+	for k = 1, nc do
+		if (RD.cs[k] and RD.cs[k] > dist) or (RD.ci[k] and RD.ci[k] > kn) then
+			knc = k - 1
+			break
+		end
+	end
+	return kn, knc
+end
+
+-- --------------------------------------------------------------------------
+-- Search lifecycle
+-- --------------------------------------------------------------------------
+local function abort_search()
+	if searching and iqm_route and iqm_route.search_owner
+	   and iqm_route.search_owner() == OWNER then
+		iqm_route.search_abort()
+	end
+	searching, pending = false, nil
+end
+
+--- Drop the route and stop drawing. `keep` retains the target id, which is what an
+--  arrival or a temporary loss wants -- forgetting it would make the next tick
+--  treat the same NPC as new and repath through the cooldown.
+--
+--  Note there is nothing to un-set anywhere else: not drawing is simply not
+--  publishing. The wire version had to reach into the renderer to un-blank it, and
+--  every early return that skipped doing so stranded the route invisible.
+local function stop(keep)
+	abort_search()
+	path, path_s, goal, cursor = nil, nil, nil, 1
+	RD.n, RD.nc, publish, partial, short_by, last_from = 0, 0, false, false, nil, nil
+	dead_end = false
+	if not keep then
+		tgt_id, vis_since, hidden, vis_next = nil, nil, false, 0
+	end
+end
+
+function reset()
+	stop(false)
+	next_try, vis_next = 0, 0
+	parked = false
+	-- The navmesh under an id is a property of the LEVEL, so a cached snap (or a cached
+	-- "there is no mesh near it") must not survive one.
+	snap_id, snap_src, snap_pos = nil, nil, nil
+	-- forget the eased alphas too: a fresh route somewhere else should fade in,
+	-- not inherit the last one's occlusion pattern
+	for i = 1, MAX_DRAW do RD.a[i], RD.t[i] = nil, nil end
+	-- ...and the hidden-overlay bookkeeping with them: there is nothing left to snap
+	-- back to, and the next tick re-derives whether anyone is looking anyway.
+	blanked, blank_next, resume, occ_snap = false, 0, false, false
+	-- The chevron POSITIONS are kept: they are persistent vectors, rewritten in place on
+	-- every rebuild and only ever read up to RD.nc, so dropping them would trade a live
+	-- allocation for nothing. Their alpha rides on the vertices cleared above.
+	RD.nc = 0
+end
+
+-- --------------------------------------------------------------------------
+-- Getting the goal onto the navmesh
+-- --------------------------------------------------------------------------
+--  A target the AI mesh does not cover used to end the matter: search_begin refuses
+--  both endpoints off the mesh (iqm_route:505), and the driver backed off for
+--  FAIL_COOL and tried the same doomed position again five seconds later, forever.
+--  That is right for the actor's end -- you are standing where you are standing --
+--  and wrong for the target's, where "the mesh does not reach it" is not the same
+--  question as "can I walk towards it".
+--
+--  It stopped being an edge case when the route began following the SELECTED task
+--  (§6c of docs/minimap-route.md), because a manual waypoint is now a target:
+--
+--    * placed on the PDA MAP -- the map is 2D (ConvertLocalToReal returns an
+--      Fvector2), so the y of the resulting object is whatever the exe chose. Its
+--      LEVEL VERTEX, though, is real, which is why route_goal hands one over.
+--    * placed by AIMING -- a geometry ray, so the point lands on whatever surface
+--      was under the crosshair: a wall face, a rock, a rooftop, a tree.
+--
+--  Neither means "unreachable". Both mean "aim at the mesh nearest to it".
+--
+--  WHY RINGS IN XZ AND NOT IN Y. CLevelGraph::vertex_id (level_graph.cpp:226-247)
+--  does a lower_bound on the QUANTISED xz cell and returns u32(-1) when no node
+--  shares that cell; y only chooses among the nodes already in it. So a wrong
+--  height cannot make a position invalid, and probing heights would buy nothing --
+--  it is always the xz that has no floor under it.
+--
+--  level.get_nearby_vertices(pos, r) would answer this exactly and is bound
+--  (level_script.cpp:1115), but it walks EVERY vertex on the level per call
+--  (level_graph_vertex.cpp:581-594). A handful of vertex_id probes, each a binary
+--  search, is orders of magnitude cheaper.
+local SNAP_RINGS  = { 1.4, 2.8, 4.9, 8.4, 14.0 }   -- m; the AI grid is 0.7 m
+-- Unit directions, as flat x,z pairs: the 8 compass points, then 8 more between them
+-- for the wider rings, where 45 degrees apart leaves real gaps.
+local SNAP_DIRS = {
+	1, 0,  0.707, 0.707,  0, 1,  -0.707, 0.707,
+	-1, 0,  -0.707, -0.707,  0, -1,  0.707, -0.707,
+	0.924, 0.383,  0.383, 0.924,  -0.383, 0.924,  -0.924, 0.383,
+	-0.924, -0.383,  -0.383, -0.924,  0.383, -0.924,  0.924, -0.383,
+}
+local SNAP_INNER  = 16     -- entries (8 dirs) probed on the two closest rings
+local SNAP_HOLD_D = 5.0    -- m the raw target may move before the answer is recomputed
+local _sv = vector()
+
+--- Where the SEARCH should aim for a target at `tpos`, or nil when nothing near it is
+--  on the mesh. Returns `tpos` itself in the ordinary case, so a target standing on the
+--  floor costs one vertex_id per search and nothing else.
+--
+--  The answer is cached per target: a waypoint does not move, and re-probing on every
+--  repath would pay the whole ring walk for a question whose answer cannot have changed.
+--  A miss is cached too -- that is the case that used to repeat every FAIL_COOL.
+local function mesh_goal(id, tpos, lvid)
+	if not (level and level.vertex_id and level.vertex_position) then return tpos end
+	if on_mesh(tpos) then return tpos end
+
+	if id and snap_id == id and snap_src and xz(snap_src, tpos) <= SNAP_HOLD_D then
+		return snap_pos
+	end
+	snap_id = id
+	snap_src = (snap_src or vector()):set(tpos)
+	snap_pos = nil
+
+	-- The object's own node first, when it has one: for a map-placed waypoint this is
+	-- the honest half of a position whose y was invented, and it costs one probe.
+	if lvid and lvid ~= INVALID_VID then
+		local v = level.vertex_position(lvid)
+		-- vertex_position hands back a zero vector for an id it does not like
+		-- (level_script.cpp:394-399), which is why the answer is re-tested rather
+		-- than trusted.
+		if v and not (v.x == 0 and v.y == 0 and v.z == 0) and on_mesh(v) then
+			snap_pos = vector():set(v)
+			say("goal off the navmesh: using the target's own level vertex")
+			return snap_pos
+		end
+	end
+
+	for r = 1, #SNAP_RINGS do
+		local rad = SNAP_RINGS[r]
+		local n = (r <= 2) and SNAP_INNER or #SNAP_DIRS
+		for d = 1, n, 2 do
+			-- Every direction on a ring is the same distance out, so the first hit is
+			-- as near as any other and there is nothing to compare.
+			local px = tpos.x + SNAP_DIRS[d] * rad
+			local pz = tpos.z + SNAP_DIRS[d + 1] * rad
+			local vid = on_mesh(_sv:set(px, tpos.y, pz))
+			if vid then
+				-- The probe's own xz, not the node centre's: the node is quantised to
+				-- the AI grid and this is the point we want to walk to, not a cell.
+				-- Only the height is worth taking from the mesh.
+				local v = level.vertex_position(vid)
+				snap_pos = vector():set(px, (v and v.y) or tpos.y, pz)
+				say("goal off the navmesh: aiming %s m to one side of it", tostring(rad))
+				return snap_pos
+			end
+		end
+	end
+
+	say("goal off the navmesh, and no mesh within %s m of it", tostring(SNAP_RINGS[#SNAP_RINGS]))
+	return nil
+end
+
+local function begin_search(from, to, tg)
+	if not (iqm_route and iqm_route.search_begin) then return end
+	-- The SEARCH aims at the snapped point; `goal` below stays the raw target, because
+	-- GOAL_TOL asks "has the thing I am routing to moved", and the snap is not movement.
+	-- Both ends get looked after now, in different places and for different reasons:
+	-- mesh_goal ring-walks for the far one here, and iqm_route.search_begin falls back to
+	-- the actor's own vertex for the near one (R2.34) -- that one belongs down there
+	-- because every caller of it starts from the actor, the F7 drivers included.
+	local aim = mesh_goal(tgt_id, to, tgt_lvid) or to
+	-- WHAT WE ARE ACTUALLY AIMING AT (R2.33e). The budget is derived from the distance to
+	-- the AIM, so a give-up count of 877 means the search was pointed at something 47.7 m
+	-- away -- which is how a route to an NPC standing 17 m in front of the player was
+	-- caught aiming somewhere else entirely. Both distances are printed because it is
+	-- their DISAGREEMENT that is the symptom, and neither alone shows it.
+	--
+	-- mesh_goal's three computing branches each say() what they did; its CACHED early
+	-- return says nothing, which is exactly how a goal snapped once to a bad point goes on
+	-- being used silently for as long as the target stands still. `snapped` is here so the
+	-- cached case is visible too.
+	local budget = node_budget(xz(from, aim))
+	-- BY DISTANCE, NOT BY IDENTITY, and that is a crash fix rather than a tidy-up (R2.41).
+	--
+	-- This read `aim ~= to`, and `vector` is luabind userdata with no __eq -- so comparing
+	-- two of them is not false, it is a hard script error and a CTD. build_draw_list has
+	-- carried a note about exactly this since R2.11 ("tracked by INDEX, not by comparing
+	-- RD.p[n] to the point"); this is the same mistake in the same file.
+	--
+	-- It survived every test and several sessions of play because Lua 5.1 answers `==` on
+	-- two userdata by primitive identity FIRST and only consults __eq when they are
+	-- different objects. mesh_goal returns `tpos` ITSELF in the ordinary case, so `aim` and
+	-- `to` are the same object, the metamethod is never reached, and the line is harmless
+	-- -- on every route to a target standing on the floor, which is nearly all of them. The
+	-- one path that returns a DIFFERENT vector is the goal being off the navmesh, so the
+	-- line crashed the game precisely in the case it exists to report.
+	--
+	-- The distance is the honest question anyway: what the log wants to say is how far the
+	-- aim is from the target, and "a different object" was only ever a proxy for it.
+	local off = xz(aim, to)
+	local snapped = (off > 1e-4) and string.format("%.1f m off the target", off)
+	                or "the target itself"
+	say("aiming at %s: target %s m away, aim %s m away, budget %s nodes (id %s)",
+		snapped, string.format("%.1f", xz(from, to)), string.format("%.1f", xz(from, aim)),
+		budget, tostring(tgt_id))
+	if not iqm_route.search_begin(from, aim, { owner = OWNER, max_nodes = budget }) then
+		-- one end off the navmesh (R2.2d): a roof, a ladder, unmapped ground.
+		-- Back off rather than retrying every frame; it usually stays true.
+		next_try = tg + FAIL_COOL
+		say("no route: an endpoint is off the navmesh")
+		return
+	end
+	searching = true
+	last_from = (last_from or vector()):set(from)
+	goal = vector():set(to)
+	next_try = tg + REPATH_MIN
+end
+
+--- Take each interpolated point's HEIGHT from the AI navmesh and lift it clear of the
+--  floor. The A* answers in nodes up to 8 m apart and densify() interpolates straight
+--  lines between them, so without this a route crossing a rise or a dip floats above or
+--  sinks below the ground it is supposed to describe.
+--
+--  HEIGHT ONLY (R2.15). This used to write the node's x and z as well, and that is what
+--  put the visible staircase in the eighth session's screenshot. From the engine source:
+--
+--      x = float(_x) * header().cell_size() + header().box().min.x;   -- and z likewise
+--      dest_position.y = (float(source_position.y()) / 65535) * ...   -- level_graph_inline.h:63-88
+--
+--  A node's x and z are QUANTISED to the AI grid (0.7 m on Anomaly's levels); only its y
+--  is a fine value. So writing all three snapped every route point onto a grid
+--  intersection, and a line at a shallow angle to that grid then alternates between
+--  adjacent rows -- a sawtooth of up to a node's width, which is several times the
+--  stroke's own thickness. It also produced the occasional hook, where the nearest node
+--  to point i sat slightly BEHIND point i-1 along the path, reversing that segment.
+--  Every bit of smoothing R2.14 added was being re-corrugated here afterwards.
+--
+--  The XZ test survives, with a different job: it no longer decides where the point
+--  goes, only whether this node's height can be trusted for it. A node more than
+--  SNAP_MAX_XZ away in plan is not the ground under our point -- it is the nearest bit
+--  of mapped floor to a point over a void, or across a ledge -- and its y would be
+--  worse than the interpolated one we already have.
+--
+--  vertex_plane_y(vertex, x, z), which would give the exact height on the node's plane
+--  at OUR x and z, is not bound to Lua (level_script.cpp:2438-2455 exposes only
+--  vertex_position, vertex_in_direction, vertex_link and the cover pair). So the height
+--  is the node centre's: a few centimetres out on ordinary ground, up to ~0.2 m on a
+--  steep ramp, against 0.7 m of lateral sawtooth for the old version.
+local SNAP_MAX_XZ = 1.2   -- half a cell diagonal is ~0.5 m on the 0.7 m grid
+local SNAP_MAX_Y  = 5.0
+--- Cumulative XZ arclength along `pts`. See path_s: this is the ruler chevron phase is
+--  measured on, so it is measured the same way build_draw_list measures its own legs --
+--  in XZ, ignoring the climb, because a mark every 3 m of FLOOR is what reads as even
+--  spacing and a mark every 3 m of slope does not.
+local function arclengths(pts)
+	local s = { 0 }
+	for i = 2, #pts do s[i] = s[i - 1] + xz(pts[i - 1], pts[i]) end
+	return s
+end
+
+local function snap_path(pts)
+	for i = 1, #pts do
+		local p = pts[i]
+		local y = p.y
+		local vid = level.vertex_id(p)
+		if vid and vid ~= INVALID_VID then
+			local v = level.vertex_position(vid)
+			local dx, dz = v.x - p.x, v.z - p.z
+			if (dx * dx + dz * dz) <= (SNAP_MAX_XZ * SNAP_MAX_XZ)
+			   and (v.y - p.y) <= SNAP_MAX_Y and (p.y - v.y) <= SNAP_MAX_Y then
+				y = v.y
+			end
+		end
+		p:set(p.x, y + ARROW_LIFT, p.z)
+	end
+	return pts
+end
+
+--- The post-search tail: a raw node list in, the drawn route out. Split out of step_search
+--  so it can run on the frame AFTER the search finished (route-perf 4.6).
+local function finish_route(tg)
+	local pts, part, short = pending.pts, pending.partial, pending.short
+	pending = nil
+	-- smooth (round off the probe's 45 degree corners, R2.14) -> densify (so the
+	-- line drapes over ground) -> clear (push it off the walls it runs along,
+	-- R2.23) -> snap (so it sits ON that ground). In that order: smoothing works
+	-- on the sparse node list where a corner is one vertex, clearance needs the
+	-- dense list because the sparse one has no point on the middle of an 8 m leg,
+	-- and snapping goes last because both of the others move points in XZ.
+	local nodes = iqm_route.smooth and iqm_route.smooth(pts) or pts
+	local dense = iqm_route.densify(nodes, PATH_STEP)
+	if iqm_route.clearance then dense = iqm_route.clearance(dense) end
+	path, cursor = snap_path(dense), 1
+	path_s = arclengths(path)
+	clear_headings()
+	build_draw_list(device().cam_pos, tg)
+	-- Written through only now, and not on the frame the search finished: the old route is
+	-- still the one being drawn until this function runs, and it must not wear the new
+	-- route's dead-end fade for a frame.
+	partial, short_by = part, short
+	-- CAN THE ROUTE'S END EVEN SEE THE TARGET (R2.33m)? The shortfall alone
+	-- cannot tell a good ending from a bad one: stopping 6 m short in the same
+	-- room is a route that delivered you, and stopping 6 m short through a wall
+	-- is a line of marks pointing into masonry. Same distance, opposite meaning.
+	--
+	-- One ray from the last path point to the target answers it. Clear means "this
+	-- is as close as the mesh goes, and you can see them from here", which is a
+	-- real answer worth drawing. Blocked means the route ends behind something and
+	-- every mark on it is aimed at the wrong side of that thing -- reported three
+	-- times as routing into walls, and no amount of fading the tail changes what
+	-- the marks point AT.
+	--
+	-- Cast once per search rather than per frame: it can only change when the
+	-- route or the target does, and both of those start a new search.
+	dead_end = false
+	-- `goal` and not `to`: the raw target position is the one begin_search stashed. It is
+	-- also the right one -- the LOS question is about the target, not about the snapped
+	-- point the search aimed at.
+	if partial and short_by and short_by > STUB_TOL and goal and ray_ready(RAY_WARN) then
+		local last = path[#path]
+		if last then dead_end = point_occluded(last, goal, OCC_LIFT, OCC_TOL) end
+	end
+	say("route up%s: %s nodes -> %s points -> %s arrows",
+		partial and " (partial)" or "", #pts, #path, RD.n)
+end
+
+--- Advance the search we own. Returns true while it is still running.
+local function step_search(tg)
+	-- THE DEFERRED TAIL, claimed before the search is stepped again (route-perf 4.6).
+	-- Last frame's search finished and handed its raw node list over instead of
+	-- processing it, so this frame carries the tail and nothing else.
+	if pending then
+		searching = false
+		finish_route(tg)
+		return false
+	end
+	local st = iqm_route.search_step(STEP_BUDGET)
+	if st == "working" then return true end
+	local degenerate = false
+	if st == "done" then
+		local pts = iqm_route.search_result()
+		if pts and #pts >= 2 then
+			-- A partial route stops short of the target, which for a drawn length of
+			-- draw_m is usually invisible: we were only ever going to show the first
+			-- stretch. It does mean the far end is not necessarily aimed at the
+			-- target, so it is worth saying so in the log.
+			--
+			-- Read HERE and not next frame: there is one search state in iqm_route, and
+			-- anything that began another between the two frames would have replaced
+			-- both flags. The raw node list is safe because we hold the array itself.
+			pending = {
+				pts     = pts,
+				partial = iqm_route.search_partial and iqm_route.search_partial() or false,
+			}
+			pending.short = pending.partial and iqm_route.search_closest
+			                and iqm_route.search_closest() or nil
+			-- Still ours, and still "searching" as far as the status goes -- which is
+			-- the truth: there is no route to draw until the tail has run.
+			return true
+		end
+		-- A one-point answer: start and goal collapsed onto the same navmesh node,
+		-- which happens just outside ARRIVE_D because the search calls it arrived
+		-- within its own `arrive` radius. Nothing to draw, but this is NOT the
+		-- unreachable case and must not buy the long back-off -- two steps back and
+		-- it would be a perfectly good route.
+		degenerate = true
+	end
+	searching = false
+	path, path_s, goal = nil, nil, nil
+	RD.n = 0
+	next_try = tg + (degenerate and REPATH_MIN or FAIL_COOL)
+	return false
+end
+-- --------------------------------------------------------------------------
+-- Following the route
+-- --------------------------------------------------------------------------
+--- Move the cursor to the point the actor is nearest, looking only FORWARD (plus
+--  the current point). Returns the actor's distance from that point, and whether
+--  the cursor moved.
+--
+--  Only looking forward is what turns backtracking into drift: walk back the way
+--  you came and the nearest forward point recedes, the distance crosses DRIFT_TOL,
+--  and the caller repaths. Scanning the whole array instead would quietly follow
+--  you backwards and never notice you had left the route.
+local function advance(apos)
+	local n = #path
+	local best_i, best_d = cursor, xz2(apos, path[cursor])
+	for k = cursor + 1, min(n, cursor + LOOK_AHEAD) do
+		local d = xz2(apos, path[k])
+		if d < best_d then best_i, best_d = k, d end
+	end
+	local moved = best_i ~= cursor
+	cursor = best_i
+	return sqrt(best_d), moved
+end
+
+-- --------------------------------------------------------------------------
+-- The tick
+-- --------------------------------------------------------------------------
+-- Public so the harness can drive it without a game loop.
+function update(tg)
+	local dt = tg - last_tg
+	last_tg = tg
+	if dt < 0 or dt > 500 then dt = 16 end   -- first frame, or a load stall
+
+	if not (db and db.actor) then return end
+
+	-- A debug route taking the search wins outright: there is one search, and
+	-- someone standing in the Zone pressing F7 is more interested in what they
+	-- asked for than in the live route.
+	if iqm_route and iqm_route.debug_active and iqm_route.debug_active() then
+		if not parked then
+			parked = true
+			stop(false)
+			say("parked: the F7 route driver has the search")
+		end
+		return
+	end
+	parked = false
+
+	if not on then
+		why = "option off"
+		if tgt_id or publish then stop(false) end
+		return
+	end
+	if not ray_ready(RAY_WARN) then why = "no ray_pick"; return end
+
+	-- Who, and WHERE. iqm_core owns the target rules; it now hands back a position
+	-- as well as an id, because the target is no longer always a tracked NPC.
+	--
+	-- The selected task's marker can be a crate, a smart terrain or a stalker halfway
+	-- across the level, and it is very often OFFLINE -- which the old code here treated
+	-- as "gone". Resolving the position is therefore iqm_core' job now
+	-- (route_goal), and it returns nil for the cases a route genuinely cannot serve:
+	-- nothing selected, no target object, or a target on another level.
+	local id, tpos, online = nil, nil, false
+	if iqm_core and iqm_core.route_goal then
+		id, tpos, online, tgt_lvid = iqm_core.route_goal()
+	end
+	if not (id and tpos) then
+		why = "no objective target"
+		tgt_d, tgt_x, tgt_z = nil, nil, nil
+		if tgt_id or publish then stop(false) end
+		return
+	end
+	if id ~= tgt_id then
+		-- A new objective repaths at once: the cooldown exists to stop a walking
+		-- target re-searching every frame, not to make a fresh one wait.
+		stop(false)
+		tgt_id, next_try = id, 0
+	end
+
+	local apos = db.actor:position()
+	local d    = xz(apos, tpos)
+	tgt_d      = d
+	tgt_x, tgt_z = tpos.x, tpos.z
+
+	-- Out of range at either end is a stop that KEEPS the target, so walking back
+	-- into range picks up where it left off rather than treating the same NPC as a
+	-- new one. Note the far edge is now a search-cost guard rather than the design
+	-- limit it used to be: how much route you SEE is draw_m, applied when the list
+	-- is built, and it is measured out from you rather than in from the target.
+	if d < ARRIVE_D or d > MAX_TARGET_D then
+		why = (d < ARRIVE_D) and "arrived" or "target beyond the sanity ceiling"
+		if path or publish or searching then stop(true) end
+		return
+	end
+
+	-- Visibility only silences the route at close quarters. Seeing the target from
+	-- across a field tells you nothing about how to walk there, so `hidden` is only
+	-- allowed to gate anything inside VIS_NEAR; beyond it the route is unconditional.
+	--
+	-- Only meaningful for something ONLINE. An offline target has no rendered geometry to
+	-- see or be blocked by, so the ray would be answering a question about empty space --
+	-- and an offline target is by definition far enough away that the route is wanted.
+	local wanted
+	if online then
+		refresh_visibility(apos, tpos, tg)
+		wanted = (d > VIS_NEAR) or hidden
+	else
+		hidden, wanted = true, true
+	end
+	-- CAN ANYBODY SEE THIS ROUTE, and since R2.58 that is two questions rather than one,
+	-- because the two views no longer share a gate. The GROUND LINE has its own envelope --
+	-- the summon (iqm_core, SMN), which is off for most of the session by default -- while
+	-- the MINIMAP TRAIL is a PDA readout and keeps the rule it always had. Either one being
+	-- able to see the route is reason enough to do the drawing work; neither being able to
+	-- is what the throttle below exists for.
+	--
+	-- route_alpha folds in mark_route and the projection probe as well, so this does not
+	-- re-test them; mm_on is this module's own mirror, and it is needed rather than implied
+	-- because overlay_visible() is perfectly true while a player with no minimap has nothing
+	-- drawing at all -- gating on it alone would have handed the summon's saving straight
+	-- back on the commonest setup there is.
+	--
+	-- THREE RUNGS, because the two accessors are separately optional and the fallbacks are
+	-- not decoration: a driver that stubs overlay_visible and nothing else is testing the
+	-- gate it stubbed, and folding that case into "no core, draw anyway" would have turned
+	-- the C4 gating tests green while gating nothing (it did, once).
+	local overlay
+	if iqm_core and iqm_core.route_alpha then
+		overlay = iqm_core.route_alpha() > 0
+		          or (mm_on and iqm_core.overlay_visible() and true or false)
+	elseif iqm_core and iqm_core.overlay_visible then
+		overlay = iqm_core.overlay_visible() and true or false
+	else
+		overlay = true   -- no core to ask at all: draw, as this always did
+	end
+	publish = wanted and overlay and RD.n > 0
+
+	if not wanted then
+		why = "target in plain sight, up close"
+		-- Frozen, not dropped: hold the route exactly as it is and stop working on
+		-- it. Clearing the cooldown means the moment it is wanted again, whatever
+		-- has gone stale in the meantime repaths on that very frame instead of
+		-- waiting one out.
+		next_try = 0
+		return
+	end
+
+	if not overlay then
+		why = "nobody can see it (PDA / HUD / not summoned)"
+		-- Throttled, NOT torn down. route_draw() already returns nil for the whole of
+		-- this state, so both consumers draw nothing however hard this tick works --
+		-- and the work is not small: six occlusion rays, a chevron refill and the
+		-- lead-in every frame, and with the summon on by default that is most frames of
+		-- the session.
+		--
+		-- What survives is the route itself and the cadence around it, so coming back
+		-- is still instant and still costs no search: `advance` keeps the cursor under
+		-- the player, and the repath rules below keep firing, just four times a second
+		-- instead of sixty. The drawing half is skipped outright (draw_tick is not
+		-- called) and rebuilt on the first frame anyone can see it again.
+		blanked = true
+		if tg < blank_next then return end
+		blank_next = tg + HIDE_MS
+	elseif blanked then
+		blanked, resume = false, true
+	end
+
+	if searching then
+		why = "searching"
+		step_search(tg)
+		-- ...AND KEEP THE LIVE ROUTE FLOWING WHILE IT DOES (R2.33l). This used to return
+		-- here, which froze the drawn route for the whole length of the search: the marks
+		-- hold a fixed distance ahead of the player (R2.29) and that only happens because
+		-- place_chevrons runs every frame, so skipping it nails them to the ground while
+		-- you keep walking. At the old 596-node budget the freeze was a quarter of a
+		-- second and nobody saw it. At R2.33k's 3000-6000 it is over a second, and the
+		-- retry fires one every ten metres -- reported as "huge pauses where the routes
+		-- don't update, then it jerks into a new position". The jerk was the freeze
+		-- ending, not the new path arriving.
+		--
+		-- A search is resumable so it can be SPREAD, not so the route can stop. Stepped
+		-- first, so a search that finishes on this frame installs its path and the marks
+		-- below are placed on the new one rather than a frame late on the old.
+		if path and path_s then
+			-- The CURSOR has to advance too, and that is the half that is easy to miss.
+			-- actor_arclen projects the actor onto the leg at `cursor`, and clamps to the
+			-- end of it -- so with the cursor frozen the marks can only ever slide one
+			-- metre forward however far you walk. Measured: 1.49 m of mark movement for
+			-- 8 m of walking, which still reads as a stall.
+			local _, moved = advance(apos)
+			if overlay then draw_tick(tg, dt, moved) end
+			publish = RD.n > 0 and overlay
+			-- "searching" is only the whole story while there is nothing on screen. Once
+			-- a route is being drawn, that is what `why` should say -- a search running
+			-- behind it is visible as `searching` in the same status table.
+			if publish then
+				why = dead_end and DEAD_WHY
+				      or (partial and "drawing (partial route)" or "drawing")
+			end
+		end
+		return
+	end
+
+	if path then
+		local off, moved = advance(apos)
+		if off > DRIFT_TOL then
+			-- strayed off the line (or walked back down it): repath, rate-limited
+			if tg >= next_try then begin_search(apos, tpos, tg) end
+			return
+		end
+		if goal and xz(goal, tpos) > GOAL_TOL and tg >= next_try then
+			begin_search(apos, tpos, tg)
+			return
+		end
+		-- A route that stopped short gets another go once you have covered some ground:
+		-- the search that failed from 59 m succeeds from 32 m, and walking toward the
+		-- target is exactly what turns the first into the second (R2.33k).
+		if partial and last_from and tg >= next_try
+		   and xz(apos, last_from) > RETRY_D then
+			begin_search(apos, tpos, tg)
+			return
+		end
+		if moved and cursor >= #path then
+			-- ran off the end without arriving: the route was to where the
+			-- target WAS. Repath if allowed, otherwise stop drawing.
+			if tg >= next_try then begin_search(apos, tpos, tg) else stop(true) end
+			return
+		end
+		-- The VERTICES only change when the cursor does, but the chevrons hold a fixed
+		-- distance ahead of the player, so their world positions change with every step
+		-- he takes (R2.29) -- which is why draw_tick places them either way. None of it
+		-- runs while the overlay is hidden: nobody would see the result.
+		if overlay then draw_tick(tg, dt, moved) end
+		publish = RD.n > 0 and overlay
+		if publish then
+			why = dead_end and DEAD_WHY
+			      or (partial and "drawing (partial route)" or "drawing")
+		end
+		return
+	end
+
+	if tg >= next_try then
+		begin_search(apos, tpos, tg)
+	else
+		why = "waiting out a search cooldown"
+	end
+end
+
+--- State snapshot, for the F7 dump and the harness.
+function status()
+	-- Computed rather than written inline, because `cond and false or nil` collapses to
+	-- nil in Lua and false is exactly the value that has to survive here.
+	local snap_d
+	if snap_id ~= nil and snap_id == tgt_id and snap_src then
+		snap_d = snap_pos and xz(snap_src, snap_pos) or false
+	end
+	return {
+		on = on, target = tgt_id, hidden = hidden, parked = parked,
+		searching = searching, publish = publish, sprites = RD.n,
+		verts = RD.n, chevs = RD.nc,
+		-- The ground line's summon envelope, read back rather than kept here: "the route is
+		-- publishing and you still cannot see it" is otherwise the one state the F7 dump
+		-- could not explain, and it is now the DEFAULT state. `mm` says which view the
+		-- visibility gate was answering for.
+		summon = (iqm_core and iqm_core.route_alpha) and iqm_core.route_alpha() or nil,
+		mm = mm_on,
+		points = path and #path or 0, cursor = cursor,
+		gap = gap_m, draw = draw_m, xray = xray,
+		-- Straight-line XZ metres to the target as of the last update. Published so a
+		-- consumer can apply its OWN near gate without repeating the target resolution:
+		-- iqm_minimap hides the trail well before iqm_nav's own ARRIVE_D, because a
+		-- top-down trail across a few metres of map is a smudge under the player arrow
+		-- while a ground line at the same range is still worth walking along.
+		dist = tgt_d,
+		-- ...and where it stands. The drawn stroke STOPS at draw_m, so its last point is
+		-- only the target when the route is short enough to reach it; a consumer that wants
+		-- to mark the destination itself needs the position rather than the stroke's end.
+		gx = tgt_x, gz = tgt_z,
+		-- How far to one side of the target the search is having to aim, when the target
+		-- itself is off the navmesh -- a waypoint dropped on a rooftop, or placed on the
+		-- PDA map, where the y is the map's guess. nil in the ordinary case; false when
+		-- the target is off the mesh and nothing near it is on it, which is the one
+		-- remaining reason a live objective draws no route at all.
+		snap_d = snap_d,
+		partial = partial, why = why,
+		-- The route's far end cannot see the target. REPORTED, never acted on: see the
+		-- note where it is computed for what happened the one session it gated `publish`.
+		dead_end = dead_end,
+		-- How far short a partial stopped, in metres. nil when the route completed.
+		closest = short_by,
+	}
+end
+
+-- --------------------------------------------------------------------------
+-- Config
+-- --------------------------------------------------------------------------
+--- The one assignment site for every value above. Both entry points below land here --
+--  apply_config with what it pulled, configure with what a test driver handed it -- so
+--  the clamps can never apply to one path and not the other.
+--
+--  Resets the live route, because every value here can change how much of it is drawn
+--  or where the marks land, and re-deriving that from the existing list is more code
+--  than re-searching.
+local function set_config(o_on, o_gap, o_draw, o_xray, o_flow, o_debug, o_mm)
+	on      = o_on and true or false
+	-- Defaults TRUE when not stated, which is the opposite of `on` and deliberate: a test
+	-- driver that says nothing about the minimap wants the drawing work to happen, and that
+	-- is what every harness written before this parameter existed is asking for.
+	mm_on   = (o_mm == nil) or (o_mm and true or false)
+	-- Floored at 2 m: the dense styles ask for ~3 m and a hand-edited config may go
+	-- tighter than the menu offers, but below 2 m the chevrons overlap each other and
+	-- MAX_CHEV stops the route well short of draw_m (see the note there).
+	gap_m   = max(2.0, o_gap or 10)
+	-- The LONGEST distance any view wants, not one view's -- draw_dist below takes the
+	-- max over whichever of the ground line and the minimap trail are switched on, and
+	-- each then stops at its own through route_limit. Both menu sliders cap at 80, so
+	-- this never exceeds what MAX_DRAW was already sized for.
+	draw_m  = max(SEG_MAX, o_draw or 50)
+	-- nil means "on": absent is the modded-exe default, only an explicit false is off.
+	xray    = o_xray ~= false
+	-- Clamped rather than trusted: a hand-edited config at 50 m/s is a strobe, and a
+	-- negative one would run the marks backwards into the player, which says the opposite
+	-- of what a route is for.
+	flow    = max(0, min(8, o_flow or 0))
+	DEBUG   = o_debug and true or false
+	reset()
+end
+
+--- Metres of route to publish: the longest any ENABLED view wants.
+--
+--  The two views carry SEPARATE distances (R2.24), so what the search is asked for is
+--  the longer of the ones actually switched on, and each view then stops at its own via
+--  route_limit. Taking the max over ENABLED views only matters for the work: publishing
+--  80 m because the trail wants it, while the trail is off, would path further than
+--  anyone draws.
+--
+--  Falls back to the ground line's distance when neither view is on, so a route asked
+--  for by a debug driver still has a sensible length.
+--
+--  Deliberately NOT appear_dist as a near edge: the route only draws when the target is
+--  out of sight, which is exactly when the card cannot be up, so handing the near band
+--  to the card left both of them off for a target round a corner. This module keeps its
+--  own small arrival distance instead; see ARRIVE_D.
+--
+--  `bok` is game.world2ui_with_depth: the ground line projects with it, the trail does
+--  not, so only the ground line's distance rides it.
+local function draw_dist(C, bok)
+	local d = 0
+	if bok and C.mark_route then d = C.route_dist end
+	if C.mark_minimap then d = max(d, C.minimap_dist) end
+	if d <= 0 then d = C.route_dist end
+	return d
+end
+
+--- Re-read the live config. Called by iqm_core.read_config as its last act, along
+--  with every other module's apply_config -- config is PULLED here, never pushed (see
+--  the seam note at the top of iqm_core). Nothing is marshalled: this module reaches
+--  over for the handful of options that matter to it and derives its own two gates.
+--
+--  Bound inside the function, never at file scope: iqm_core reads THIS module back,
+--  and a file-scope read on both sides of that pair would let the load order decide
+--  which one sees a half-built namespace.
+function apply_config()
+	local C = iqm_core.config()
+	-- The beacon's projection binding, read back through iqm_core so both modules
+	-- answer from the one probe rather than testing game.world2ui_with_depth twice.
+	local bok = iqm_core.w2u()
+	-- TWO CONSUMERS, and they do not need the same things. The AR route projects, so it
+	-- rides the world2ui_with_depth binding the beacon does and is pointless without it.
+	-- The minimap trail projects nothing -- it measures its own transform off the map --
+	-- so it wants the search to run even where that binding is missing. Either consumer
+	-- being on is reason enough to path; getting this wrong silently leaves minimap-only
+	-- players on a bare exe with no route at all.
+	local want = (C.mark_targets and ((bok and C.mark_route) or C.mark_minimap))
+	             and true or false
+	-- `draw` is how far AHEAD the route is drawn, NOT how near the target has to be.
+	-- The route is a navigation aid, so it is drawn whenever there is an objective on
+	-- this level and the stroke simply runs out after this many metres of path.
+	--
+	-- `gap` is CHEVRON spacing in metres of path. It has been round the houses: 2 m when
+	-- the marks WERE the route (and failed), 10 m when the stroke took that job over and
+	-- they were only direction hints, and 3 m again now that they are ground-space marks
+	-- dense enough to form a band (R2.16). The difference from the 2 m version that
+	-- failed is what they are, not how far apart: those were small screen-facing glyphs
+	-- with ground between them.
+	--
+	-- route_flow is tenths of a metre per second in the menu, metres per second here.
+	set_config(want, C.route_gap, draw_dist(C, bok), C.route_xray,
+	           C.route_flow * 0.1, C.debug_log, C.mark_targets and C.mark_minimap)
+end
+
+--- The same assignment, in the shape the TEST DRIVERS use (tools/nav-harness). Kept
+--  because a harness has no iqm_core to pull from, and because stating the values
+--  outright is what lets a test vary one of them. `o.mm` (the minimap trail's switch)
+--  defaults to ON when a driver leaves it out -- see set_config for why that direction.
+function configure(o)
+	o = o or {}
+	set_config(o.on, o.gap, o.draw, o.xray, o.flow, o.debug, o.mm)
+end
+
+-- --------------------------------------------------------------------------
+-- Test drivers
+-- --------------------------------------------------------------------------
+-- Feedback goes to the F7 debugger's console when it is around (its send_output
+-- mirrors to the log too), else straight to the log. Body in iqm_util.dbg_out;
+-- called through the namespace rather than aliased, since it is never hot.
+
+-- --------------------------------------------------------------------------
+-- F7: the RAW path, beside ours (R2.33o)
+-- --------------------------------------------------------------------------
+-- A second path with NOTHING done to it, so "the search is wrong" and "we mangled a good
+-- answer" stop being the same observation. Between the A* node list and what you see on
+-- the floor there are five passes -- string-pull, smooth, densify, clearance, snap -- plus
+-- the lead-in at draw time, and any of them could bend a good route into a wall.
+--
+-- Two rules make it a fair test, and both are the point of doing it this way:
+--
+--   * NOTHING is done to the raw list. `pull = false` as well, so it is the bare A*
+--     answer, and `snap = false` on the renderer so its points are drawn exactly where
+--     the search put them. (The gizmo renderer has no depth test, so it draws over
+--     geometry regardless -- there is nothing to be gained by lifting it off the floor.)
+--   * BOTH go through the SAME renderer, with identical options. Drawing the raw path as
+--     a wire and ours as ground marks would confound a difference in geometry with a
+--     difference in how the two are drawn, which is exactly the confusion this exists to
+--     end.
+--
+-- Cycles raw -> ours -> off. Synchronous, so it hitches for as long as a full search
+-- takes -- fine for a key you press deliberately, and the reason it is not in the live
+-- path.
+local function debug_rawpath()
+	if not (iqm_pathline and iqm_pathline.show_channels) then
+		iqm_util.dbg_out("-IQM-NAV: iqm_pathline is too old for two channels")
+		return
+	end
+	if not iqm_pathline.is_available() then
+		iqm_util.dbg_out("-IQM-NAV: no debug_render on this exe -- the raw path needs it")
+		return
+	end
+	if iqm_pathline.is_shown() then
+		iqm_pathline.hide()
+		iqm_util.dbg_out("-IQM-NAV: path overlay OFF")
+		return
+	end
+
+	local id, tpos = nil, nil
+	if iqm_core and iqm_core.route_goal then id, tpos = iqm_core.route_goal() end
+	if not tpos then
+		iqm_util.dbg_out("-IQM-NAV: NO ROUTE TARGET -- nothing to path to, so neither line is drawn")
+		return
+	end
+
+	-- Take the search away from the live driver rather than racing it: route_now uses the
+	-- one search state, and iqm_nav starts another the moment its cooldown allows.
+	if searching then iqm_route.search_abort(); searching = false end
+	local apos = db.actor:position()
+	local aim = mesh_goal(id, tpos, tgt_lvid) or tpos
+	local raw = iqm_route.route_now(apos, aim,
+		{ owner = OWNER, max_nodes = node_budget(xz(apos, aim)), pull = false })
+	local raw_partial = iqm_route.search_partial and iqm_route.search_partial()
+	local raw_short = iqm_route.search_closest and iqm_route.search_closest()
+
+	-- BOTH AT ONCE, and both said out loud (R2.33q). The interesting outcome is one of
+	-- them coming back empty, and a silent overlay makes "the search returned nothing" and
+	-- "the renderer did not draw it" look identical -- which is the confusion the whole
+	-- overlay exists to end, reappearing one level down.
+	local drawn = iqm_pathline.show_channels({
+		{ points = raw,  r = 1.00, g = 0.30, b = 0.15 },   -- RAW: bare A*, red
+		{ points = path, r = 0.35, g = 0.95, b = 0.45 },   -- OURS: what we draw, green
+	}, { snap = false, rails = 4, width = 0.30, arrows = 0, cull = false })
+
+	iqm_util.dbg_out("-IQM-NAV: RAW(red)=%s nodes%s   OURS(green)=%s points   [%s of 2 drawn]",
+		raw and #raw or 0,
+		raw_partial and (" partial, short by " ..
+			(raw_short and string.format("%.1f", raw_short) or "?") .. " m") or "",
+		path and #path or 0, drawn)
+	if not (raw and #raw >= 2) then
+		iqm_util.dbg_out("-IQM-NAV: !! THE RAW SEARCH RETURNED NOTHING -- no red line is a result, not a glitch")
+	end
+	if not (path and #path >= 2) then
+		iqm_util.dbg_out("-IQM-NAV: !! WE HAVE NO LIVE ROUTE -- no green line is a result, not a glitch")
+	end
+	next_try = 0                                           -- let the live route re-search now
+end
+
+-- The once-per-process flag and the launcher guard live in iqm_util.inject_actions;
+-- the list below is the only part that was ever this module's own.
+local function inject_f7_actions()
+	iqm_util.inject_actions("iqm_nav", {
+		{ name = "IQM: Raw Path vs Ours", functor = { debug_rawpath }, hide_ui = 2 },
+		{ name = "IQM: Route Status", hide_ui = 0, functor = { function()
+			local s = status()
+			-- `why` first: three sessions were spent guessing which gate was closed, and
+			-- the dump could not say. It can now.
+			-- snap: nothing when the target stands on the navmesh, which is the usual case;
+			-- "N m aside" when it does not and the search is aiming beside it; "NO MESH NEAR"
+			-- when it does not and nothing close enough does either -- the one remaining way
+			-- a live objective can end up with no route at all.
+			local snap = ""
+			if s.snap_d == false then
+				snap = " snap=NO MESH NEAR IT"
+			elseif s.snap_d then
+				snap = " snap=" .. string.format("%.1f", s.snap_d) .. "m aside"
+			end
+			-- `partial` alone never said HOW FAR short, and that is the difference between a
+			-- route and a confident line to a dead end (R2.33e).
+			local short = s.closest and string.format("%.1f", s.closest) or "-"
+			-- The summon envelope, which since R2.58 is the answer to "it says drawing and I
+			-- can't see it": 0 is a route that is published, current, and faded out because
+			-- nobody asked for it. Pre-formatted, because dbg_out reaches printf, which
+			-- substitutes ONLY %s -- a %.2f there would print literally and shift every
+			-- argument after it.
+			local summon = s.summon and string.format("%.2f", s.summon) or "n/a"
+			iqm_util.dbg_out("-IQM-NAV: %s | target=%s%s verts=%s chevs=%s points=%s cursor=%s partial=%s short_by=%s m hidden=%s parked=%s summon=%s trail=%s gap=%s draw=%s xray=%s",
+				s.why, tostring(s.target), snap, s.verts, s.chevs, s.points, s.cursor,
+				tostring(s.partial), short, tostring(s.hidden), tostring(s.parked),
+				summon, tostring(s.mm), s.gap, s.draw, tostring(s.xray))
+		end } },
+	})
+end
+
+-- --------------------------------------------------------------------------
+-- Wiring
+-- --------------------------------------------------------------------------
+local function actor_on_update()
+	update(time_global())
+end
+
+function on_game_start()
+	inject_f7_actions()
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	-- A route is world points on one level, and both of these invalidate them
+	-- wholesale.
+	RegisterScriptCallback("on_level_changing", reset)
+	RegisterScriptCallback("actor_on_first_update", reset)
+end

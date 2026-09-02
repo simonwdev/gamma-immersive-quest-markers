@@ -1,0 +1,188 @@
+-- ======================================================================
+--  Immersive Quest Markers: no squad dot on your own companions
+-- ======================================================================
+--  A recruited companion keeps drawing the ordinary faction squad dot on the
+--  PDA map and the HUD minimap -- the same mark every other stalker squad in the
+--  Zone gets, riding along a metre behind your own actor arrow, saying nothing
+--  you did not already know. This removes it.
+--
+--  WHY IT IS THE DOT AND NOT THE ART. Every other map change this mod makes is a
+--  RETEXTURE (modxml_n_iqm_map_icons) or a HINT rewrite (iqm_spothint), because
+--  those are the two things a map spot has that can be changed without deciding
+--  who gets one. There is no third look that fixes this: the dot is not wrong, it
+--  is redundant, and the only fix for redundant is absent.
+--
+--  WHERE THE DOT COMES FROM, which is not where you would first look. The class
+--  method is defined twice. sim_squad_scripted.script:1192 (ZCP's copy, the
+--  winner for that path) declares `sim_squad_scripted:show`, and then
+--  sim_squad_warfare.script:341 -- BASE ANOMALY, no mod overrides it -- replaces
+--  it wholesale at file-body scope with `sim_squad_scripted.sim_squad_scripted.show`.
+--  Script bodies run in filename order, `sim_squad_warfare` sorts after
+--  `sim_squad_scripted`, so the warfare copy is the one that runs. Reading only
+--  ZCP's file will tell you the spot is added on `commander_id()`; the live copy
+--  adds it on `self.id`. Both are handled below, because which one is live is a
+--  load-order fact and not a promise.
+--
+--  Either copy reaches the same verdict for a companion: not a monster squad,
+--  on the actor's level, not an enemy faction -- so a PDA 3.0 shows it, and a
+--  PDA 2.0 shows it whenever the companion happens to share your community.
+--
+--  HOW IT HOOKS. The wrapper is installed on the CLASS TABLE reached through the
+--  script namespace (`sim_squad_scripted.sim_squad_scripted`), which is precisely
+--  the handle sim_squad_warfare itself uses to replace the method -- rung 2 of the
+--  hook tree. No unlocalizer, and no whole-file override of a 1200-line class that
+--  ZCP owns and half the simulation runs through.
+--
+--  THE ORIGINAL IS NOT CALLED for a companion squad, which is the one place this
+--  differs from iqm_spothint's wrapper and is deliberate. There the original had to
+--  run because its side effects (removing the old spot, the visible_for_map flag)
+--  are load-bearing for NPCs we then leave alone. Here the original's entire job IS
+--  the spot we are refusing, and letting it place one so we could remove it again
+--  would add and drop a map location on every squad update. Everything it would have
+--  left behind is cleaned up by strip() instead.
+--
+--  WHAT COUNTS AS A COMPANION is axr_companions' own registry, `companion_squads`,
+--  which is what the simulation itself tests (sim_squad_scripted.script:120). It
+--  covers G_FLAT's Individually Recruitable Companions too: that mod clones the
+--  stalker out of his own squad into the player's companion squad, so the one
+--  registry answers for both routes.
+--
+--  AND THE TEST IS `~= nil`, NOT TRUTHINESS. axr_companions' load_state writes
+--  `companion_squads[id] = false` for every saved companion and lets the squad
+--  object be re-attached later (axr_companions.script:150-156), so a genuine
+--  companion reads `false` for the first moments after a save load. The game's own
+--  code tests the same way (`if companion_squads[squad.id] == nil`); a truthiness
+--  test here would put the dot back for exactly as long as nobody was looking.
+--
+--  SOFT DEPENDENCY THROUGHOUT. Without axr_companions there are no companions and
+--  the wrapper is never installed; without the class there is nothing to wrap. Bare
+--  Anomaly and a GAMMA with the companion system removed both no-op, the same shape
+--  as iqm_spothint's map_change_spot_hint gate.
+--
+--  NOTHING HERE OUTLIVES THE MOD. map_add_object_spot leaves the location
+--  non-serializable (level_script.cpp:443-450), so squad dots are rebuilt from
+--  sim_squad_scripted:update on every load and no save carries one. Switching the
+--  option off, or uninstalling, puts every dot back on the next squad update --
+--  which for an online companion is the next second. apply_config does not wait
+--  for it; see there.
+-- ======================================================================
+
+local on = false   -- the feature switch (its own option AND the mod's master one)
+
+--- The wrapped original, bound in on_game_start. Nil until then -- and nil forever
+--  if the class or the companion system is absent, which is what apply_config's
+--  sweep tests before it touches anything.
+local original = nil
+
+--- Is this squad one of the player's companions?
+--
+--  Reads the registry live rather than caching it: a squad becomes and stops being
+--  a companion through dialog, at moments this module has no callback for, and a
+--  stale cache would keep a dismissed stalker's dot off the map indefinitely.
+local function is_party(squad)
+	local ac = axr_companions
+	if not (ac and ac.companion_squads and squad and squad.id) then return false end
+	return ac.companion_squads[squad.id] ~= nil
+end
+
+--- Take the squad's map spot back off, whichever of the two routes placed it.
+--
+--  `warfare_spot` is the warfare branch's bookkeeping and always sits on `self.id`.
+--  `spot_section` is the ordinary branch's, and the two live copies of show()
+--  disagree about which id it was added on -- warfare uses `self.id`, ZCP uses
+--  `current_spot_id` (the commander). Asking the engine which one actually carries
+--  it settles that at runtime instead of betting on a load order.
+--
+--  `current_spot_id` is deliberately NOT cleared. ZCP's show() re-enters itself once
+--  when that field disagrees with the commander, and leaving it alone avoids a
+--  pointless recursion; the field is meaningless while no spot is placed anyway.
+local function strip(squad)
+	if not (level and level.map_has_object_spot) then return end
+
+	if squad.warfare_spot then
+		if level.map_has_object_spot(squad.id, squad.warfare_spot) ~= 0 then
+			level.map_remove_object_spot(squad.id, squad.warfare_spot)
+		end
+		squad.warfare_spot = nil
+	end
+
+	if squad.spot_section then
+		local sec = squad.spot_section
+		local owner = squad.current_spot_id
+		if owner and level.map_has_object_spot(owner, sec) ~= 0 then
+			level.map_remove_object_spot(owner, sec)
+		elseif level.map_has_object_spot(squad.id, sec) ~= 0 then
+			level.map_remove_object_spot(squad.id, sec)
+		end
+		squad.spot_section = nil
+	end
+end
+
+--- The wrapper around sim_squad_scripted.show.
+--
+--  Guarded on our own half only, and for the same reason iqm_spothint guards its:
+--  show() runs from sim_squad_scripted:update for every squad in the simulation, so
+--  an error raised here would not be one broken dot but a stalled A-life tick. A
+--  failed strip falls through to vanilla, which is the visible-but-harmless outcome.
+local function show(self)
+	if on then
+		local ok, party = pcall(is_party, self)
+		if ok and party then
+			pcall(strip, self)
+			return
+		end
+	end
+	return original(self)
+end
+
+--- Pulled by iqm_core at the end of read_config, like every other module's.
+--
+--  Sweeps the registry on a CHANGE in either direction rather than waiting for each
+--  squad's next update. The wait would be short -- refresh() runs from update() and
+--  an online companion updates constantly -- but "short" is not "none", and a switch
+--  that visibly lags reads as a broken one. The ON direction strips; the OFF
+--  direction hands each companion to the original, which puts its dot straight back.
+function apply_config()
+	local C = iqm_core and iqm_core.config and iqm_core.config()
+	local want = (C and C.enabled and C.map_hide_companions) and true or false
+	local was = on
+	on = want
+
+	if was == on or not original then return end
+
+	local ac = axr_companions
+	if not (ac and ac.companion_squads) then return end
+	for id, _ in pairs(ac.companion_squads) do
+		-- The registry's value is `false` between a save load and the squad being
+		-- re-attached, so the squad is resolved by id rather than read out of it.
+		local squad = alife_object(id)
+		if squad then
+			if on then pcall(strip, squad) else pcall(original, squad) end
+		end
+	end
+end
+
+--- Install the wrapper.
+--
+--  IDEMPOTENT WITHOUT A FILE-LOCAL FLAG, which a local could not be: loading a save
+--  re-reads .script files, so a local flag comes back false while the wrapper it was
+--  guarding may still be installed, and the second install would wrap the wrapper.
+--  The identity of the installed function is therefore kept ON THE NAMESPACE, which
+--  survives exactly as long as the patch does.
+--
+--  The live method is adopted as the original whenever it is NOT the wrapper we last
+--  installed -- so a newer upstream show() (sim_squad_warfare re-running its body,
+--  or another mod patching after us) is picked up rather than shadowed by a stale
+--  copy, and our own wrapper is never stacked on itself.
+function on_game_start()
+	local ns = sim_squad_scripted
+	local cls = ns and ns.sim_squad_scripted
+	if not (cls and cls.show and axr_companions) then return end
+
+	if cls.show ~= ns.iqm_squadspot_wrapper then
+		ns.iqm_squadspot_original = cls.show
+	end
+	original = ns.iqm_squadspot_original
+	ns.iqm_squadspot_wrapper = show
+	cls.show = show
+end

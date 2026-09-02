@@ -67,4 +67,227 @@
 	<card_name>
 		<text font="letterica18" align="l" width="300" height="20" />
 	</card_name>
+
+	<!-- ============================ hand-in beacon ============================
+	     The objective NPC's through-wall marker, shown when the card cannot do the
+	     job: out of card range, behind cover, or off-screen. One chevron glyph
+	     (iqm_chevron, drawn pointing +X) rotated per frame - down at an on-screen
+	     target, outward when parked against a screen edge. Sizes here are
+	     placeholders; script sets them from the beacon_size option. -->
+
+	<!-- Badge plate and its drop shadow. NOT DRAWN as of R2.30 - BADGE_PLATE in
+	     iqm_core.script is false, and these two widgets are still created and still
+	     laid out, so flipping that flag brings the plate back with no other change.
+	     Kept because the argument for it is still true: bare artwork over the world has
+	     no contrast floor, and a pale stroke on pale wood vanishes. What replaced it is
+	     the cheaper half of that argument - every part of the badge now carries its own
+	     black keyline, baked into the art (R2.31), which buys the contrast without
+	     putting a panel over the scene. -->
+	<beacon_shadow width="64" height="64" stretch="1">
+		<texture r="0" g="0" b="0" a="120">iqm_shadow</texture>
+	</beacon_shadow>
+	<beacon_plate width="64" height="64" stretch="1">
+		<texture r="24" g="22" b="19" a="180">iqm_panel_round</texture>
+	</beacon_plate>
+
+	<!-- Role glyph: what kind of thing this marker is (hand-in, trader, guide, ...).
+	     The texture is set at draw time from the role; this placeholder never shows.
+	     Unlike the chevron this is NOT rotated, so it takes the usual UI_KX width
+	     squeeze - see the note in draw_beacon.
+
+	     NO dark copy behind it, and none behind the chevron or the readout either
+	     (R2.31): the keyline is baked into the art by tools/role-icons/build.py and
+	     tools/digit-tex/build.py. A separate black widget at a larger rect can never
+	     stay aligned, because the engine floors every widget's top-left to a whole
+	     screen pixel INDEPENDENTLY (AlignPixel is iFloor, ui_base.cpp:148) and does not
+	     align the bottom-right at all - so the halo shifted by a pixel as the marker
+	     moved and was uneven while it stood still. Baked, it is the same quad. -->
+	<beacon_icon width="24" height="24" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_role_handin</texture>
+	</beacon_icon>
+
+	<!-- The chevron. Its keyline is baked in (see the note on beacon_icon), so there is
+	     no second black widget behind it any more - which also means the rotation no
+	     longer has to be applied to two elements and kept in step. -->
+	<beacon_chevron width="24" height="24" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_chevron</texture>
+	</beacon_chevron>
+
+	<!-- Range readout, one static per character, from the iqm_digits sheet - NOT a font
+	     (R2.30). A CGameFont renders at a height picked from a resolution bucket and
+	     nothing scales it per widget: Out() takes screen coordinates, the virtual-UI
+	     scale is not applied to the glyphs, and CGameFont::SetHeight is not bound to Lua.
+	     So a text readout could be one of eleven fixed sizes and none smaller than
+	     `small` (16px at 1440p), and it could not follow "marker size" at all. As sprites
+	     it is arbitrarily small and scales with the badge like everything else.
+
+	     A placeholder: the texture is set per character at draw time and both the rect
+	     and the position are computed from the readout height. Each character's keyline
+	     is baked into its cell (see the note on beacon_icon), so there is no second
+	     offset copy per character - which halves the readout's widget count. -->
+	<beacon_digit width="8" height="12" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_digit_0</texture>
+	</beacon_digit>
+
+	<!-- "This marker is your active waypoint" (R2.38). Drawn around the role glyph when
+	     the waypoint you placed with PAW sits on the NPC this marker is for.
+
+	     It is the SAME ring a standalone waypoint marker draws - iqm_role_waypoint, the
+	     four-arc pulse generated from the map atlas's own BLINK_R / BLINK_W /
+	     BLINK_GAP_DEG - so the mark means "waypoint" here exactly as it does alone in the
+	     world and on the PDA. Around a role glyph it therefore reads as "waypoint AND
+	     medic" with nothing new to learn. It is literally the mark the suppressed
+	     waypoint marker would have shown on that body.
+
+	     A SECOND WIDGET, which R2.31 spent a whole pass removing - so, deliberately: the
+	     rule from R2.31 is "anything that must be concentric to a HAIRLINE must be baked",
+	     because the engine floors each widget's top-left to a whole screen pixel
+	     independently. That failure was a dark keyline hugging the glyph, where one pixel
+	     is the entire feature. This ring sits at RING_K of the glyph with clear space
+	     between them and is not an outline; a pixel of play in it reads as nothing.
+	     Baking ringed twins instead would need six atlas cells against the two free in
+	     iqm_roles, and would double the art maintenance for every role glyph forever.
+
+	     THE TEXTURE HERE IS A STARTING VALUE ONLY (R2.63). There are two rings now -- the
+	     waypoint's, with wide cardinal gaps, and the SELECTED TASK's, with narrow ones --
+	     and draw_beacon re-points this widget to whichever the caller named,
+	     through the same one-compare cache the glyph uses. Changing the id below changes
+	     nothing in game: BEACON_RING in iqm_beacon is where the two live.
+
+	     Placeholder rect: script sizes it from beacon_size like the glyph. -->
+	<beacon_ring width="36" height="36" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_role_waypoint</texture>
+	</beacon_ring>
+
+	<!-- The NPC's name above the marker (option beacon_name, off by default). The one
+	     part of the badge that is TEXT and not a sprite, and it has to be: a name is
+	     arbitrary and localised, so it cannot be pre-rendered the way the digits above
+	     were. Everything the readout note laments therefore applies to it and cannot be
+	     worked around - it draws at a fixed pixel height chosen by a resolution bucket
+	     and does NOT follow beacon_size. That is the whole cost of the option.
+
+	     letterica16 and NOT `small`, and this is a hard constraint rather than a taste:
+	     `small` resolves through hud_font_small -> stat_font -> ui_font_hud_01, which
+	     CGameFont::Initialize excludes from the localisation prefix (the is_di test,
+	     GameFont.cpp:76-80). It is one ASCII atlas for every language, so a Cyrillic
+	     name would not render at all. letterica16 is localised (fonts.ltx has a
+	     _russian section for it) and is the smallest font here that is.
+
+	     A shadow copy, unlike everything else on this marker, is a SECOND WIDGET and so
+	     can shimmer by a pixel against the name as you walk - the exact thing R2.31
+	     removed everywhere else by baking keylines into the art. Text cannot carry a
+	     baked keyline, so this is the one place the old technique has to stay. The cards
+	     have always done it this way (card_name_sh above); it is soft enough on text to
+	     pass, where it did not on a hard-edged glyph.
+
+	     width is a placeholder: AdjustWidthToText resizes it to the name at draw time. -->
+	<beacon_name_sh>
+		<text font="letterica16" align="l" width="300" height="16" />
+	</beacon_name_sh>
+	<beacon_name>
+		<text font="letterica16" align="l" width="300" height="16" />
+	</beacon_name>
+
+	<!-- ============================================================= route ==
+	     The ground route to the objective NPC: one CONTINUOUS stroke along the
+	     path, with direction chevrons riding on it. Each part is scaled by its
+	     distance so the run converges the way something painted on the floor
+	     should.
+
+	     Sprites rather than the world-space wire renderer because that one is a
+	     1px untextured line list with no alpha blending: no thickness to give the
+	     stroke weight, and no way to fade an occluded stretch rather than pop it.
+	     See the header of iqm_nav.script.
+
+	     Spaced marks came first and were tried at 4 m and then at 2 m; neither
+	     read as a path, because a run of separate glyphs leaves the joining to the
+	     eye. The stroke does the joining.
+	-->
+
+	<!-- One segment of the stroke: a strip stretched between two projected path
+	     vertices and rotated onto the line joining them - the same geometry
+	     card_line has used for the leader line since the first version, which is
+	     the one non-billboard shape this UI layer can draw.
+
+	     Sizes here are placeholders: the script sets each segment's length from
+	     its two endpoints and its thickness by MEASURING the projection of its own
+	     ground edges, every frame.
+
+	     iqm_stroke, not iqm_white_box (R2.14). It is uniform along its width, so
+	     stretching a segment to any length still butts cleanly against the next one
+	     and the stroke stays continuous rather than dashed; across its height - which
+	     is the thickness - it is an alpha ramp, so the two long edges are feathered
+	     instead of aliasing into stair-steps.
+
+	     The dark copy is the SAME texture at a larger rect, which is what turns the
+	     outline into a soft halo. It still exists for the reason the chevrons have
+	     one: line art with no contrast floor disappears against mid-tone ground,
+	     which is most of the ground in this game. -->
+	<route_line_sh width="64" height="6" stretch="1">
+		<texture r="0" g="0" b="0" a="255">iqm_stroke</texture>
+	</route_line_sh>
+	<route_line width="64" height="3" stretch="1">
+		<texture r="176" g="196" b="124" a="255">iqm_stroke</texture>
+	</route_line>
+
+	<!-- One arm of a ground chevron. Geometrically a stroke segment - the same rotated
+	     strip between two projected world points - but it samples iqm_arm, which tapers
+	     along its length, so its two ends are soft instead of square. That is the whole
+	     reason arms have a pool of their own rather than sharing the stroke's: a widget's
+	     texture is fixed when it is created. -->
+	<route_arm_sh width="64" height="6" stretch="1">
+		<texture r="0" g="0" b="0" a="255">iqm_arm</texture>
+	</route_arm_sh>
+	<route_arm width="64" height="3" stretch="1">
+		<texture r="176" g="196" b="124" a="255">iqm_arm</texture>
+	</route_arm>
+
+	<!-- A whole ground chevron as ONE quad (R2.20). The rect's width is the mark's
+	     projected length along travel and its height the projected extent across it, both
+	     measured; since a heading-rotated static is rotate-then-uniform-scale, a non-square
+	     rect holding this picture is exactly "squash along the mark's own axis, then
+	     rotate", which is what perspective does to something lying on the floor.
+
+	     Sizes here are placeholders, as the stroke's are. The dark copy is the same texture
+	     at a larger rect, so the halo is a scaled copy behind rather than a true dilation.
+
+	     The cell named here is the DEFAULT shape's, and it is a placeholder too:
+	     IqmCards:apply_shape re-points the whole pool with InitTexture on config change
+	     and once at init, so whatever route_shape says wins over this line.
+
+	     This replaces the two-arm rendering in the dense styles, and route_style = 3
+	     ("arms") still selects that one for comparison. -->
+	<route_mark_sh width="64" height="48" stretch="1">
+		<texture r="0" g="0" b="0" a="255">iqm_mark_chevtight</texture>
+	</route_mark_sh>
+	<route_mark width="64" height="48" stretch="1">
+		<texture r="176" g="196" b="124" a="255">iqm_mark_chevtight</texture>
+	</route_mark>
+
+	<!-- Direction chevrons, on the stroke every few metres of path. Army green
+	     rather than the accent gold, because the route is scenery you walk along
+	     rather than a marker you glance at.
+
+	     iqm_route_arrow, not the beacon's iqm_chevron: this glyph is drawn several
+	     times at once at anything from 5 to 44 px, so it carries a much heavier
+	     stroke and skips the atlas distress pass. Each carries a black copy behind
+	     it, a few pixels larger, exactly as the beacon chevron does. -->
+	<route_arrow_sh width="18" height="18" stretch="1">
+		<texture r="0" g="0" b="0" a="255">iqm_route_arrow</texture>
+	</route_arrow_sh>
+	<route_arrow width="18" height="18" stretch="1">
+		<texture r="176" g="196" b="124" a="255">iqm_route_arrow</texture>
+	</route_arrow>
+
+	<!-- The minimap trail's OTHER mark: a plain round bead, for players who want the trail
+	     to sit quietly on a cluttered map rather than restate a direction the shape of the
+	     trail already gives.
+
+	     ONE widget, not the glyph-plus-dark-backing pair every other mark here uses, because
+	     iqm_dot carries its keyline in the art. At 8 px a separate backing is 25% oversized
+	     and rounds to screen pixels on its own, so it reads as a heavy ring sitting slightly
+	     off the dot rather than as an outline on it. See tools/dot-tex/build.py. -->
+	<minimap_dot width="12" height="12" stretch="1">
+		<texture r="255" g="255" b="255" a="255">iqm_dot</texture>
+	</minimap_dot>
 </w>

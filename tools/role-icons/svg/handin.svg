@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-tag">
+<!-- Price tag, the HAND-IN mark: the objective is done and the marker has moved onto whoever
+     gave you the job, so the remaining act is to walk over and collect. The SAME art as
+     ../map-icons/svg/handin.svg, for the R2.29 rule that governs every shared cell here -
+     the mark you look for through a wall must be the mark the PDA map puts on that pin. Only
+     the rendering differs: the map atlas draws it bare with a baked keyline because a spot
+     stands alone on the map, and so does this, because a hand-in wears no badge ring in
+     either view (see the frame grammar in the map copy - bare glyph = go and GIVE this to a
+     named person). Tabler Icons tag-filled (MIT).
+
+     IT REPLACED A DIAMOND, kept beside this as handin-diamond.alt, and the replacement
+     happened on the MAP first: R2.55 swapped iqm_mapspot_handin to the tag and this cell was
+     not swapped with it, so the map drew a tag and the beacon drew a diamond for the same
+     objective. That is the exact failure the R2.29 rule exists to prevent, and it survived
+     because this cell had no drawer: the `target` role's marker was retired in R2.46, so
+     between then and R2.56 nothing rendered iqm_role_handin at all and no eye was ever on it.
+     Nor was there a picture of it anywhere - ../../map-icons/extract.py builds docs/icons from
+     map-spot ids, so no iqm_role_* cell appears on the legend sheet. ../../color-harness now
+     asserts the seven shared SVGs match on both sides, which is what makes this drift loud.
+
+     WHY THE DIAMOND LOST, since the measurement is the useful part and the obvious reading
+     was wrong. It was reported hard to read, which sounds like size and is not: it inked
+     28.9% of its cell against the envelope's 29.1%, essentially identical mass. It failed on
+     STRUCTURE - that ink was two thin concentric outlines, so at the ~26 px a mark draws each
+     ring was about one pixel and the two blurred into one. Solid regions beat concentric
+     outlines at this size whatever the ink totals say.
+
+     A tick and a flag were the other finalists; the tick lost on MEANING rather than
+     legibility - it reads "finished, nothing to do here" when the message is "go here and
+     collect". A tag says there is a reward at this pin, which is more than the diamond ever
+     said.
+
+     THE MAP'S FIT_SCALE 0.79 IS NOT COPIED HERE, and that was checked rather than assumed,
+     because two marks drawn in the SAME GREEN with only the glyph telling them apart is
+     exactly the case that correction exists for (BEACON_RGB gives handin and delivery one
+     40,172,66 deliberately). It does not transfer: over there the envelope is wrapped in the
+     task reticle, which shrinks it inside its frame and left the bare tag at 1.6x its weight,
+     while here BOTH are bare keylined glyphs at the same TARGET. Measured on this atlas the
+     tag inks 46.0% of its cell against the envelope's 50.5% and the skull's 49.9% - already
+     equal. Importing the 0.79 takes it to 30.1% and makes it the lightest mark on the sheet,
+     causing the defect it was meant to prevent. See the note where FIT_SCALE would have gone
+     in ../build.py: apparent weight is set by the FRAME, so measure on the sheet you build. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M11.172 2a3 3 0 0 1 2.121 .879l7.71 7.71a3.41 3.41 0 0 1 0 4.822l-5.592 5.592a3.41 3.41 0 0 1 -4.822 0l-7.71 -7.71a3 3 0 0 1 -.879 -2.121v-5.172a4 4 0 0 1 4 -4zm-3.672 3.5a2 2 0 0 0 -1.995 1.85l-.005 .15a2 2 0 1 0 2 -2" />
+</svg>

@@ -1,0 +1,971 @@
+-- iqm_minimap -- F3: the route as a trail of marks on the HUD minimap.
+--
+-- A SECOND VIEW of the route iqm_nav already publishes, not a second route. Everything
+-- about WHICH points exist, how far ahead they run and how visible each one is was decided
+-- upstream; this module transforms them into minimap space and puts sprites there. No
+-- pathing, no occlusion, no changes to the AR renderer.
+--
+--   iqm_nav.route_draw()  -->  iqm_core  (AR stroke + ground chevrons)
+--                         -->  iqm_minimap  (this: marks on the HUD minimap)
+--
+-- The whole design and the evidence behind it is docs/minimap-route.md; section numbers
+-- below point there. The four things that file settled, and that this code depends on:
+--
+--   * Draw order (section 2). A window added with AddDialogToRender lands in
+--     DoRenderDialogs, which CUIGameCustom::Render runs AFTER UIMainIngameWnd -- and the
+--     minimap lives in UIMainIngameWnd. So our marks land ON the map with no hook.
+--     Confirmed on screen, F3d.
+--   * The transform (section 3) is a plain 2D similarity: centre on the actor, rotate by
+--     the camera heading, scale by pixels-per-metre. No perspective, so none of the
+--     machinery the AR route needed (R2.13-R2.22 in docs/ar-navigation.md).
+--   * The map is HEADING-UP and a spot's rect is reported AFTER the map's own rotation
+--     (section 8.1, measured: rot = -camera to within 0.02 deg). So the rotation term is
+--     free -- it comes from device().cam_dir and needs no reference object at all.
+--   * Scale and centre must be MEASURED, not computed (section 4). Five mods ship a
+--     minimap layout, the XML is chosen by aspect ratio so it has a different winner per
+--     display, and CUIZoneMap::Init then rescales it by display options. Anything derived
+--     from config is a guess about someone else's load order and monitor.
+--
+-- HOW CALIBRATION WORKS, and why it needs no spot of its own.
+--
+-- Since section 8.1 removed rotation from the unknowns, only three are left: the map
+-- centre (cx, cy) and the scale (ppm). A single spot whose object position we know gives
+-- two equations per observation, so TWO observations with sufficiently different geometry
+-- determine all three -- and the actor supplies that difference for free simply by moving
+-- and turning.
+--
+-- The spot we observe is the route target's own task marker. That is the one object
+-- guaranteed to be both on the minimap and known to us exactly when the route is being
+-- drawn, which is precisely when this module needs the transform. Nothing is spawned and
+-- no spot type is added; if the target carries no minimap spot, calibration simply waits.
+--
+-- Deliberately NOT the alternative from section 4 -- our own transparent spot on the actor
+-- -- because whether a fully transparent spot still yields a CUIStatic is untested (the
+-- open half of F3a), and this route avoids needing to know.
+
+local floor, sqrt, atan2 = math.floor, math.sqrt, math.atan2
+local cos, sin           = math.cos, math.sin
+
+-- The virtual UI space every static is placed in, and the space GetAbsoluteRect reports.
+local UI_W, UI_H = 1024, 768
+
+-- Aspect-correction the engine applies to rotated (heading) statics: it scales a rotated
+-- element's X by this, so a heading computed from UI-space deltas has to be pre-divided by
+-- it. Same value and the same reason as iqm_core' UI_KX; recomputed only when the
+-- screen width changes.
+local UI_KX = 1
+local _ui_w = 0
+
+-- Our own spot type, carried by the ACTOR for as long as the trail is switched on.
+--
+-- Declared by modxml_n_iqm_map_icons.script splicing gamedata/configs/ui/iqm_map_spots.xml
+-- into map_spots*.xml, as a 1x1 minimap-only spot -- see that file for why one pixel rather
+-- than a transparent texture.
+--
+-- It used to be placed on whatever object was handy and removed the moment a solve landed.
+-- That was a consequence of borrowing OTHER objects' spots as references, which turned out
+-- to be the wrong design entirely (see actor_read): the actor is the only object guaranteed
+-- to be on the map, and its spot is worth keeping, since it is also the live map centre.
+local CALIB = "iqm_calib"
+
+-- Marks. iqm_nav caps its own chevron count, so this is a ceiling rather than a second
+-- opinion about spacing: at the tightest gap the menu offers, a full route is ~26.
+local MAX_MARKS = 26
+
+-- Margin between the last mark and the map's edge, as a multiple of the mark's own size.
+--
+-- This used to be a flat 0.86 of the radius, which is the wrong SHAPE of correction: the
+-- reason to pull in from the rim is that a mark is a sprite with width and sitting it
+-- exactly on the boundary reads as clipped -- a reason that scales with the MARK, not with
+-- the map. On a 40 m radius the old fraction threw away 5.6 m of perfectly good trail and
+-- left a visible gap between the last mark and the edge.
+--
+-- 0.75 of the mark size is half the sprite plus a little air.
+local EDGE_MARKS = 0.75
+
+-- Metres across the minimap. CUIZoneMap sizes the map window to the level's bound_rect
+-- times minimap_width/100, so the span is 100 m wherever minimap_zoom is unset -- which is
+-- everywhere in this install's loose config (section 3). Kept as a constant rather than an
+-- option because it is an engine fact, not a preference; `IQM: Minimap State` prints the
+-- radius it implies so a layout that disagrees is visible rather than silent.
+local SPAN_M = 100
+
+-- Mark spacing, as a multiple of the mark size. Marks want a clear gap between them or the
+-- trail reads as a smear; 1.4 leaves roughly a third of a mark of space. Derived from the
+-- size rather than configured separately so the spacing stays right when the size changes.
+local STEP_FACTOR = 1.4
+
+-- Metres from the target below which the trail is not drawn at all.
+--
+-- Its own gate, well clear of iqm_nav's ARRIVE_D of 4 m, and the two are right to differ. A
+-- ground route at 6 m is still a line you walk along; a minimap trail at 6 m is three marks
+-- in a smudge under the player arrow, telling you nothing you cannot already see, on the
+-- one part of the HUD where space is scarcest.
+local NEAR_HIDE = 10.0
+
+-- How far the player must WALK, in metres, before the scale can be solved. Below this the
+-- denominator is small enough that subpixel measurement error starts to matter. No direction
+-- is required -- map-local space carries no rotation, so any four metres will do.
+local MOVE_SEP = 4.0
+
+-- Sanity band for a solved scale, in UI px per metre. The measured value on this install
+-- is ~0.85 (section 8, F3e); a map twice as tight or four times as wide would both be
+-- surprising, and either means we solved off a spot that was not where we thought.
+local PPM_LO, PPM_HI = 0.2, 8.0
+
+-- A freshly-added spot has no position for one frame -- CMapLocation builds the widget at
+-- construction but CUIMiniMap::UpdateSpots is what places it, so GetAbsoluteRect reports
+-- the unplaced rect sitting at the UI origin (section 4.2). Anything this close to (0,0)
+-- is that, not a real measurement.
+local ORIGIN_EPS = 2.0
+
+-- The mark STYLES, keyed by the value iqm_core pushes from the menu's minimap_style list.
+--
+-- A table rather than a boolean branch because what the player is choosing is one thing --
+-- which glyph the trail is made of -- and each style is a whole little design: the widget
+-- pair it is built from and whether it carries a direction. A third style is a row here and
+-- a string, rather than a second flag crossed with the first.
+--
+-- `headed` is not cosmetic. An arrow has to be re-headed every frame, since the map is
+-- heading-up and a fixed world bearing rotates under it (section 8.1); a dot has no
+-- direction to state, so it skips the SetHeading entirely.
+--
+-- `sh` is the dark backing copy, drawn 2 px larger behind the mark, and it is OPTIONAL. It
+-- is how every other small glyph in this mod gets its outline, and at an 8 px minimap mark
+-- it fails twice over: 2 px is 25% oversize at that scale, and the two widgets round to
+-- screen pixels independently, so the ring reads as heavy AND visibly off centre. The dot
+-- therefore carries its keyline in the texture (tools/dot-tex/build.py) and declares no
+-- backing at all. The arrows keep theirs -- they are drawn larger, and a chevron's outline
+-- has no fixed side to be concentric with.
+local STYLES = {
+	[0] = { name = "arrows", el = "route_arrow", sh = "route_arrow_sh", headed = true  },
+	[1] = { name = "dots",   el = "minimap_dot", sh = nil,              headed = false },
+}
+local DEF_STYLE = 0
+
+-- `argb` is the packed form of r/g/b. It is cached HERE, on the config, rather than rebuilt
+-- in place(): place() runs up to MAX_MARKS times every frame and the colour changes only when
+-- the config does. set_config is the single assignment site, and it is also exactly what runs
+-- when an MCM slider moves -- so the pack stays as live as the sliders are.
+local C = { on = false, size = 8, style = DEF_STYLE, dist = 50, r = 255, g = 255, b = 255,
+            argb = GetARGB(255, 255, 255, 255) }
+
+-- The backing's wash: a constant, built once at load. It is the mark's OUTLINE and is
+-- deliberately NOT tinted with the player's colour (see place()), so nothing about it varies
+-- and there is nothing to recompute per mark per frame.
+local SH_ARGB = GetARGB(178, 0, 0, 0)
+
+--- The current style, never nil: an out-of-range value from a stale MCM entry falls back to
+--  the default rather than indexing nil in ensure() and taking the trail down.
+local function style()
+	return STYLES[C.style] or STYLES[DEF_STYLE]
+end
+
+local DEBUG = false
+
+-- printf substitutes the literal "%s" and nothing else, so every value reaching this
+-- call is pre-formatted into a string. The two lines that did the work are
+-- iqm_util.logger's now -- seven modules were carrying the same pair, differing only
+-- in the tag and in which flag gated them. The gate is a FUNCTION rather than a
+-- value: DEBUG is flipped at run time, and capturing it once would freeze the logger
+-- at whatever it was when the file loaded.
+local say = iqm_util.logger("[IQM-MM] ", function() return DEBUG end)
+
+local function f2(v) return string.format("%.2f", v) end
+
+-- Scratch vectors, so placing a mark allocates nothing per frame -- the same arrangement
+-- iqm_core uses for its own placement helpers.
+local _p, _s = vector2(), vector2()
+-- ...and one scratch Frect for the same reason. GetAbsoluteRect FILLS whatever it is handed
+-- and the four edges are read out of it on the very next line, so the Frect actor_read used
+-- to build per frame was pure garbage -- allocated, overwritten, read once, dropped.
+local _r = Frect()
+local function P(x, y) return _p:set(x, y) end
+local function S(x, y) return _s:set(x, y) end
+
+-- --------------------------------------------------------------------------
+-- Calibration state
+-- --------------------------------------------------------------------------
+-- CAL is the solved transform, valid for one level at one resolution. It is CACHED rather
+-- than re-solved per frame: the centre and scale change only on level change, resolution
+-- change or HUD rescale, and re-solving every frame would need a live reference spot every
+-- frame for no gain.
+-- TWO scales, not one, and this is the thing that took a session to see.
+--
+-- Marks are placed in the 1024x768 virtual UI, but that space is not square on screen: a UI
+-- delta (dx, dy) is drawn at (dx * w/1024, dy * h/768), so the two axes carry different
+-- numbers of real pixels per UI unit on any display that is not 4:3. The minimap is a
+-- CIRCLE on screen, which means in UI coordinates it is an ELLIPSE -- and one metre east is
+-- therefore a different number of UI units than one metre north.
+--
+-- A single scalar px/m is wrong by a factor that depends on which way the route runs, and
+-- since the map is heading-up that factor CHANGES AS THE PLAYER TURNS. The symptom is marks
+-- that swing with rotation and a trail that does not leave the player toward the target.
+--
+-- The relationship could be computed -- it is UI_KX -- but section 4's whole argument is
+-- that measuring beats modelling here, and measuring both axes costs nothing extra: the
+-- rotation is already known, so each axis is its own one-dimensional solve.
+--
+-- `lvl`, `w` and `h` are the three things that can invalidate the transform, kept as VALUES
+-- so the per-frame staleness test is three comparisons rather than a string build. `key` is
+-- the same three joined up, and it stays: status() surfaces it and debug_state prints it, and
+-- neither of those is a per-frame path.
+local CAL = { ok = false, cx = 0, cy = 0, px = 0, py = 0, xok = false, yok = false, key = nil,
+              lvl = nil, w = 0, h = 0 }
+
+-- The previous observation of the ACTOR's own spot: where the engine put it in MAP-LOCAL
+-- coordinates, and where the actor stood in the world at that moment. Differencing two of
+-- these gives the map's scale directly, because map-local space is metres times the zoom
+-- factor with no rotation in it (CMapLocation::UpdateSpot -> ConvertRealToLocal).
+local OBS = { have = false, lx = 0, ly = 0, wx = 0, wz = 0 }
+
+-- Why the last calibration attempt did or did not get a reference. Purely diagnostic, and
+-- it exists because the first build of this module drew nothing and the only way to tell a
+-- missing target from a missing SPOT TYPE was to guess. `IQM: Minimap State` prints it.
+local LAST = { id = nil, spot = nil, why = nil }
+
+-- The object our own calibration spot is currently on, if any, so it can be taken off
+-- again. Leaving one behind would put a stray pixel on someone's minimap for the rest of
+-- the session, which is exactly the kind of litter §7 says not to ship.
+local OWN = { id = nil }
+
+--- Put our calibration spot on an object, taking it off whatever had it before.
+--
+--  Guarded on iqm_calib_declared, which modxml_n_iqm_map_icons.script sets only once it has
+--  actually spliced the type in. Asking the engine for an unknown spot type is not a soft
+--  failure -- CMapLocation::Load asserts on the missing node -- so on an install without
+--  DXML support this never fires and the trail simply does not calibrate.
+--- Did the DXML pass actually declare our spot type?
+--
+--  Read through the owning script's NAMESPACE rather than as a plain global. A .script runs
+--  in its own environment table, so the `iqm_calib_declared = true` in
+--  modxml_n_iqm_map_icons.script sets a field on that module and never a global -- reading
+--  it bare here returns nil forever, which is precisely how the first version of this
+--  failed: DXML ran, logged that it had patched, and the flag still read false.
+local function calib_declared()
+	local m = modxml_n_iqm_map_icons
+	return (m and m.iqm_calib_declared) and true or false
+end
+
+local function own_spot(id)
+	if not (calib_declared() and level.map_add_object_spot) then return false end
+	if OWN.id == id then return true end
+	if OWN.id then
+		if not level.map_has_object_spot or level.map_has_object_spot(OWN.id, CALIB) ~= 0 then
+			level.map_remove_object_spot(OWN.id, CALIB)
+		end
+	end
+	OWN.id = nil
+	if not id then return false end
+	if level.map_has_object_spot and level.map_has_object_spot(id, CALIB) ~= 0 then
+		OWN.id = id
+		return true
+	end
+	level.map_add_object_spot(id, CALIB, "")
+	OWN.id = id
+	return true
+end
+
+local function drop_own()
+	if OWN.id then own_spot(nil) end
+end
+
+--- Throw the whole transform away, both axes included.
+--
+--  A helper rather than three assignments at each call site, because forgetting one of the
+--  per-axis flags leaves a HALF-cleared transform: `ok` goes false, the axis flags stay
+--  true, and the next calibration pass then "completes" instantly using scales measured
+--  before whatever invalidated them.
+local function cal_clear()
+	CAL.ok, CAL.xok, CAL.yok = false, false, false
+	-- The scales go too, not just the flags. Leaving them readable means a diagnostic can
+	-- print a stale scale next to "not calibrated" and read as though one were live.
+	CAL.s, CAL.px, CAL.py = 0, 0, 0
+	OBS.have = false
+end
+
+--- The three things that can move the transform under us, as plain values: which level we
+--  are on, and the screen's two dimensions.
+--
+--  All three are compared, and dropping any one of them reintroduces the half-stale transform
+--  cal_clear's comment is about -- a level change with the resolution unchanged, or a window
+--  resize that keeps one axis, would both go unnoticed.
+local function cal_now()
+	local dev = device()
+	return (level and level.name and level.name() or "?"),
+	       (dev and dev.width or 0), (dev and dev.height or 0)
+end
+
+--- The same three as one printable key, for status() and the F7 dump.
+--
+--  Built only when the transform is (re)solved, never per frame. It used to be rebuilt every
+--  frame purely to compare against itself: a device() call, a level.name() call, two tostrings
+--  and three concatenations -- and an interned string -- to detect two events that essentially
+--  never happen. The components above answer that in three comparisons.
+local function cal_key()
+	local lvl, w, h = cal_now()
+	return lvl .. "|" .. tostring(w) .. "x" .. tostring(h)
+end
+
+--- Read the ACTOR's own calibration spot: where the engine DREW it (absolute UI units) and
+--  where it PUT it (map-local units). Returns cx, cy, lx, ly, or nil.
+--
+--  THE ACTOR, and nothing else, and this is the whole point. Every previous version needed a
+--  reference object near the player -- first the route target, then any carded NPC, then any
+--  online object -- and all of them shared the same defect: when nothing was close enough,
+--  the trail never calibrated and so never appeared. A navigation aid that requires you to
+--  already be next to something is not much of a navigation aid.
+--
+--  Two engine facts make the actor sufficient on its own:
+--
+--   1. The actor sits at the map centre by construction (UpdateRadar centres the map on the
+--      camera), so its spot is always inside the visible rect, always attached, and its
+--      ABSOLUTE position is the centre we need -- measured live, every frame, with no
+--      movement required at all.
+--
+--   2. CMapLocation::UpdateSpot calls SetWndPos UNCONDITIONALLY and only gates AttachChild
+--      on IsRectVisible (map_location.cpp:396-414). So a spot's MAP-LOCAL position is always
+--      current, and map-local space is world metres times the map's zoom factor with no
+--      rotation in it (ConvertRealToLocal). Walk a few metres and the actor's own local
+--      position moves by exactly that scale.
+--
+--  So the centre comes from the absolute rect and the scale from the local one, both off a
+--  spot that is always there. The earlier F3c "freeze" was never the engine refusing to
+--  update the spot -- it was this module reading GetAbsoluteRect on a spot that had been
+--  DETACHED from the map, which is a different failure with the same appearance.
+local function actor_read(act)
+	LAST.spot, LAST.why = nil, nil
+	local id = act:id()
+	LAST.id = id
+
+	if not own_spot(id) then
+		LAST.why = "iqm_calib was never declared -- no DXML support?"
+		return nil
+	end
+	local st = level.map_get_object_minimap_spot_static
+	           and level.map_get_object_minimap_spot_static(id, CALIB)
+	if not st then
+		LAST.why = "the actor's calibration spot has no widget yet"
+		return nil
+	end
+	LAST.spot = CALIB
+
+	local r = _r
+	st:GetAbsoluteRect(r)
+	local cx, cy = (r.x1 + r.x2) * 0.5, (r.y1 + r.y2) * 0.5
+	-- section 4.2: a widget added this frame exists but has not been placed, and reports at
+	-- the UI origin. One frame later it is real.
+	if cx > -ORIGIN_EPS and cx < ORIGIN_EPS and cy > -ORIGIN_EPS and cy < ORIGIN_EPS then
+		LAST.why = "waiting for the calibration spot to be placed"
+		return nil
+	end
+
+	-- The MAP-LOCAL half is only ever wanted while the scale is still being solved. Once it
+	-- is, calibrate() takes the centre above and returns before it looks at lx/ly, so reading
+	-- them was an allocation (GetWndPos builds a vector2) for a value nothing went on to use.
+	-- The centre itself is still re-read every frame -- see calibrate().
+	--
+	-- This makes the return ARITY depend on CAL.ok, which is why calibrate's guard is keyed on
+	-- `cx` and not on the local coordinates.
+	if CAL.ok then return cx, cy end
+
+	if not st.GetWndPos then
+		LAST.why = "GetWndPos is not bound on this build"
+		return nil
+	end
+	local lp = st:GetWndPos()
+	if not lp then
+		LAST.why = "GetWndPos returned nothing"
+		return nil
+	end
+	return cx, cy, lp.x, lp.y
+end
+
+--- World XZ offset -> UI orientation, in metres. Rotation only; scale is applied later.
+--
+--  Screen y grows DOWNWARD while world z grows north, hence the negated z. The map is
+--  heading-up with rot = -camera heading (section 8.1), so this is the map's own rotation
+--  reproduced exactly rather than inferred.
+local function orient(wx, wz, c, s)
+	return wx * c + wz * s, wx * s - wz * c
+end
+
+--- Camera heading terms for this frame: cos and sin of the map's rotation.
+local function cam_rot()
+	local cam = device().cam_dir
+	local rot = -atan2(cam.x, cam.z)
+	return cos(rot), sin(rot)
+end
+
+--- Read the actor's spot and, once the player has walked far enough, solve.
+--
+--  The CENTRE is taken every frame, not solved: the actor's spot IS the centre, so there is
+--  nothing to derive and nothing to go stale. It also self-corrects when the player changes
+--  HUD scale or resolution mid-session.
+--
+--  The SCALE comes from the map-local position, which moves as the player walks:
+--
+--      |local(t2) - local(t1)| / |world(t2) - world(t1)|   =  UI units per metre
+--
+--  Map-local space carries no rotation, so this is a plain ratio of lengths with no
+--  trigonometry and nothing to get the sign of wrong. It needs MOVE_SEP metres of walking
+--  and no particular direction -- which every player does within seconds of loading.
+--
+--  The two AXIS scales then differ only by the aspect correction the engine applies when it
+--  rotates the map: the map is drawn circular on screen, so in the 1024x768 virtual UI --
+--  which is not square on screen -- its x is scaled by UI_KX relative to its y. That factor
+--  is pure display arithmetic, knowable exactly from the resolution, and is the one part of
+--  this that is computed rather than measured. Section 4's "measure, do not model" argument
+--  is about the map's rect and zoom, which vary by mod and load order; UI_KX does not.
+local function calibrate(act)
+	local cx, cy, lx, ly = actor_read(act)
+	if not cx then return end
+
+	-- Live centre, every frame, whether or not the scale is known yet.
+	CAL.cx, CAL.cy = cx, cy
+
+	-- The scale is a property of the level and the layout, so it is solved once and kept.
+	-- The centre above is not: it is re-read every frame, which is what makes the transform
+	-- survive a HUD rescale without anyone noticing.
+	if CAL.ok then return end
+
+	local ap = act:position()
+	if not OBS.have then
+		OBS.lx, OBS.ly, OBS.wx, OBS.wz, OBS.have = lx, ly, ap.x, ap.z, true
+		return
+	end
+
+	local dwx, dwz = ap.x - OBS.wx, ap.z - OBS.wz
+	local dw = sqrt(dwx * dwx + dwz * dwz)
+	if dw < MOVE_SEP then return end
+
+	local dlx, dly = lx - OBS.lx, ly - OBS.ly
+	local dl = sqrt(dlx * dlx + dly * dly)
+	local s = dl / dw
+
+	if s < PPM_LO or s > PPM_HI then
+		say("rejected scale %s px/m from %s m of walking -- re-anchoring", f2(s), f2(dw))
+		OBS.have = false
+		return
+	end
+
+	CAL.s = s
+	CAL.px, CAL.py = s * UI_KX, s
+	CAL.xok, CAL.yok = true, true
+	-- The three components AND the printable key, together: the components are what the
+	-- per-frame staleness test compares, the key is what the diagnostics print.
+	CAL.lvl, CAL.w, CAL.h = cal_now()
+	CAL.ok, CAL.key = true, cal_key()
+	say("calibrated off the actor: centre %s,%s  local scale %s px/m over %s m  "
+	    .. "-> %s x / %s y (UI_KX %s)",
+		f2(CAL.cx), f2(CAL.cy), f2(s), f2(dw), f2(CAL.px), f2(CAL.py), f2(UI_KX))
+end
+
+-- --------------------------------------------------------------------------
+-- The overlay window
+-- --------------------------------------------------------------------------
+-- Its own dialog rather than another layer inside IqmCards: the card window is already at
+-- 180/198 locals' worth of module around it, this needs none of its state, and a separate
+-- AddDialogToRender lands in the same DoRenderDialogs pass (section 2) so it draws over the
+-- minimap exactly the same way.
+class "IqmMiniMap" (CUIScriptWnd)
+
+function IqmMiniMap:__init() super()
+	self:SetWndRect(Frect():set(0, 0, UI_W, UI_H))
+	self.xml = CScriptXmlInit()
+	self.xml:ParseFile("iqm_cards.xml")
+	-- Widgets are built lazily, on the first frame that actually wants one. A player who
+	-- never has a route -- or who turns this off -- pays for nothing.
+	self.marks = {}
+	self.built = 0
+	-- How many marks are CURRENTLY visible. `built` is a high-water mark and never shrinks;
+	-- this is the live count, and hide_from depends on the difference between the two.
+	self.shown_n = 0
+end
+
+function IqmMiniMap:__finalize() end
+
+--- Ensure `n` mark widgets exist, in the current style.
+--
+--  One widget, or two: a style that names an `sh` gets a dark backing copy under the mark,
+--  which is what keeps a small sprite legible over map terrain of any brightness -- the same
+--  two-widget idiom as the AR route's chevrons. A style whose glyph carries its own keyline
+--  gets one widget and no backing at all; see STYLES.
+function IqmMiniMap:ensure(n)
+	-- Called once per placed mark, so up to MAX_MARKS times a frame, and after the first frame
+	-- at a given trail length there is nothing for it to do. Answer that case before touching
+	-- style() or the loop. The MAX_MARKS clamp below still applies to the build itself.
+	if n <= self.built then return end
+	if n > MAX_MARKS then n = MAX_MARKS end
+	local sty = style()
+	while self.built < n do
+		local i = self.built + 1
+		-- Every widget these name already exists in iqm_cards.xml over textures already
+		-- declared in iqm_textures.xml. The style is read once per call rather than per
+		-- widget: configure() dumps the pool on any change, so every widget in it was built
+		-- from the same style by construction.
+		local sh = sty.sh and self.xml:InitStatic(sty.sh, self) or nil
+		local s  = self.xml:InitStatic(sty.el, self)
+		-- Heading is ENABLED once, here, and never again: it is a property of the widget and
+		-- of the style it was built from, and configure() dumps the pool on any style change,
+		-- so a widget can never outlive the style that decided this. Only SetHeading stays per
+		-- frame, and it has to -- the map is heading-up, so a fixed world bearing rotates
+		-- under it every time the player turns.
+		if sty.headed then
+			if sh then sh:EnableHeading(true) end
+			s:EnableHeading(true)
+		end
+		if sh then sh:Show(false) end
+		s:Show(false)
+		self.marks[i] = { sh = sh, s = s }
+		self.built = i
+	end
+end
+
+--- Hide every mark above `n`.
+--
+--  Up to the last SHOWN count, not up to the pool's high-water mark. `built` never shrinks, so
+--  walking to it meant the idle case -- hide_from(0), which is what runs on every frame with
+--  no route, no calibration, a near target or the trail switched off -- issued up to MAX_MARKS
+--  engine Show(false) calls per frame on widgets that were already hidden, for the rest of the
+--  session, once a long trail had been drawn even once.
+--
+--  The invariant: place() is the ONLY site that ever calls Show(true), ensure() builds hidden,
+--  and Refresh always follows its run of place() calls with a hide_from. So marks 1..shown_n
+--  are exactly the visible ones and everything above is known to be hidden already. The pool
+--  dump in set_config resets shown_n alongside built, since a counter pointing into a pool
+--  that no longer exists would both strand marks visible and index a nil.
+function IqmMiniMap:hide_from(n)
+	for i = n + 1, self.shown_n do
+		local m = self.marks[i]
+		if m.sh then m.sh:Show(false) end
+		m.s:Show(false)
+	end
+	self.shown_n = n
+end
+
+--- Place one mark. `ang` is nil for a bead, a screen-space heading for an arrow.
+--
+--  No alpha parameter: marks are opaque and the backing, where there is one, is a fixed dark
+--  wash behind them. Every attempt at varying the alpha here has encoded something that
+--  belonged to the AR view rather than to this one -- see the note in Refresh.
+--
+--  A style with no `sh` (STYLES) places one widget. Its outline is in its texture, which is
+--  the only way to keep a keyline concentric at this size: two widgets are positioned
+--  independently and round to screen pixels independently.
+function IqmMiniMap:place(i, ux, uy, size, ang)
+	local m = self.marks[i]
+	if m.sh then
+		local hs = size + 2
+		m.sh:SetWndSize(S(hs, hs))
+		m.sh:SetWndPos(P(ux - hs * 0.5, uy - hs * 0.5))
+	end
+	m.s:SetWndSize(S(size, size))
+	m.s:SetWndPos(P(ux - size * 0.5, uy - size * 0.5))
+	if ang then
+		-- A square rotated sprite takes no UI_KX squeeze of its own; the heading was
+		-- already computed in screen space. Same rule as the AR route's chevrons.
+		--
+		-- EnableHeading is NOT re-set here. It is enabled once in ensure(), when the widget is
+		-- built from a style that carries a direction; re-asserting it every frame on an
+		-- already-heading-enabled widget was MAX_MARKS engine calls a frame saying nothing.
+		if m.sh then m.sh:SetHeading(ang) end
+		m.s:SetHeading(ang)
+	end
+	-- Alpha stays 255: the marks are opaque, and the three things that varied it here
+	-- were all wrong (see the note above and section 6f). The COLOUR is the player's,
+	-- and it multiplies the art -- so the keyline baked into both glyphs stays black
+	-- whatever is set, because black times anything is black.
+	-- Both colours are pre-packed: C.argb by set_config, SH_ARGB once at load. This runs up
+	-- to MAX_MARKS times a frame and neither value can have changed since.
+	m.s:SetTextureColor(C.argb)
+	m.s:Show(true)
+	if m.sh then
+		-- ...and the backing is NOT tinted with it. It is the mark's outline, not part
+		-- of the mark: colouring it would turn a dark rim into a second coloured sprite
+		-- 2 px larger, which is a halo rather than a keyline.
+		m.sh:SetTextureColor(SH_ARGB)
+		m.sh:Show(true)
+	end
+end
+
+--- One frame: resample the route into evenly spaced marks and place them.
+--
+--  NOT the published chevrons. `cp[]` is spaced for the AR view -- 3 m by default -- and at
+--  the measured ~0.85 px/m that is 2.5 px between 8 px sprites, so a chevron trail piles
+--  into a smear rather than reading as a line. Section 5 said as much ("that same list at a
+--  DIFFERENT spacing") and the first build ignored it.
+--
+--  So the stroke vertices `p[]` are walked as a polyline and a mark is emitted every
+--  STEP_FACTOR x mark-size of SCREEN distance. Spacing is then a property of how the trail
+--  looks rather than of how far the ground chevrons happen to be apart, and it stays right
+--  when the player changes the mark size or the map scale changes under them.
+--
+--  The walk starts AT THE ACTOR rather than at the head of the published stroke. That was
+--  item 2 back when iqm_nav trimmed NEAR_TRIM = 3 m off the near end for first-person
+--  reasons that mean nothing on a top-down map; R2.25 has since taken that trim to zero for
+--  the ground line too, so the two views now agree on where a route begins. This still runs
+--  from the actor rather than from p[1] -- it costs nothing, and it is the map's own
+--  guarantee that the trail leaves the player arrow whatever the ground line does next.
+function IqmMiniMap:Refresh(act)
+	local rd = iqm_nav and iqm_nav.route_draw and iqm_nav.route_draw()
+	if not (rd and rd.n > 0 and CAL.ok) then
+		self:hide_from(0)
+		return
+	end
+	-- Where the target is: metres to it, and its x and z. iqm_nav has already computed all
+	-- three, so this is three table reads rather than a second target resolution.
+	--
+	-- NOT status(), which this used to call once a frame for exactly these three fields.
+	-- status() builds a fresh ~20-entry hash every call and measures the snap distance on the
+	-- way through, which is right for the F7 dump and wasted work here.
+	--
+	-- Called as a STATEMENT, and never as `local d, x, z = f and f()`. `and` is an expression
+	-- and an expression TRUNCATES a multiple return to one value -- a trap this codebase has
+	-- already been caught by once, and one that fails quietly: the distance would survive and
+	-- the goal would vanish, so the trail would simply stop marking the target.
+	local tdist, tgx, tgz
+	if iqm_nav.route_target then tdist, tgx, tgz = iqm_nav.route_target() end
+
+	-- Close enough that the trail says nothing, tested BEFORE any of the work below. This used
+	-- to sit after route_limit's scan, so inside NEAR_HIDE the drawing stopped and the work did
+	-- not. The two reads are independent, so the early-out belongs first.
+	--
+	-- `tdist` is nil until a target first resolves, and nil again once there is no objective.
+	-- That is deliberately NOT the near case: an unknown distance draws whatever route is
+	-- published rather than hiding.
+	if tdist and tdist < NEAR_HIDE then
+		self:hide_from(0)
+		return
+	end
+
+	-- The list runs as far as the LONGER of the two views wants (R2.24), so take our own
+	-- share of it. `rn` stands in for rd.n everywhere below; the walk only ever reads
+	-- vertices, so the chevron count route_limit also returns is of no use here.
+	local rn = rd.n
+	if iqm_nav.route_limit then rn = iqm_nav.route_limit(C.dist) end
+
+	local c, s = cam_rot()
+	local ap = act:position()
+	local headed = style().headed
+
+	-- The whole walk happens in WORLD METRES, and only the final placement converts to UI.
+	-- That is what makes spacing and culling rotation-independent: rotation preserves
+	-- length, so a distance in the rotated frame IS a distance in metres, whereas a
+	-- distance in UI units depends on which way the route happens to run (see CAL).
+	-- Two bounds on how far the trail may run, and the smaller wins.
+	--
+	--   SPAN_M is the engine reading (section 3): 100 m across wherever minimap_zoom is
+	--   unset. It is an assumption, and if it is too generous marks land outside the map's
+	--   circle -- visible litter on the HUD.
+	--
+	--   The SCREEN EDGE is a fact. The map is centred at the measured (cx, cy) and cannot
+	--   extend past the display, so its radius is at most the distance from that centre to
+	--   the nearest edge of the 1024x768 UI. Converted through the measured scales, that is
+	--   a hard ceiling in metres which needs no assumption at all -- and on a minimap tucked
+	--   into a corner it is much tighter than SPAN_M.
+	local edge_x = (CAL.cx < UI_W - CAL.cx) and CAL.cx or (UI_W - CAL.cx)
+	local edge_y = (CAL.cy < UI_H - CAL.cy) and CAL.cy or (UI_H - CAL.cy)
+	local rad_m = SPAN_M * 0.5
+	if CAL.px > 0 and edge_x / CAL.px < rad_m then rad_m = edge_x / CAL.px end
+	if CAL.py > 0 and edge_y / CAL.py < rad_m then rad_m = edge_y / CAL.py end
+	-- Room for the sprite itself, and nothing more.
+	rad_m = rad_m - (C.size * EDGE_MARKS) / CAL.py
+	if rad_m < 1 then rad_m = 1 end
+	-- Spacing is asked for in UI units and converted through the y scale, which is the axis
+	-- the virtual UI does not stretch.
+	local step_m = (C.size * STEP_FACTOR) / CAL.py
+	if step_m < 0.25 then step_m = 0.25 end
+
+	-- Previous vertex as a world offset from the actor. Starts at the actor itself, so the
+	-- first segment runs from the player to the head of the stroke.
+	local ox, oz = 0, 0
+	-- Metres since the last emitted mark. Seeded at step_m so the first mark lands at
+	-- offset zero, i.e. on the player.
+	local carry = step_m
+	local n = 0
+	local last_ang = nil
+
+	-- The DESTINATION as one extra vertex past the end of the stroke, when we know where it
+	-- is. The stroke stops at draw_m, so its last point is the target only when the route is
+	-- short enough to reach it -- and a trail that stops somewhere near the objective
+	-- without marking it makes the reader guess which of the last few marks meant "here".
+	--
+	-- Appending it also closes the gap the other way: if the stroke already ends at the
+	-- target the extra vertex is a zero-length segment, which the seg > 0.0001 test drops.
+	local gx, gz = nil, nil
+	if tgx and tgz then gx, gz = tgx - ap.x, tgz - ap.z end
+	local last_i = rn + (gx and 1 or 0)
+
+	for i = 1, last_i do
+		local qx, qz
+		if i <= rn then
+			local p = rd.p[i]
+			qx, qz = p.x - ap.x, p.z - ap.z
+		else
+			qx, qz = gx, gz
+		end
+		local dx, dz = qx - ox, qz - oz
+		local seg = sqrt(dx * dx + dz * dz)
+
+		if seg > 0.0001 then
+			local ux, uz = dx / seg, dz / seg
+
+			-- Heading once per segment rather than once per mark, taken from the ROTATED
+			-- direction. The map is circular on screen, so the rotated world direction is
+			-- the screen direction -- which is what SetHeading wants, and it needs no UI_KX
+			-- correction of its own because the two axis scales already carry it.
+			local ang = nil
+			if headed then
+				local edx, edy = orient(ux, uz, c, s)
+				local el = sqrt(edx * edx + edy * edy)
+				if el < 0.0001 then edx, edy, el = 0, 1, 1 end
+				ang = atan2(-edy / el, edx / el)
+			end
+			last_ang = ang
+
+			local t = step_m - carry
+			while t <= seg do
+				local wx, wz = ox + ux * t, oz + uz * t
+				local rr = sqrt(wx * wx + wz * wz)          -- metres from the player
+				-- Outside the map is simply dropped. A mark is either on the map or it is
+				-- not; there is no partial mark to trim, which is why this renderer needs
+				-- no clipping (section 5). The walk continues, since a route that leaves
+				-- the map can curve back into it.
+				if rr <= rad_m then
+					n = n + 1
+					if n > MAX_MARKS then self:hide_from(MAX_MARKS); return end
+					self:ensure(n)
+
+					-- FULLY OPAQUE, deliberately, and this is the second time the alpha
+					-- here has been wrong for the view.
+					--
+					-- It first borrowed iqm_nav's a[], which is a camera occlusion test --
+					-- with route_xray off an occluded point eases to ZERO, so in a built-up
+					-- area the whole trail vanished. That was replaced by a ramp toward the
+					-- map rim, which was defensible but solved a problem the cull already
+					-- solves: marks are dropped before they reach the edge, so the ramp was
+					-- dimming perfectly readable marks in the middle of the map for the
+					-- sake of a boundary they never touch.
+					--
+					-- What remains is the dark backing behind each mark, which is not
+					-- fading -- it is what keeps a white chevron legible over pale terrain.
+					local ex, ey = orient(wx, wz, c, s)
+					self:place(n, CAL.cx + CAL.px * ex, CAL.cy + CAL.py * ey, C.size, ang)
+				end
+				t = t + step_m
+			end
+
+			carry = (carry + seg) % step_m
+			ox, oz = qx, qz
+		end
+	end
+
+	-- A mark ON THE END, always. The walk emits at whole multiples of step_m, so it stops at
+	-- the last one that fits and leaves up to a full step of unmarked trail -- which is the
+	-- gap you see between the last mark and either the map's edge or the objective. Since
+	-- the end vertex is the destination whenever we know it, this is also what puts a mark
+	-- on the target itself.
+	--
+	-- Skipped when a mark has just been placed near there anyway, so the tail does not
+	-- double up into a blob.
+	if n > 0 and n < MAX_MARKS and carry >= step_m * 0.2 then
+		local rr = sqrt(ox * ox + oz * oz)
+		if rr <= rad_m then
+			n = n + 1
+			self:ensure(n)
+			local ex, ey = orient(ox, oz, c, s)
+			self:place(n, CAL.cx + CAL.px * ex, CAL.cy + CAL.py * ey, C.size, last_ang)
+		end
+	end
+
+	self:hide_from(n)
+end
+
+-- --------------------------------------------------------------------------
+-- Wiring
+-- --------------------------------------------------------------------------
+local WND   = nil
+local shown = false
+
+--- Build the window and attach it to the HUD, lazily: get_hud() is nil at on_game_start
+--  because the HUD is not built yet. Same lifecycle as iqm_core' ensure_cards.
+local function ensure_wnd()
+	if WND then return true end
+	local hud = get_hud()
+	if not hud then return false end
+	WND = IqmMiniMap()
+	hud:AddDialogToRender(WND)
+	return true
+end
+
+local function actor_on_update()
+	if not C.on then
+		if shown and WND then WND:hide_from(0); shown = false end
+		drop_own()
+		return
+	end
+	local act = db.actor
+	if not act then return end
+	if not ensure_wnd() then return end
+
+	-- UI_KX only changes with the screen; recompute on change, not per frame.
+	local dev = device()
+	if dev and dev.width and dev.width > 0 and dev.width ~= _ui_w then
+		_ui_w = dev.width
+		UI_KX = (dev.height / dev.width) / (768 / 1024)
+	end
+
+	-- Drop a stale transform: a level change moves the map's bounds and a resolution change
+	-- moves everything. Either invalidates both the centre and the scale.
+	--
+	-- Compared as three VALUES rather than through cal_key(): this runs every frame to catch
+	-- two events that essentially never happen, and the string the key builds was allocated
+	-- and interned each time purely to be thrown away. `dev` is the one already read above.
+	if CAL.ok then
+		local lvl = level and level.name and level.name() or "?"
+		if lvl ~= CAL.lvl
+		   or (dev and dev.width or 0) ~= CAL.w
+		   or (dev and dev.height or 0) ~= CAL.h then
+			cal_clear()
+			-- A level change unloads the object our spot was on, so forget it rather than
+			-- trying to remove a spot from an id that no longer means anything.
+			OWN.id = nil
+			say("transform dropped -- level or resolution changed")
+		end
+	end
+	-- Every frame, not just while uncalibrated: the centre is re-read from the actor's spot
+	-- each time, and calibrate() returns immediately once the scale is known.
+	calibrate(act)
+
+	WND:Refresh(act)
+	shown = true
+end
+
+--- The one assignment site for this module's config. Both entry points below land here
+--  -- apply_config with what it pulled, configure with what a test driver handed it --
+--  so the defaults and the pool dump can never apply to one path and not the other.
+local function set_config(o_on, o_size, o_style, o_dist, o_r, o_g, o_b, o_debug)
+	C.on    = o_on and true or false
+	C.size  = o_size or C.size
+	-- The trail's own drawn distance (R2.24). iqm_nav publishes at the longer of this
+	-- and the ground line's, so what arrives here is how much of that list is ours.
+	C.dist  = o_dist or C.dist
+	-- An unknown style is kept as given rather than clamped here, so status() reports what
+	-- was actually asked for; style() is what falls back to the default when it draws.
+	C.style = o_style or DEF_STYLE
+	-- The tint, applied per frame in place(), so unlike the style it needs no pool dump
+	-- and takes effect on the very next frame -- which is what makes dragging the three
+	-- sliders in MCM show you the trail changing colour as you drag.
+	C.r     = o_r or 255
+	C.g     = o_g or 255
+	C.b     = o_b or 255
+	-- Packed once, here, rather than per mark per frame in place(). This is the site an MCM
+	-- slider move runs through, so live-dragging the three sliders still shows the trail
+	-- changing colour as they move.
+	C.argb  = GetARGB(255, C.r, C.g, C.b)
+	DEBUG   = o_debug and true or false
+	-- Style changes swap which widget a mark is built from, so the pool has to go.
+	if WND then
+		WND:hide_from(0)
+		-- shown_n goes with built. hide_from only ever walks as far as the last shown count,
+		-- so a counter left behind here would point into a pool that no longer exists: it
+		-- would index a nil mark on the next short trail, and until it did it would leave the
+		-- new pool's marks stranded visible.
+		WND.marks, WND.built, WND.shown_n = {}, 0, 0
+	end
+end
+
+--- Re-read the live config. Called by iqm_core.read_config as its last act, along
+--  with every other module's apply_config -- config is PULLED here, never pushed (see
+--  the seam note at the top of iqm_core). iqm_core owns the MCM reading; nothing
+--  here reads an MCM option directly.
+--
+--  Bound inside the function, never at file scope, for the reason the seam note gives.
+--
+--  A second CONSUMER of iqm_nav's published route, and deliberately INDEPENDENT of the
+--  AR one: `mark_route` draws the line on the ground, this draws marks on the minimap,
+--  and either can be on without the other. iqm_nav's own gate paths for whichever is
+--  asking. (F3, docs/minimap-route.md.)
+--
+--  It does NOT ride game.world2ui_with_depth either, unlike the ground line. The trail
+--  never projects anything -- it measures its own transform off the minimap -- so that
+--  binding is irrelevant to it.
+function apply_config()
+	local C2 = iqm_core.config()
+	set_config((C2.mark_targets and C2.mark_minimap) and true or false,
+	           C2.minimap_size, C2.minimap_style, C2.minimap_dist,
+	           C2.minimap_r, C2.minimap_g, C2.minimap_b, C2.debug_log)
+end
+
+--- The same assignment, in the shape the TEST DRIVERS use (tools/minimap-harness).
+--  Kept because a harness has no iqm_core to pull from, and because stating the
+--  values outright is what lets a test vary one of them.
+function configure(o)
+	if type(o) ~= "table" then return end
+	set_config(o.on, o.size, o.style, o.dist, o.r, o.g, o.b, o.debug)
+end
+
+--- What the transform currently is. For the F7 action below and for tests.
+function status()
+	return { ok = CAL.ok, cx = CAL.cx, cy = CAL.cy, px = CAL.px, py = CAL.py,
+	         s = CAL.s, xok = CAL.xok, yok = CAL.yok, key = CAL.key,
+	         style = C.style, style_name = style().name }
+end
+
+-- --------------------------------------------------------------------------
+-- F7 debug
+-- --------------------------------------------------------------------------
+function debug_state()
+	local st = status()
+	printf("-IQM-MM: enabled %s   style %s (%s)   spot on the actor %s   last problem %s",
+		tostring(C.on), tostring(C.style), style().name,
+		tostring(OWN.id), tostring(LAST.why or "none"))
+	printf("-IQM-MM: iqm_calib declared by DXML: %s", tostring(calib_declared()))
+
+	if not st.ok then
+		printf("-IQM-MM: not calibrated yet -- needs %s m of walking. No nearby object is "
+		       .. "required; the actor's own spot is the reference", f2(MOVE_SEP))
+		return
+	end
+	printf("-IQM-MM: centre %s,%s   scale %s x / %s y px/m   key %s",
+		f2(st.cx), f2(st.cy), f2(st.px), f2(st.py), tostring(st.key))
+
+	-- The two axis scales should differ by exactly the virtual UI's aspect correction. They
+	-- are MEASURED rather than derived from it (section 4), so printing both alongside what
+	-- UI_KX predicts turns "the marks swing when I turn" into one readable line.
+	printf("-IQM-MM: measured x/y ratio %s   UI_KX predicts %s   (a mismatch here is why "
+	       .. "marks would move with camera heading)",
+		f2(st.py ~= 0 and (st.px / st.py) or 0), f2(UI_KX))
+
+	-- If the trail stops short of the map edge, or runs past it, this is the line to check.
+	-- SPAN_M is an engine reading rather than a measurement; the screen-edge figure beside
+	-- it is a hard fact, and whichever is smaller is the one actually being used.
+	local ex = (st.cx < UI_W - st.cx) and st.cx or (UI_W - st.cx)
+	local ey = (st.cy < UI_H - st.cy) and st.cy or (UI_H - st.cy)
+	printf("-IQM-MM: cull %s m from span, %s m / %s m from the screen edge -- smallest wins",
+		f2(SPAN_M * 0.5), f2(st.px > 0 and ex / st.px or 0), f2(st.py > 0 and ey / st.py or 0))
+	printf("-IQM-MM: local scale %s px/m; mark step %s m",
+		f2(st.s or 0), f2(st.py ~= 0 and ((C.size * STEP_FACTOR) / st.py) or 0))
+end
+
+function debug_recalibrate()
+	cal_clear()
+	printf("-IQM-MM: transform cleared, will re-solve")
+end
+
+-- The once-per-process flag and the launcher guard live in iqm_util.inject_actions;
+-- the list is the only part that was ever this module's own. Still deferred to
+-- actor_on_first_update rather than run from on_game_start: the debugger's own
+-- content table is not necessarily built when on_game_start fires.
+local function inject_f7_actions()
+	iqm_util.inject_actions("iqm_minimap", {
+		{ name = "IQM: Minimap State",       functor = { debug_state },       hide_ui = 2 },
+		{ name = "IQM: Minimap Recalibrate", functor = { debug_recalibrate }, hide_ui = 2 },
+	})
+end
+
+function on_game_start()
+	RegisterScriptCallback("actor_on_first_update", inject_f7_actions)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end

@@ -1,0 +1,222 @@
+-- ======================================================================
+--  Immersive Quest Markers: named NPC spots on the PDA map
+-- ======================================================================
+--  Puts the NPC's name in the tooltip of a trader / technician / bartender /
+--  medic / guide / important-character pin, so hovering one on the PDA map
+--  answers "who is that" and not only "what is that". "Trader" becomes
+--  "Sidorovich - Trader", and "Important Character" becomes "Wolf - Important
+--  Character".
+--
+--  WHY IT IS THE HINT AND NOT THE ICON. A map spot has exactly two pieces of
+--  per-OBJECT state: which location type it wears (iqm_taskspot's business) and
+--  its hint string. Everything else -- art, tint, size -- is an attribute of the
+--  TYPE, shared by every spot of that type, so the name could never have been
+--  drawn on the pin itself. The hint is the only per-NPC text a map spot has.
+--
+--  HOW IT HOOKS. Vanilla builds these spots in stalker_generic.reset_show_spot,
+--  which reads the NPC's `level_spot` out of its logic, picks a location type and
+--  a legend string id, and calls level.map_add_object_spot with them
+--  (stalker_generic.script:67-125). That function is called through the namespace
+--  by modules.reset_generic_schemes (`:219` and `:237`), never captured into a
+--  local or a scheme table, so replacing the namespace field is enough for every
+--  call site to reach the wrapper -- rung 2 of the hook tree, no unlocalizer and
+--  no whole-file override of a script nine other things reset through.
+--
+--  The wrapper adds nothing to the decision and re-implements none of it: the
+--  original runs first, unchanged, and then whatever spot it decided on is looked
+--  up on the NPC and its hint is REWRITTEN through level.map_change_spot_hint
+--  (level_script.cpp:452-457). So NPCs whose logic says nothing about a spot cost
+--  seven registry misses and nothing else, and every rule about WHICH NPCs carry a
+--  pin -- goodwill, show_spot, the condlist -- stays vanilla's.
+--
+--  WHY A COMPOSED STRING IS SAFE TO HAND THE ENGINE. A hint is stored raw and
+--  translated at draw time, and CStringTable::translate returns its argument
+--  unchanged when the id is not in the table (string_table.cpp:226-234). So a
+--  literal "Sidorovich - Trader" renders as itself, and the legend id it replaced
+--  ("st_ui_pda_legend_trader") is exactly what to write back to restore vanilla --
+--  which is what reverting does below, rather than guessing at English.
+--
+--  NOTHING HERE OUTLIVES THE MOD. map_add_object_spot leaves the location
+--  non-serializable (map_add_object_spot_ser is the one that sets the flag,
+--  level_script.cpp:443-450), so these hints are rebuilt from the NPC's logic on
+--  every load and no save ever carries one. Uninstalling is enough; there is no
+--  revert-before-save promise to keep here, unlike iqm_taskspot's spot TYPES.
+--
+--  level.map_change_spot_hint IS A SOFT DEPENDENCY, tested at every call rather than
+--  assumed. It ships with the modded exes (and so with GAMMA), but this mod runs on bare
+--  Anomaly too, and there the wrapper does nothing beyond calling vanilla -- the same
+--  shape as the beacon's world2ui_with_depth gate in iqm_core.read_config.
+--
+--  WHAT IT NAMES. Every pin reset_show_spot puts on a PERSON -- the four trade
+--  services, the fast-travel guide, and both important-character pins -- because the
+--  question a tooltip on an NPC answers is the same one in every case: who is that.
+--  The important-character pin is the one that gains most from it, since "Important
+--  Character" is the least informative thing the map says about anybody.
+--
+--  THE ONE ROW THAT IS NOT HERE is the companion pin (ui_pda2_companion_location).
+--  It is not an omission of the same kind: a companion is in the player's own squad,
+--  already carded by this mod, and their pin moves with them -- the name is the one
+--  thing about that mark nobody is in any doubt about. Adding it is still one row.
+--
+--  ONE COSMETIC LIMIT, recorded so it is not read as a bug. The tooltip says what
+--  the ICON says -- and vanilla gives a technician, bartender or medic whose logic
+--  only says `level_spot = trader` the plain trader pin. This mod's nameplates
+--  refine that from the NPC's trade catalog (iqm_scan.refine_trader), so a card can
+--  read TECHNICIAN over a map pin that says "Trader". Matching the pin is the point:
+--  the tooltip explains the mark under the cursor, and a tooltip disagreeing with
+--  the glyph it is attached to is worse than one agreeing with a coarse glyph.
+-- ======================================================================
+
+-- Location type -> the legend string id vanilla gives it, transcribed from
+-- stalker_generic.reset_show_spot. The id is BOTH halves of the job: it is the
+-- role word the composed hint is built from, and it is what gets written back
+-- when the feature is switched off, so reverting restores the exact string the
+-- game would have set and not a translation of it.
+--
+-- An ARRAY, not a hash, because the order is the answer when an NPC somehow carries
+-- two. The rows are in VANILLA'S OWN ORDER -- the order of the if/elseif chain in
+-- reset_show_spot, not a grouping of our own -- so "first row wins" reaches the same
+-- verdict the game would, for free, rather than being a second opinion about
+-- precedence that has to be kept in step with one.
+--
+-- VIP IS TWO ROWS, not one, and they carry DIFFERENT legend ids: `special` is the
+-- faction/story important character and `quest_npc` is the quest one. Both draw an
+-- important-character pin and the two strings differ only in capitalisation
+-- ("Important Character" / "Important character"), which is exactly why they are
+-- transcribed separately -- collapsing them to one id would silently change what one
+-- of the two pins says, in a way nobody would spot on screen.
+local PINS = {
+	{ spot = "ui_pda2_special_location",   legend = "st_ui_pda_legend_special"  },
+	{ spot = "ui_pda2_trader_location",    legend = "st_ui_pda_legend_trader"   },
+	{ spot = "ui_pda2_mechanic_location",  legend = "st_ui_pda_legend_mechanic" },
+	{ spot = "ui_pda2_scout_location",     legend = "st_ui_pda_legend_scout"    },
+	{ spot = "ui_pda2_barman_location",    legend = "st_ui_pda_legend_barman"   },
+	{ spot = "ui_pda2_quest_npc_location", legend = "st_ui_pda_legend_vip"      },
+	{ spot = "ui_pda2_medic_location",     legend = "st_ui_pda_legend_medic"    },
+}
+
+-- The composed hint's shape, as a string id rather than a concatenation here, so a
+-- translator can reorder the two halves ("Name - Role" is not a given). %s1 is the
+-- NPC's name, %s2 the role word. See st_iqm_spot_named in text/<lang>/st_mcm_iqm.xml.
+local FORMAT_ID = "st_iqm_spot_named"
+
+local on = false   -- the feature switch (its own option AND the mod's master one)
+
+-- [npc_id] = the PINS row that NPC's pin matched, recorded on every pass through
+-- the wrapper whether or not the hint was stamped. Recording the untouched ones too
+-- is what makes the MCM switch work in BOTH directions live: with only the stamped
+-- ones known, turning the option on would do nothing until each NPC's logic happened
+-- to reset. Bounded by the spot-carrying NPCs seen this session (tens, not
+-- thousands), and pruned by the sweep whenever a remembered pin has gone.
+local seen = {}
+
+-- Translations are per string id and change only with the language, so they are
+-- cached rather than re-fetched per NPC. Cleared by apply_config, which is what
+-- runs on an MCM change -- and therefore covers a language change too, the same
+-- way iqm_core clears its own header cache in read_config.
+local _tr = {}
+local function tr(id)
+	local s = _tr[id]
+	if not s then
+		s = game.translate_string(id)
+		_tr[id] = s
+	end
+	return s
+end
+
+--- The hint text for one NPC: the composed string, or nil to leave the pin alone.
+--
+--  Nil rather than a fallback when there is no name: a nameless NPC should
+--  keep the plain legend, and returning "" here would blank the tooltip instead.
+--  character_name() is the display name (the same one the nameplates use); name()
+--  is the engine's section-ish id and is never worth showing, so it is not a fallback.
+--
+--  The full name, deliberately, and NOT iqm_core's short_ranks abbreviation: that
+--  option exists to stop a long rank blowing out a fixed-width CARD, and a tooltip
+--  has no width to blow out.
+local function composed(obj, legend)
+	if not (obj and obj.character_name) then return end
+	local name = obj:character_name()
+	if not name or name == "" then return end
+	return string.format(tr(FORMAT_ID), name, tr(legend))
+end
+
+--- Write the right hint onto one remembered NPC's pin. Returns false if the pin has
+--  gone, which is the caller's cue to forget it.
+--
+--  The OFF branch writes the legend ID back, not its translation -- see PINS.
+local function stamp(id, row)
+	if level.map_has_object_spot(id, row.spot) == 0 then return false end
+	if not on then
+		level.map_change_spot_hint(id, row.spot, row.legend)
+		return true
+	end
+	local text = composed(level.object_by_id(id), row.legend)
+	if text then level.map_change_spot_hint(id, row.spot, text) end
+	return true
+end
+
+--- The wrapper around stalker_generic.reset_show_spot.
+--
+--  THE ORIGINAL IS CALLED FIRST AND OUTSIDE THE GUARD. Everything vanilla does here
+--  -- removing the old spot, the visible_for_map flag, the goodwill test -- has to
+--  happen exactly as it would have, including when it raises: swallowing an error
+--  from the game's own code would hide it in a function that eight other resets run
+--  through. Our own half IS guarded, because the alternative is that a bad name or a
+--  missing binding takes down every NPC's logic reset rather than one tooltip.
+local original = nil
+local function reset_show_spot(npc, scheme, st, section)
+	original(npc, scheme, st, section)
+
+	if not (npc and level and level.map_change_spot_hint) then return end
+	pcall(function()
+		local id = npc:id()
+		for i = 1, #PINS do
+			local row = PINS[i]
+			if level.map_has_object_spot(id, row.spot) ~= 0 then
+				seen[id] = row
+				stamp(id, row)
+				return
+			end
+		end
+		-- No pin of ours any more (vanilla may have just removed one): forget it, so
+		-- the sweep does not keep asking after an NPC that no longer carries one.
+		seen[id] = nil
+	end)
+end
+
+--- Pulled by iqm_core at the end of read_config, like every other module's.
+--
+--  Re-stamps or reverts every remembered pin, so the option takes effect on the pins
+--  already on the map rather than at each NPC's next logic reset -- which for a hub
+--  the player is standing in is "not this visit".
+function apply_config()
+	local C = iqm_core and iqm_core.config and iqm_core.config()
+	local want = (C and C.enabled and C.map_spot_names) and true or false
+	local was = on
+	on = want
+	_tr = {}   -- covers a language change as well as a switch
+
+	if was == on then return end
+	if not (level and level.map_change_spot_hint) then return end
+	for id, row in pairs(seen) do
+		if not stamp(id, row) then seen[id] = nil end
+	end
+end
+
+--- Install the wrapper.
+--
+--  THE SAVED ORIGINAL LIVES ON stalker_generic, NOT IN A LOCAL HERE, and that is what
+--  makes installing idempotent. Wrapping a wrapper would compose the hint out of a
+--  composed hint -- "Sidorovich - Sidorovich - Trader", growing by one name every time
+--  -- so the second install has to find the first. A local flag cannot see one left by
+--  an earlier READ of this file, and loading a save re-reads .script files; a field on
+--  the module being patched survives exactly as long as the patch does. So the vanilla
+--  function is taken from there when it is already recorded, and this call REPLACES the
+--  live wrapper rather than stacking on it.
+function on_game_start()
+	if not (stalker_generic and stalker_generic.reset_show_spot) then return end
+	original = stalker_generic.iqm_spothint_original or stalker_generic.reset_show_spot
+	stalker_generic.iqm_spothint_original = original
+	stalker_generic.reset_show_spot = reset_show_spot
+end

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Widgets for the two-arm route prototype (iqm_arms.script).
+
+     Samples iqm_arm, the SAME artwork the shipped arms style used before R2.20 -- not
+     new art, and deliberately so. It already carries the two features this renderer
+     depends on, both added while the arms style was live:
+
+       * a SOFT TIP (ARM_TIP = 0.14 of the arm's length, tools/stroke-tex/build.py),
+         so an arm fades out rather than stopping at a hard cut. Two rectangles cannot
+         meet cleanly at a point; a soft end asks no question about where exactly it
+         stops, which is what keeps the apex wedge from reading as a notch.
+       * a tapered tail, so the outer ends do not stop dead in mid-air.
+
+     stretch="1" is load-bearing: the rect is computed per frame from the projection
+     and the picture has to follow it. Sizes here are placeholders. -->
+<w>
+	<arm_bar width="64" height="12" stretch="1">
+		<texture r="224" g="196" b="122" a="255">iqm_arm</texture>
+	</arm_bar>
+</w>

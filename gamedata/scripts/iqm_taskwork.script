@@ -10,7 +10,7 @@
 -- turning it off disables all of this.
 --
 -- Answers "would this NPC's dialog offer me a task right now?" cheaply
--- enough to drive world markers (the mark_work role in iqm_markers).
+-- enough to drive world markers (the mark_work role in iqm_core).
 --
 -- The authoritative source is axr_task_manager.get_first_available_task,
 -- the exact function the task dialogs call. Cold, it is EXPENSIVE: it
@@ -51,8 +51,8 @@
 -- for purists who don't want tasks pre-rolled: warm reads still work,
 -- so NPCs the player has actually talked to keep live markers.
 --
--- Consumed by iqm_markers (extras scan -> has_work, per-frame ->
--- probe_tick, read_config -> configure, on_option_change -> reset).
+-- Consumed by iqm_core (extras scan -> has_work, per-frame ->
+-- probe_tick, read_config -> apply_config, on_option_change -> reset).
 -- Public and self-contained on purpose, Catspaw-taskmonitor style, so
 -- other mods can read has_work too. Soft dependencies throughout: every
 -- entry point no-ops if the task system isn't around.
@@ -481,13 +481,31 @@ end
 -- Public API
 -- --------------------------------------------------------------------------
 
--- Live options, pushed by iqm_markers.read_config (single source of truth for
--- config stays over there).
+-- Live options. The single source of truth for config stays in iqm_core; this
+-- is the shape the TEST DRIVERS use (tools/taskwork-harness), and the one
+-- apply_config below hands the pulled values to, so there is one assignment site
+-- rather than two that can drift.
 function configure(work_probe, appear_dist, debug_log)
 	probing = work_probe and true or false
 	local ad = appear_dist or 16
 	max_d2 = ad * ad
 	DEBUG  = debug_log and true or false
+end
+
+--- Re-read the live config. Called by iqm_core.read_config as its last act, along
+--  with every other module's apply_config -- config is PULLED here, never pushed (see
+--  the seam note at the top of iqm_core).
+--
+--  DELIBERATELY appear_dist, not beacon_dist: the work probe is the expensive check
+--  this module exists to ration, and a work card carries no marker, so it must not
+--  follow the markers out to their wider reach. The other half of that rule lives in
+--  iqm_scan's extras pass; tools/reach-harness asserts both still say so.
+--
+--  Reached for through iqm_core.config() rather than taken as arguments, so a
+--  config change can never reach one half of the module and not the other.
+function apply_config()
+	local C = iqm_core.config()
+	configure(C.work_probe, C.appear_dist, C.debug_log)
 end
 
 -- Does this NPC have work to give right now? Called from the extras scan for
@@ -537,7 +555,7 @@ end
 -- The classified job kind behind this NPC's current positive verdict
 -- ("fetch"/"hunt"/"assault"/"bounty"/"rescue"/"courier"/"artifact"/"escort"/
 -- "repairs"), or nil for a plain/unclassified offer (or no offer). Drives the
--- card-header refinement in iqm_markers.
+-- card-header refinement in iqm_core.
 function work_kind(id)
 	local s = state[id]
 	return (s and s.work and s.kind) or nil
@@ -602,7 +620,11 @@ function probe_tick(tg, idle)
 	local d = probe_cost * PROBE_BUDGET
 	if d < PROBE_INTERVAL then d = PROBE_INTERVAL elseif d > PROBE_MAX then d = PROBE_MAX end
 	next_probe = tg + d
-	dbg("probe cost=%.2fms avg=%.2fms next=+%dms", cost, probe_cost, d)
+	-- pre-formatted: Anomaly's printf only substitutes %s, and a raw %.2f here
+	-- would print literally and shift every argument after it
+	dbg("probe cost=%sms avg=%sms next=+%sms",
+		string.format("%.2f", cost), string.format("%.2f", probe_cost),
+		string.format("%d", d))
 end
 
 -- Full reset (option change / fresh game session). The engine's own pstor

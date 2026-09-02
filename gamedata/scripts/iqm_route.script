@@ -1,0 +1,1310 @@
+-- ======================================================================
+--  Immersive Quest Markers: route finding on the AI level graph
+-- ======================================================================
+-- The routing half of F2. Hands back a list of world points from A to B
+-- that follows walkable ground, for iqm_pathline to draw. Renderer-agnostic
+-- on purpose: this module knows nothing about gizmos, and iqm_pathline knows
+-- nothing about graphs.
+--
+-- WHY A* IN LUA. The engine's own path builders are not bound to the script
+-- side -- the whole `level` namespace (level_script.cpp:2303-2728) exposes the
+-- graph as data (vertex_id, vertex_position, vertex_link, vertex_in_direction,
+-- get_nearby_vertices) and nothing that searches it. Nothing in the modpack
+-- does this either, so there is no prior art to lift.
+--
+-- WHICH GRAPH IT WALKS. Two expanders, chosen by opts.graph:
+--
+--   "links"  (default) -- level.vertex_link, the graph's own baked adjacency
+--   "probes"           -- level.vertex_in_direction, the original coarse walk
+--
+-- This file argued the opposite case for most of its life, and the argument was
+-- wrong on its central fact. It ran: vertex_link is exact but enormous, since a
+-- 50 m disc is ~16000 cells, while one vertex_in_direction covers metres in a
+-- single engine call -- so probes must be cheaper. Nobody measured it. Measured:
+--
+--     level.vertex_link              0.00 us   free -- a baked array lookup
+--     level.high_cover_in_direction  0.00 us   free -- also baked
+--     level.vertex_position          0.33 us
+--     level.vertex_in_direction(8m)  2.00 us   x8-16 a node = 16-32 us
+--
+-- vertex_in_direction MARCHES the graph cell by cell on every call, which is the
+-- very thing the argument assumed it avoided. It was not an optimisation over
+-- walking the links; it was walking the links, repeatedly, from C++, and then
+-- throwing away everything but the last vertex. On the Bar's hard route the same
+-- search costs 7857 expansions in 24 ms on links against 9382 in 319 ms.
+--
+-- Probes remain as the fallback where level.vertex_link is missing, and as the
+-- A/B for path SHAPE, which is the one thing the numbers above cannot settle --
+-- see cover_w_links for a preference that had to be recalibrated because the
+-- probe graph had been mispricing it.
+--
+-- Either way the primitives are safe against tunnelling. vertex_in_direction
+-- steps node to node and stops when it cannot continue
+-- (CLevelGraph::farthest_vertex_in_direction, level_graph_vertex.cpp:211-249);
+-- a fully blocked probe returns the vertex it started from (the Lua wrapper
+-- substitutes the input on failure, level_script.cpp:379-392). The links simply
+-- do not exist across a wall. What neither can see is a hole in the map where
+-- the floor is real -- that is gap_link's job, and the only place this module
+-- infers rather than reads.
+--
+-- Public API:
+--   iqm_route.search_begin(from, to, opts)  -- start; true if it got going
+--   iqm_route.search_step(budget)           -- "working" | "done" | "failed"
+--   iqm_route.search_state()                -- as above, or "idle"
+--   iqm_route.search_result()               -- array of vector, or nil
+--   iqm_route.search_owner()                -- opts.owner of the live search, or nil
+--   iqm_route.search_partial()               -- true if the result stops short of the goal
+--   iqm_route.search_abort()
+--   iqm_route.debug_active()                -- a driver below is holding the ribbon
+--   iqm_route.route_now(from, to, opts)     -- run to completion, return points
+--   iqm_route.smooth(nodes, passes)         -- round off the 45-degree probe corners
+--   iqm_route.densify(nodes, step)          -- resample legs for the renderer
+--   iqm_route.clearance(pts, opts)          -- push points off the walls they run along
+--
+-- Test drivers (F7 -> Execute tab):
+--   iqm_route.debug_route()        -- route to what you're aiming at, then draw it
+--   iqm_route.debug_route_clear()
+--
+-- Logic is covered offline by tools/route-harness/harness.lua (a synthetic level
+-- graph with walls and a doorway): luajit tools/route-harness/harness.lua
+
+local floor, ceil, sqrt, max, huge = math.floor, math.ceil, math.sqrt, math.max, math.huge
+
+--- WHICH COPY OF THIS FILE IS ACTUALLY RUNNING.
+--
+--  Not a version number for release notes -- a probe for the question that wasted real time
+--  in the R2.34/R2.35 sessions: "I changed the file, is the change in the game yet?" Every
+--  symptom of the OLD code reads as the NEW code failing, and that produced one wrong
+--  conclusion here already.
+--
+--  MEASURED, because reasoning about it produced the wrong answer twice. Loading a save
+--  DOES re-read .script files from disk, with the process still running: this stamp was
+--  added while the game was live, read back as nil, and read back as its new value after a
+--  save load with time_global still climbing (so no restart). A trace of the engine source
+--  said the opposite -- that the Lua state is created once per process and the namespace
+--  cache never clears -- and it is simply not what this install does. Something in the pack
+--  or the build forces the re-read; what matters here is the observed behaviour.
+--
+--  Which makes the edit-test cycle: save to a dev slot, edit, load that slot. That is a
+--  COMPLETE reload -- the init chain re-runs, so configure() fires and the module comes
+--  back configured -- unlike re-executing a chunk in place, which leaves file-level locals
+--  at their literal defaults and silently switches a module off.
+--
+--  Bump it whenever you want to be certain a change landed. `iqm_route.BUILD` is a bare
+--  namespace assignment, not a local, so it costs nothing against the 198-local budget and
+--  is readable from anywhere -- the devkit bridge, another script, the F7 dump.
+BUILD = "R2.37b-linknone"
+
+local INVALID_VID = 4294967295   -- u32(-1)
+
+--- THE OTHER INVALID VERTEX, and it is not the one above (R2.37b).
+--
+--  level.vertex_link returns 8388607 -- 2^23 - 1 -- when a vertex has no neighbour that way.
+--  Not u32(-1). Both sentinels are real and they mean different things, which is why this
+--  needs its own test rather than a wider valid_vid:
+--
+--    * the INPUT vertex id is invalid  -> u32(-1)          (level_script.cpp:311-318)
+--    * the vertex has no neighbour     -> 8388607          (NodeCompressed::link)
+--
+--  NodeCompressed packs four neighbour indices into 12 bytes as 23-bit fields and masks
+--  every read with 0x007fffff (xrEngine/xrLevel.h:237-255); the setter masks on write too,
+--  so no link can ever exceed that. An unlinked direction is stored all-ones and comes back
+--  saturated. The engine never names the value -- it tests links with valid_vertex_id()
+--  instead -- so 8388607 is spelled out here rather than borrowed. MAX_NODE_BIT_COUNT = 23
+--  (xrLevel.h:385) fixes the width, and the runtime asserts the on-disk format version
+--  (level_graph.cpp:35), so it cannot vary underneath us.
+--
+--  level.vertex_position on it returns a ZERO VECTOR, not an error and not a log line
+--  (level_script.cpp:394-401) -- which is how a phantom neighbour at the world origin gets
+--  into a search without anything complaining.
+--
+--  MEASURED first, over 1136 real vertices around the actor: 8388607 was the ONLY value
+--  returned that did not behave as a neighbour, appearing 294 times.
+--
+--  WHAT IT COST. valid_vid() only knew about u32(-1), so every missing link read as a
+--  perfectly good neighbour. That meant expand_links never once saw a boundary -- so
+--  gap_link, the entire doorway-bridging feature, never fired at all -- and the search was
+--  additionally handed a phantom vertex whose position is the world origin. Reported from
+--  play as "still going the long way and still going into walls", which is exactly right:
+--  both symptoms, one cause, and the offline suite could not see either because the harness
+--  stub returned u32(-1) for a missing link. A stub that answers more tidily than the engine
+--  is not a simplification, it is a different engine.
+local LINK_NONE = 8388607   -- 2^23 - 1
+
+local OPT = {
+	probe      = 8.0,    -- metres: the long expansion probe, for open ground
+	probe_near = 2.0,    -- metres: the short one, fired only where geometry bit
+	arrive     = 3.0,    -- metres: close enough to the goal to call it arrived
+	max_nodes  = 1200,   -- hard ceiling on expansions before the search gives up
+	-- How hard the search prefers OPEN ground to ground against a wall (R2.23). A node's
+	-- cost is multiplied by (1 + cover_w * cover), where cover is the node's own mean
+	-- high_cover over the eight compass directions -- 0 in the middle of a courtyard, ~0.5
+	-- in a corridor, near 1 in a corner. So at 0.8 a route will go up to ~1.4x further to
+	-- cross the middle of a space instead of running along its edge, and will still take a
+	-- doorway when there is no alternative, because the penalty is relative and a wall is
+	-- never impassable. Set to 0 to get the pre-R2.23 shortest-path behaviour back.
+	cover_w    = 0.8,
+	-- THE SAME PREFERENCE COSTS MORE ON THE LINK GRAPH (R2.37), and the reason is that the
+	-- link graph is right and the probes were approximating. Leaving a wall means stepping
+	-- sideways and back, and on 0.7 m links that detour is priced at what it actually costs;
+	-- an 8 m probe swallows it inside one jump and the surcharge looks cheaper than it is.
+	-- Swept on the harness's edge-hugging fixture, as mean z of the result:
+	--
+	--     cover_w      0     0.8    1.5    3.0
+	--     probes      0.50   2.50   2.50   2.50
+	--     links       0.50   0.50   1.00   1.83
+	--
+	-- So 0.8 buys nothing at all on links. Separate keys rather than one scaled value,
+	-- because these are two calibrations of the same intent and collapsing them would hide
+	-- that changing the graph silently retunes the look of every route.
+	--
+	-- 3.0 is where the fixture saturates (6.0 buys nothing more). It is a STARTING POINT
+	-- taken off a synthetic fixture, and the fixture's cover stub is
+	-- a ray march while the engine's is a baked 4-bit value -- so the numbers above show the
+	-- shape of the relationship and not the right constant. This one wants an in-game look.
+	cover_w_links = 3.0,
+	h_weight   = 1.2,    -- >1 trades optimality for speed; a route only has to
+	                     -- look sensible, not be shortest
+	-- BRIDGING HOLES IN THE AI MAP (R2.36). The navmesh is not a map of where the player
+	-- can walk -- it is a map of where the level's AI nodes were baked, and the two differ.
+	-- Measured in the Bar, standing in front of an open doorway with a step up into it:
+	--
+	--     vid 50899 (206.5, 51.1)   9.3 m away straight,   16 hops on foot
+	--     vid 51376 (207.9, 51.8)  10.9 m away straight,  271 hops on foot
+	--
+	-- 1.58 m apart, 255 hops apart on the mesh, and statics rays across that strip come back
+	-- CLEAR at 0.3 m, 0.9 m and 1.6 m. It is not a wall. It is a threshold nobody meshed,
+	-- and it was costing a 29 m walk 150 m of detour. In a 17x17 m box around that spot
+	-- there were 32 such gaps and 18 of them had no geometry in them at all, so this is the
+	-- level's normal condition rather than one bad doorway.
+	--
+	-- So: where a probe runs out, look a little further in the same direction, and if there
+	-- is mesh over there and nothing solid in between, link across anyway. Set gap = 0 for
+	-- the pre-R2.36 behaviour of trusting the mesh absolutely.
+	gap        = 2.8,    -- metres: widest unmapped strip worth stepping over. 4 cells.
+	-- A clear chest-height ray proves there is no WALL. It does not prove there is FLOOR,
+	-- and the difference is a ledge. The far side's own height is the only cheap evidence
+	-- available, so a big step up or down refuses the bridge -- a doorway sill is ~0.3 m and
+	-- passes, a drop off a gantry does not. Deliberately tighter than a survivable fall:
+	-- being wrong here walks the player off something.
+	gap_dy     = 1.0,
+	-- A bridged step is INFERRED walkable, not known walkable, so it costs more than a real
+	-- edge. Enough that the search prefers honest mesh wherever honest mesh exists, not so
+	-- much that it refuses a doorway -- the case this is for was 29 m against 178 m, and no
+	-- plausible surcharge changes that verdict.
+	gap_w      = 1.5,
+	-- WHICH GRAPH THE SEARCH WALKS (R2.37). "links" reads the level graph's own baked
+	-- adjacency, "probes" is the original directional walk. See expand_links below for the
+	-- measurements; "probes" is kept because it is what every earlier session was tuned
+	-- against and an A/B in game is the only way to be sure about path SHAPE.
+	graph      = "links",
+	-- Shortest edge worth taking. A directional probe can come back having barely moved and
+	-- that is not a useful edge; a LINK that barely moves is simply the grid pitch, which on
+	-- Anomaly's levels is 0.7 m but is a per-level header value and not guaranteed. So the
+	-- floor drops in link mode rather than silently discarding every edge on a fine grid.
+	min_step   = 0.5,
+	step_out   = 2.0,    -- metres between points handed to the renderer
+	pull       = true,   -- string-pull the coarse path before handing it over
+}
+
+-- Eight compass directions in XZ, built once. vertex_in_direction normalises
+-- and scales whatever it is given, so these only have to point the right way.
+local DIRS = nil
+local function dirs()
+	if DIRS then return DIRS end
+	DIRS = {}
+	local s = 0.70710678
+	local raw = { {1,0}, {s,s}, {0,1}, {-s,s}, {-1,0}, {-s,-s}, {0,-1}, {s,-s} }
+	for i = 1, 8 do DIRS[i] = vector():set(raw[i][1], 0, raw[i][2]) end
+	return DIRS
+end
+
+verbose = false
+
+-- The body is iqm_util.logger's: seven modules were each carrying the same two
+-- lines, differing only in the tag and in which flag gated them. The gate is a
+-- FUNCTION rather than a value because `verbose` is flipped at run time (MCM, and
+-- the harness), and capturing it once would freeze the logger at load-time state.
+local say = iqm_util.logger("[IQM-ROUTE] ", function() return verbose end)
+
+local function xz_dist(a, b)
+	local dx, dz = a.x - b.x, a.z - b.z
+	return sqrt(dx * dx + dz * dz)
+end
+
+-- --------------------------------------------------------------------------
+-- Binary heap (open set)
+-- --------------------------------------------------------------------------
+-- Parallel arrays rather than a table of pairs: one allocation for the whole
+-- queue instead of one per entry, which matters because A* pushes far more
+-- than it pops. Entries are never removed on improvement -- the same vertex can
+-- sit in the heap several times and the stale copies are skipped at pop, which
+-- is the standard lazy-deletion trade and cheaper than a decrease-key.
+local function heap_push(S, vid, f)
+	local hv, hf = S.hv, S.hf
+	local i = S.hn + 1
+	S.hn = i
+	hv[i], hf[i] = vid, f
+	while i > 1 do
+		local p = floor(i * 0.5)
+		if hf[p] <= hf[i] then break end
+		hv[p], hv[i], hf[p], hf[i] = hv[i], hv[p], hf[i], hf[p]
+		i = p
+	end
+end
+
+local function heap_pop(S)
+	local hv, hf, n = S.hv, S.hf, S.hn
+	if n == 0 then return nil end
+	local top = hv[1]
+	hv[1], hf[1] = hv[n], hf[n]
+	hv[n], hf[n] = nil, nil
+	n = n - 1
+	S.hn = n
+	local i = 1
+	while true do
+		local l, r, m = i + i, i + i + 1, i
+		if l <= n and hf[l] < hf[m] then m = l end
+		if r <= n and hf[r] < hf[m] then m = r end
+		if m == i then break end
+		hv[m], hv[i], hf[m], hf[i] = hv[i], hv[m], hf[i], hf[m]
+		i = m
+	end
+	return top
+end
+
+-- --------------------------------------------------------------------------
+-- Search state
+-- --------------------------------------------------------------------------
+local S     = nil       -- the live search, or nil when idle
+local state = "idle"    -- "idle" | "working" | "done" | "failed"
+local out   = nil       -- the finished route, as world points
+-- There is exactly ONE search, and two callers: the live driver (iqm_nav) and the
+-- F7 test drivers at the bottom of this file. Whoever calls search_begin last owns
+-- it, so both record a name and check it before stepping or consuming a result --
+-- otherwise a debug route fired while the live one is mid-search has each driver
+-- finishing the other's search and drawing it as its own.
+local owner = nil
+-- Set when a result is the BEST-EFFORT path rather than one that reached the goal:
+-- the search ran out of expansion budget and handed back how far it got. See the
+-- max_nodes branch in search_step for why that is an answer and not a failure.
+local partial = false
+-- ...and HOW FAR SHORT it stopped: the closest the search ever got to the goal, in metres.
+-- `partial` alone says a route ended early and not whether it ended early by a metre or by
+-- twenty, and those are different answers to the player: one is a route, the other is a
+-- confident line to a dead end. Kept beside `partial` because it is only meaningful with
+-- it, and published because iqm_nav cannot tell them apart without it (R2.33e).
+local closest = nil
+
+-- vertex_position allocates an Fvector per call, so cache per search: A* reads
+-- the same node's position once per expansion plus once per neighbour visit.
+local function vpos(S, vid)
+	local p = S.pos[vid]
+	if not p then
+		p = level.vertex_position(vid)
+		S.pos[vid] = p
+	end
+	return p
+end
+
+local function valid_vid(vid)
+	return vid ~= nil and vid ~= INVALID_VID
+end
+
+--- A link slot's answer, which needs BOTH sentinels tested -- see LINK_NONE. Separate from
+--  valid_vid because the two bindings genuinely disagree about what "nothing" is, and one
+--  function pretending otherwise is how this went unnoticed.
+local function valid_link(vid)
+	return vid ~= nil and vid ~= INVALID_VID and vid ~= LINK_NONE
+end
+
+--- How enclosed a node is: the mean of high_cover_in_direction over the eight compass
+--  directions, 0 (open on all sides) to 1 (boxed in).
+--
+--  This is the cheapest wall-proximity measure the engine offers and it costs no rays at
+--  all. The AI graph stores a 4-bit cover value per node per quadrant, baked at level
+--  compile time, and high_cover_in_direction interpolates between the two quadrants
+--  bracketing the direction asked for (level_graph_vertex_inline.h:636, normalised /15).
+--  Eight table lookups, against a ray_pick each -- which is why the search can afford to
+--  ask for every node it touches.
+--
+--  Cached per search: A* visits the same node once per expansion plus once per neighbour
+--  probe that lands on it, and the value cannot change while a search runs.
+local function cover_at(S, vid)
+	local c = S.cover[vid]
+	if c == nil then
+		c = 0
+		if level.high_cover_in_direction then
+			local D = dirs()
+			for k = 1, 8 do
+				c = c + level.high_cover_in_direction(vid, D[k])
+			end
+			c = c * 0.125
+		end
+		S.cover[vid] = c
+	end
+	return c
+end
+
+--- Offer `to_vid` as a successor of `from_vid`. Returns nothing; updates the
+--  search in place. `best` tracks the closest node reached so far, which is what
+--  a budget-exhausted search reports instead of nothing at all.
+local function consider(S, from_vid, from_pos, to_vid, mult)
+	if S.closed[to_vid] then return end
+	local tp   = vpos(S, to_vid)
+	local step = xz_dist(from_pos, tp)
+	if step < S.o.min_step then return end   -- barely moved; not a useful edge
+	-- Distance, surcharged for how enclosed the destination is (R2.23). Charged on the node
+	-- being ENTERED rather than on the edge, so it is a property of the ground and not of
+	-- how the search happened to arrive there. `mult` is the separate surcharge for an
+	-- INFERRED edge (R2.36) -- one bridged across a hole in the mesh rather than walked.
+	local ng = S.g[from_vid] + step * (1 + S.o.cover_w * cover_at(S, to_vid)) * (mult or 1)
+	local old = S.g[to_vid]
+	if old == nil or ng < old then
+		S.g[to_vid]    = ng
+		S.came[to_vid] = from_vid
+		local h = xz_dist(tp, S.goal)
+		heap_push(S, to_vid, ng + h * S.hw)
+		if h < S.best_h then S.best_h, S.best_vid = h, to_vid end
+	end
+end
+
+--- The one ray this module casts, built on first use. Statics only (flags = 2): a crate,
+--  a stalker or a car standing in a doorway must not convince the search the doorway is a
+--  wall, and walls are the only thing the question is about. Soft throughout -- an exe
+--  without ray_pick simply never bridges, and the search behaves exactly as it did before.
+local _gray, _gray_ok = nil, nil
+local _go, _gd, _gp   = vector(), vector(), vector()
+
+local function gray_ready()
+	if _gray then return true end
+	if _gray_ok == false then return false end
+	if ray_pick == nil then _gray_ok = false; return false end
+	local r = ray_pick()
+	r:set_flags(2)
+	_gray, _gray_ok = r, true
+	return true
+end
+
+-- Where to start looking for the far side. Below two cells is the short probe's job and it
+-- has already run; this only exists for the span the mesh genuinely does not describe.
+local GAP_MIN   = 1.4
+local GAP_STEP  = 0.7   -- the AI grid's own cell size on Anomaly's levels
+
+-- HOW MANY RAYS, AND WHY NOT ONE (R2.36a). The first version cast a single ray at chest
+-- height and the result was a route that hopped railings. A railing is not a wall: it is
+-- horizontal bars with air between them, and one ray threads that air about as often as it
+-- hits metal -- at 1.0 m it passes straight through the gap between a mid rail at ~0.55 and
+-- a top rail at ~1.05. Reported from play as "it jumps railings", which is the same defect
+-- as walking through a wall and worse, because it looks plausible.
+--
+-- So the strip must be clear at SEVERAL heights, all of them. The values bracket the bars
+-- rather than sitting between them, and the whole set is measured from the HIGHER end's
+-- floor, which is what keeps a doorway sill from blocking the low one -- see gap_link.
+--
+-- Cost is bounded and small: this only runs where both probes already failed, and the first
+-- blocked ray abandons the direction, so a wall costs one ray and only a genuine crossing
+-- pays for all of them. ~2 us each against a ~30 us expansion.
+local GAP_RAY_HS = { 0.30, 0.60, 1.00 }
+
+--- Try to step across an unmapped strip in direction `d` (R2.36).
+--
+--  Called only where the probes ran out, so the common case pays nothing at all. Cost when
+--  it does fire is bounded at ONE ray per direction: a wall close enough to block the
+--  nearest candidate blocks every farther one too, so the first blocked ray ends the search
+--  in that direction rather than retrying at each step.
+--  LANES, because a gap is not a line (R2.37a). Both ends of a bridge are quantised to the
+--  AI grid, so the far side is almost never exactly along the direction the near side ran
+--  out in. The doorway this whole feature was written for sits at (+1.4, +0.7) from its
+--  near node -- 27 degrees, neither cardinal nor diagonal -- and a single ray straight down
+--  the direction walks past it. That is what made link mode lose the doorway the moment
+--  gap_link went from an eight-way sweep to four aimed attempts: more precise aim, and the
+--  target was never on the axis.
+--
+--  So each direction samples three parallel lanes a cell apart. The centre lane first,
+--  because it is right whenever anything is. A lane found blocked at one distance is
+--  skipped at every greater one -- the wall that stopped it does not move -- which is what
+--  holds this to at most three rays per direction rather than nine.
+--  LANES ONLY WHERE THE ANGLES ARE MISSING. The probe expander already fires gap_link down
+--  eight compass directions, so it has the angular coverage lanes exist to supply; giving it
+--  lanes as well makes 24 candidates a node and it starts bridging round the doorway's own
+--  corner -- six harness checks failed the moment it was tried, including a leg clipping the
+--  wall. The link expander has four directions and needs them. So the caller says how many.
+local GAP_LAT = { 0.0, 0.7, -0.7 }
+
+local function gap_link(S, vid, p, d, lanes)
+	local o = S.o
+	if not (o.gap and o.gap > 0) or not gray_ready() then return end
+	lanes = lanes or 1
+	local ax, az = -d.z, d.x          -- perpendicular to d in the xz plane
+	local lane_out = { false, false, false }
+	local s = GAP_MIN
+	while s <= o.gap + 1e-3 do
+		for li = 1, lanes do
+			if not lane_out[li] then
+				local w = GAP_LAT[li]
+				_gp:set(p.x + d.x * s + ax * w, p.y, p.z + d.z * s + az * w)
+				local gvid = level.vertex_id(_gp)
+				if valid_vid(gvid) and gvid ~= vid and not S.closed[gvid] then
+					local gp = vpos(S, gvid)
+					local dy = gp.y - p.y
+					if dy < 0 then dy = -dy end
+					local dx, dz = gp.x - p.x, gp.z - p.z
+					local len = sqrt(dx * dx + dz * dz)
+					if dy <= o.gap_dy and len > 0.5 and len <= o.gap + GAP_STEP then
+						-- Cast from the HIGHER of the two ends. A doorway sill or a kerb
+						-- sits between them, and a ray launched from the low side at a
+						-- fixed height buries itself in the riser -- which would refuse
+						-- every stepped threshold in the game, i.e. exactly the case this
+						-- is written for.
+						local base = (gp.y > p.y) and gp.y or p.y
+						_gd:set(dx / len, 0, dz / len)
+						local clear = true
+						for h = 1, #GAP_RAY_HS do
+							_go:set(p.x, base + GAP_RAY_HS[h], p.z)
+							_gray:set_position(_go)
+							_gray:set_direction(_gd)
+							_gray:set_range(len)
+							if _gray:query() then clear = false; break end
+						end
+						if clear then
+							consider(S, vid, p, gvid, o.gap_w)
+							return
+						end
+						-- Solid at some height, in THIS lane. Retire the lane rather than
+						-- the whole direction: what stopped it cannot have moved by the
+						-- next distance out, and that is what keeps this to three rays a
+						-- direction instead of nine. The neighbouring lane may still be
+						-- open -- a doorway is precisely a gap in a wall, so its lanes
+						-- disagreeing is the normal case and not an edge one.
+						lane_out[li] = true
+					end
+				end
+			end
+		end
+		s = s + GAP_STEP
+	end
+end
+
+--- WHAT THE FOUR LINK SLOTS MEAN (R2.37). Measured in game across five adjacent vertices,
+--  every one agreeing: slot 0 is -x, 1 is +z, 2 is +x, 3 is -z. The mapping being FIXED is
+--  what makes the link graph useful for more than adjacency -- an INVALID link is not just
+--  "one fewer neighbour", it names the compass direction in which the mesh stops. That is
+--  exactly the input the gap bridge wants, and it turns bridging from an eight-way sweep
+--  into one attempt per boundary, aimed the right way by construction.
+local LDIR = {
+	[0] = vector():set(-1, 0,  0),
+	[1] = vector():set( 0, 0,  1),
+	[2] = vector():set( 1, 0,  0),
+	[3] = vector():set( 0, 0, -1),
+}
+
+--- Expand one node over the level graph's OWN adjacency (R2.37).
+--
+--  WHY THIS REPLACED THE PROBES. Everything the search does was measured per call, live:
+--
+--      level.vertex_link              0.00 us   free -- a baked array lookup
+--      level.high_cover_in_direction  0.00 us   free -- also baked
+--      level.vertex_position          0.33 us
+--      level.vertex_in_direction(8m)  2.00 us   x8-16 a node = 16-32 us
+--
+--  So vertex_in_direction was essentially the ENTIRE cost of the search, and the cover
+--  surcharge that R2.23 worried about is free. It marches the graph cell by cell on every
+--  call (CLevelGraph::farthest_vertex_in_direction); the links are already in memory. On
+--  the Bar's hard route that is 7857 expansions in 24 ms against 9382 in 319 ms -- the same
+--  problem, 13x faster, and the prototype did not even use a heap.
+--
+--  It is also more FAITHFUL, which matters more than the speed. An 8 m probe approximates
+--  connectivity by walking a straight line; the links ARE connectivity. Every artefact that
+--  came from the approximation -- a doorway missed because no probe direction threaded it,
+--  a corner quantised to 45 degrees, a diagonal that cut a wall the marching missed -- is
+--  gone by construction rather than by tuning.
+--
+--  What it costs: four-connectivity, so raw paths are Manhattan staircases. That is already
+--  handled downstream -- smooth() rounds the corners and string-pulling replaces the stairs
+--  with chords -- and it is the same machinery the probe paths needed anyway.
+--
+--  The freed budget is the real prize. At ~3 us a node instead of ~34, a search can afford
+--  several times the expansions for the same frame cost, and it is expansions that decide
+--  whether a route round a building is found at all (R2.35).
+local function expand_links(S, vid)
+	local p = vpos(S, vid)
+	for i = 0, 3 do
+		local nb = level.vertex_link(vid, i)
+		if valid_link(nb) and nb ~= vid then
+			consider(S, vid, p, nb)
+		else
+			-- The mesh stops this way. Either that is a wall, or it is a hole in the map
+			-- that only looks like one -- and LDIR says which way to ask (R2.36).
+			gap_link(S, vid, p, LDIR[i], #GAP_LAT)
+		end
+	end
+end
+
+--- Expand one node: eight long probes, plus a short probe in any direction the
+--  long one could not run. A truncated probe means the graph ran out that way --
+--  a wall, a drop, a doorway frame -- and that is precisely where an 8 m step is
+--  too coarse to find the gap. Spending the extra call only there keeps open
+--  ground at eight calls per node while still threading tight geometry.
+local function expand(S, vid)
+	local p = vpos(S, vid)
+	local D = dirs()
+	local probe, near = S.o.probe, S.o.probe_near
+	for k = 1, 8 do
+		local d = D[k]
+		local moved = 0
+		local nvid = level.vertex_in_direction(vid, d, probe)
+		if valid_vid(nvid) and nvid ~= vid then
+			moved = xz_dist(p, vpos(S, nvid))
+			consider(S, vid, p, nvid)
+		end
+		if moved < probe * 0.6 then
+			local svid = level.vertex_in_direction(vid, d, near)
+			if valid_vid(svid) and svid ~= vid then
+				local m2 = xz_dist(p, vpos(S, svid))
+				if m2 > moved then moved = m2 end
+				consider(S, vid, p, svid)
+			end
+		end
+		-- Still pinned after both probes: either a wall, or a hole in the map that only
+		-- LOOKS like one. gap_link tells those apart with a ray, and it is only reached in
+		-- the pinned case, so open ground still costs eight calls a node (R2.36).
+		if moved < GAP_MIN then gap_link(S, vid, p, d) end
+	end
+end
+
+--- Walk `came` back from `vid` to the start and return it forwards.
+local function rebuild(S, vid)
+	local rev, n = {}, 0
+	local guard = 0
+	while vid do
+		n = n + 1
+		rev[n] = vpos(S, vid)
+		vid = S.came[vid]
+		guard = guard + 1
+		if guard > 4096 then break end   -- came[] is a tree; belt and braces
+	end
+	local path = {}
+	for i = n, 1, -1 do path[n - i + 1] = rev[i] end
+	return path
+end
+
+--- Drop nodes the route does not need. A coarse path turns in 45 degree steps
+--  because the probes do; wherever a straight walk from i reaches i+2, the
+--  middle node is only there because of the direction quantisation and the
+--  route reads better without it. Uses the same probe primitive, so "can I walk
+--  straight there" is answered by the navmesh rather than by a raycast --
+--  a route must follow ground, not line of sight.
+-- Cover a pull may add before it is refused (R2.23). Small: the surcharge only bought a bow
+-- if the straightening is not allowed to take it back, and cover is a 4-bit value so the
+-- smallest real difference is 1/15.
+local PULL_TOL = 0.05
+local _mv = vector()      -- scratch for a probe origin (vertex_id copies what it is given)
+local _pdir = vector()    -- ...and for the give-up probe's direction (R2.33n)
+
+local function string_pull(S, path)
+	local n = #path
+	if n < 3 then return path end
+	-- Prefix sums of node cover, so a candidate span's mean costs O(1) instead of O(span)
+	-- (route-perf 4.6). The naive form re-derived level.vertex_id(path[q]) for every
+	-- interior node of every candidate k, and k grows as the reach extends -- ~578
+	-- vertex_id calls per outer iteration where 34 would do.
+	--
+	-- A parallel valid COUNT and not just the sum: a node whose vid is invalid is excluded
+	-- from both, and dividing by the span's length instead would quietly pull the mean
+	-- toward zero at exactly the ragged patches of mesh where the exclusion happens -- and
+	-- a mean pulled DOWN is a pull wrongly allowed, which is the failure R2.23 exists to
+	-- stop. Built eagerly over the whole node list rather than lazily per span: a span
+	-- reaches three probes, so nearly every interior node is asked for anyway, and one
+	-- linear pass is cheaper than the bookkeeping that would skip the few that are not.
+	local csum, ccnt
+	if S.o.cover_w > 0 then
+		csum, ccnt = {}, {}
+		local s, c = 0, 0
+		for q = 1, n do
+			local qv = level.vertex_id(path[q])
+			if valid_vid(qv) then s, c = s + cover_at(S, qv), c + 1 end
+			csum[q], ccnt[q] = s, c
+		end
+	end
+	local outp, m = { path[1] }, 1
+	local i = 1
+	local dir = vector()
+	while i < n do
+		local j = i + 1
+		-- The span's ORIGIN vertex is the same for every candidate k, so it is asked once
+		-- per outer iteration instead of once per candidate (route-perf 4.6). An invalid
+		-- origin used to break out of the k loop on its first pass, which is the same
+		-- thing as never entering it.
+		--
+		-- The guard cannot be mutation-proved and stays anyway: the loop body would break on
+		-- its first candidate regardless, because vertex_in_direction off an invalid vid
+		-- returns invalid. But that is the STUB's behaviour. Handing INVALID_VID to an
+		-- engine navmesh call is the shape that killed the Lua stack twice in this feature
+		-- (see the high_cover_in_direction note in docs/route-perf.md), and the pre-hoist
+		-- code never made that call either.
+		local vid = level.vertex_id(path[i])
+		if valid_vid(vid) then
+			-- reach as far ahead as a single straight walk allows
+			for k = i + 2, n do
+				local a, b = path[i], path[k]
+				local want = xz_dist(a, b)
+				if want > S.o.probe * 3 then break end   -- don't probe absurd spans
+				dir:set(b.x - a.x, 0, b.z - a.z)
+				local hit = level.vertex_in_direction(vid, dir, want)
+				if not valid_vid(hit) then break end
+				if xz_dist(vpos(S, hit), b) > 1.0 then break end
+				-- Walkable is not sufficient any more (R2.23). The search deliberately bows
+				-- away from walls, and a bow is exactly what string-pulling exists to remove:
+				-- the chord across it is shorter, straight, and perfectly walkable, so without
+				-- this the surcharge bought nothing at all. (Which it did, in the first version
+				-- of R2.23 -- the harness fixture caught it before it ever ran in game.)
+				--
+				-- So a pull also has to not make things worse: sample the cover at the chord's
+				-- midpoint against the mean of the nodes it would delete, and refuse if it is
+				-- higher. The midpoint alone because a pull spans at most three probes and is
+				-- straight -- if its middle is not against something, neither are its thirds.
+				if csum then
+					_mv:set((a.x + b.x) * 0.5, a.y, (a.z + b.z) * 0.5)
+					local mvid = level.vertex_id(_mv)
+					if not valid_vid(mvid) then break end
+					-- the nodes this pull would delete are the interior ones, i+1 .. k-1
+					local cnt = ccnt[k - 1] - ccnt[i]
+					if cnt > 0 and cover_at(S, mvid)
+					   > (csum[k - 1] - csum[i]) / cnt + PULL_TOL then break end
+				end
+				j = k
+			end
+		end
+		m = m + 1
+		outp[m] = path[j]
+		i = j
+	end
+	return outp
+end
+
+-- --------------------------------------------------------------------------
+-- Smoothing
+-- --------------------------------------------------------------------------
+-- The node list turns in 45 degree steps because the probes do: expand() fires eight
+-- compass directions, so every corner the search reports is quantised to one of them,
+-- and string_pull only removes the nodes a straight walk can skip -- it cannot make a
+-- corner that IS real any less angular. Drawn as a stroke, that reads as a folded ribbon
+-- rather than a path (the seventh session's word for it was "ghastly").
+--
+-- Chaikin corner cutting is the right tool: each pass replaces every leg by its 25% and
+-- 75% points, which turns a corner into an arc, converges toward a quadratic B-spline,
+-- costs one linear pass, and needs no trigonometry. Two passes take a 45 degree fold
+-- down to four shallow bends over a couple of metres.
+--
+-- WITH A NAVMESH VETO, which is the part that matters. Chaikin cuts corners INWARD --
+-- the curve stays inside the polyline's convex hull -- and inward at a doorway means
+-- into the jamb.
+--
+-- What has to be checked is the CHORD, not the two points on it. Checking only that the
+-- generated points stand on walkable ground passes the doorway case and cuts straight
+-- through the wall anyway: at a corner turned in a 1 m gap, both cut points sit in open
+-- floor either side of the opening and the new leg between them crosses the jamb. Caught
+-- by the doorway fixture in tools/route-harness, which is the reason it exists.
+--
+-- So the test is level.vertex_in_direction from one cut point toward the other -- "can
+-- the graph actually walk this" -- the same primitive string_pull uses to decide whether
+-- it may skip a node, and for the same reason: a route must follow ground, not line of
+-- sight. A corner whose cut fails keeps its original vertex, so the stroke is smooth in
+-- the open and sharp exactly where the geometry demands it.
+-- How far back from a corner the cut is taken. Chaikin's textbook form cuts at a
+-- FRACTION of each leg (25%), which is wrong here: the legs are 8 m probes and
+-- string-pulled spans of up to 24 m, so a quarter of one is a corner cut by five or six
+-- metres. The walkability veto would still pass it -- open ground is open ground -- but
+-- the drawn route would visibly ignore the corridor it is supposed to describe. Capping
+-- the cut in METRES rounds every corner over the same couple of metres of arc whatever
+-- the legs either side are doing, which is also what a walked path looks like.
+--
+-- The cut bounds how far the arc departs from the true corner: cut * |u + v| / 2 for the
+-- two unit leg directions, so at 1.5 m a right angle is rounded off by ~1.06 m and the
+-- 45 degree kink the probes actually produce by ~0.57 m. Both stay inside the corridor
+-- the route was found in, which is the constraint that sets this number.
+local SMOOTH_CUT = 1.5    -- metres: the most that may be cut off either side of a corner
+local SMOOTH_FRAC = 0.25  -- ...but never more than this fraction of a short leg
+local SMOOTH_TOL = 1.0    -- metres the walk may fall short along the chord
+local SMOOTH_DUP = 0.05   -- metres below which two consecutive points are the same one
+
+local _md = vector()      -- scratch for the probe direction (_mv, its origin, is above)
+
+--- Can the graph walk straight from (ax, az) to (bx, bz)? Also answers false when the
+--  start is off the mesh at all, which is why the cut points need no separate check.
+--
+--  Judged by how far the walk got ALONG the chord, not by how close it landed to the
+--  far end. Both ends of the probe are quantised to graph nodes -- the origin because
+--  vertex_id snaps the cut point to a node, the arrival because vertex_position hands
+--  back a node's centre -- so a perfectly good short chord routinely lands half a node
+--  off to the side. That lateral error is harmless and, at the length of a corner cut,
+--  is the same order as the chord itself; the shortfall ALONG the chord is what
+--  distinguishes "walked it" from "stopped at a wall".
+local function walkable(ax, ay, az, bx, bz)
+	local vid = level.vertex_id(_mv:set(ax, ay, az))
+	if not valid_vid(vid) then return false end
+	local dx, dz = bx - ax, bz - az
+	local want = sqrt(dx * dx + dz * dz)
+	if want < SMOOTH_DUP then return true end
+	local hit = level.vertex_in_direction(vid, _md:set(dx, 0, dz), want)
+	if not valid_vid(hit) then return false end
+	local v = level.vertex_position(hit)
+	local got = ((v.x - ax) * dx + (v.z - az) * dz) / want
+	return got >= (want - SMOOTH_TOL)
+end
+
+--- One Chaikin pass, expressed per CORNER rather than per leg, so a vetoed corner can
+--  keep its own vertex while its neighbours are still cut. Endpoints are kept: the route
+--  must still start where you are and end where the target is.
+--
+--  Cutting per corner also leaves the first and last legs uncut all the way to the first
+--  real corner, where the per-leg form would round the very start of the route. That is
+--  the better end anyway -- the stroke leaves your feet along the direction the search
+--  actually found.
+local function chaikin(path)
+	local n = #path
+	local out, m = {}, 0
+	-- A vetoed corner contributes its own vertex, and its neighbours may contribute cut
+	-- points very close to it; dropping duplicates keeps densify and the renderer's turn
+	-- accumulator from being fed zero-length legs.
+	local function add(p)
+		if m > 0 then
+			local q = out[m]
+			local dx, dz = p.x - q.x, p.z - q.z
+			if (dx * dx + dz * dz) < SMOOTH_DUP * SMOOTH_DUP then return end
+		end
+		m = m + 1
+		out[m] = p
+	end
+	--- Where the cut lands on the leg from the corner `b` out toward `p`: SMOOTH_FRAC of
+	--  the way, or SMOOTH_CUT metres, whichever is nearer the corner.
+	local function cut(b, p)
+		local dx, dy, dz = p.x - b.x, p.y - b.y, p.z - b.z
+		local len = sqrt(dx * dx + dz * dz)
+		if len < SMOOTH_DUP then return b.x, b.y, b.z end
+		local t = SMOOTH_FRAC
+		if len * t > SMOOTH_CUT then t = SMOOTH_CUT / len end
+		return b.x + dx * t, b.y + dy * t, b.z + dz * t
+	end
+
+	add(path[1])
+	for i = 2, n - 1 do
+		local a, b, c = path[i - 1], path[i], path[i + 1]
+		-- back along the leg into the corner, and forward along the leg out of it
+		local rx, ry, rz = cut(b, a)
+		local qx, qy, qz = cut(b, c)
+		if walkable(rx, ry, rz, qx, qz) then
+			add(vector():set(rx, ry, rz))
+			add(vector():set(qx, qy, qz))
+		else
+			add(b)
+		end
+	end
+	add(path[n])
+	return out
+end
+
+--- Round off the corners of a node list. Returns a NEW array (the caller's points are
+--  never mutated); hands back the input unchanged when there is nothing to cut or no
+--  graph to check against.
+--
+--  PASSES sets how many nodes the arc ends up with, and that -- not the renderer's
+--  sampling -- is what bounds how smooth the drawn corner can be. Each pass doubles the
+--  arc's node count and roughly halves the angle at each of its joints, and densify()
+--  only resamples the straight legs BETWEEN those nodes, so it cannot add a bend that
+--  smoothing did not put there. Two passes leave a right angle as four ~30 degree
+--  kinks, which still reads as folded; three take it to ~15, which is under the
+--  renderer's own TURN_TOL and therefore as smooth as the drawn stroke can be.
+function smooth(nodes, passes)
+	if not (nodes and #nodes >= 3) then return nodes end
+	if not (level and level.vertex_id) then return nodes end
+	local cur = nodes
+	for _ = 1, (passes or 3) do
+		if #cur < 3 then break end
+		cur = chaikin(cur)
+	end
+	say("smoothed %s nodes into %s", #nodes, #cur)
+	return cur
+end
+
+-- --------------------------------------------------------------------------
+-- Public: the search
+-- --------------------------------------------------------------------------
+
+function search_abort()
+	S, out, state, owner, partial, closest = nil, nil, "idle", nil, false, nil
+end
+
+function search_state()
+	return state
+end
+
+function search_owner()
+	return owner
+end
+
+function search_partial()
+	return partial
+end
+
+--- Metres from the goal the search actually reached, or nil if it never ran. 0-ish on a
+--  route that arrived; large on one that hit a barrier it could not get round.
+function search_closest()
+	return closest
+end
+
+function search_result()
+	return out
+end
+
+--- Start a search. Returns false (and goes straight to "failed") when either end
+--  is off the navmesh, which is a real case -- a target on a roof, a ladder, or
+--  the unmapped ground the AI mesh simply does not cover (R2.2f).
+function search_begin(from, to, opts)
+	if not (level and level.vertex_in_direction) then
+		state = "failed"
+		return false
+	end
+	local o = {}
+	for k, v in pairs(OPT) do o[k] = v end
+	if opts then for k, v in pairs(opts) do o[k] = v end end
+
+	local svid = level.vertex_id(from)
+	local gvid = level.vertex_id(to)
+	-- THE ACTOR'S POSITION IS NOT RELIABLY ON THE NAVMESH (R2.34). level.vertex_id is an
+	-- exact cell lookup and hands back INVALID for a point in a cell the AI map never got
+	-- a node for -- a doorway threshold, the lip of a step, the strip along a wall. The
+	-- player crosses those constantly. The engine does not lose the actor there:
+	-- actor:level_vertex_id() still names the node it is standing on, because that is
+	-- sticky state updated only on reaching a mapped cell. Only one of the two is
+	-- answerable from a bare position, and it is the wrong one.
+	--
+	-- Measured live on l05_bar, actor at (212.888, 0.429, 50.032):
+	--     level.vertex_id(actor:position()) -> 4294967295 (INVALID)
+	--     actor:level_vertex_id()           -> 52912, 0.87 m away, perfectly good
+	-- A goal 12.9 m off was fine and a plain BFS over vertex_link joined the two in 22
+	-- hops, yet this function refused the START and the search never ran at all.
+	--
+	-- THIS IS THE ROUTING-THROUGH-WALLS BUG. Refusing here leaves the LAST path up, and
+	-- that one was computed from wherever the actor stood when it last worked -- so the
+	-- marks cross whatever masonry lies between there and here. It is positional and
+	-- lasts exactly as long as the player stands still, which is why it "fixes itself"
+	-- on taking a step, why a fresh load in a bad spot is stuck until you walk about,
+	-- and why raising the node budget never moved it: the search was never running.
+	--
+	-- Only the START gets this. The goal is an arbitrary point in the world with no
+	-- engine-blessed vertex to fall back on; iqm_nav.mesh_goal ring-walks for that one.
+	if not valid_vid(svid) and db and db.actor then
+		local avid = db.actor:level_vertex_id()
+		if valid_vid(avid) then
+			local v = level.vertex_position(avid)
+			-- vertex_position returns a zero vector for an id it dislikes
+			-- (level_script.cpp:394-399), so the answer is re-tested, not trusted.
+			if v and not (v.x == 0 and v.y == 0 and v.z == 0) then
+				say("start off the navmesh: using the actor's own vertex, %s m away",
+					string.format("%.2f", xz_dist(from, v)))
+				from, svid = v, avid
+			end
+		end
+	end
+	if not (valid_vid(svid) and valid_vid(gvid)) then
+		say("no route: %s off the navmesh", valid_vid(svid) and "goal" or "start")
+		S, out, state, owner = nil, nil, "failed", nil
+		return false
+	end
+	owner, partial, closest = o.owner, false, nil
+
+	-- Which expander, resolved ONCE per search rather than per node, and falling back if
+	-- the binding is missing: level.vertex_link is not on every exe (R2.37). Resolved here
+	-- so an unknown `graph` value is a quiet fallback to the behaviour every earlier session
+	-- was tuned against, not a nil call fifty nodes into a search.
+	local use_links = (o.graph == "links") and level.vertex_link ~= nil
+	if use_links then
+		-- Only when the caller did not ask for one explicitly: a test or a driver passing
+		-- cover_w means that value, not "please retune it for me".
+		if opts == nil or opts.cover_w == nil then o.cover_w = o.cover_w_links end
+		-- A link step is the grid pitch, ~0.7 m on Anomaly but a per-level header value.
+		-- The probe-era floor of 0.5 would silently discard every edge on a finer grid,
+		-- which reads as "no route" rather than as a misconfiguration.
+		if o.min_step > 0.2 then o.min_step = 0.2 end
+	end
+
+	S = {
+		expand = use_links and expand_links or expand,
+		o = o,
+		goal = level.vertex_position(gvid),
+		goal_vid = gvid,
+		start_vid = svid,
+		hv = {}, hf = {}, hn = 0,
+		g = {}, came = {}, closed = {}, pos = {}, cover = {},
+		nodes = 0,
+		best_vid = svid, best_h = huge,
+	}
+	-- Deliberately NOT scaled up to compensate for the cover surcharge, though the
+	-- arithmetic invites it: g is now up to (1 + cover_w) times the distance travelled
+	-- while h is still plain distance, so the weight is a smaller fraction of the true
+	-- remaining cost than it was and the search explores more. Scaling it back was tried
+	-- and it is the wrong trade twice over -- it costs path quality to buy expansions, and
+	-- a greedier best-first search beelines and then FOLLOWS whatever obstacle it runs
+	-- into, which is the exact behaviour the surcharge exists to remove.
+	S.hw = o.h_weight
+	S.g[svid] = 0
+	S.best_h  = xz_dist(vpos(S, svid), S.goal)
+	heap_push(S, svid, S.best_h * S.hw)
+	out, state = nil, "working"
+	return true
+end
+
+--- Advance the search by at most `budget` node expansions. Returns the new
+--  state. Budgeted rather than run-to-completion so a long search can be spread
+--  across frames the way the card scanner spreads its own work.
+function search_step(budget)
+	if state ~= "working" then return state end
+	budget = budget or 40
+	local o = S.o
+	for _ = 1, budget do
+		local vid = heap_pop(S)
+		if not vid then
+			say("open set exhausted after %s nodes -- no route", S.nodes)
+			state = "failed"
+			return state
+		end
+		if not S.closed[vid] then
+			S.closed[vid] = true
+			S.nodes = S.nodes + 1
+
+			if xz_dist(vpos(S, vid), S.goal) <= o.arrive then
+				local path = rebuild(S, vid)
+				if o.pull then path = string_pull(S, path) end
+				out, state = path, "done"
+				closest = xz_dist(vpos(S, vid), S.goal)
+				say("route found: %s nodes explored, %s points", S.nodes, #path)
+				return state
+			end
+
+			if S.nodes >= o.max_nodes then
+				-- Out of expansion budget. Hand back the best-effort path -- how far
+				-- toward the goal we actually got -- rather than nothing.
+				--
+				-- `best_vid` has been maintained for exactly this since the first
+				-- version (see consider()), and then thrown away, which is why a
+				-- distant target produced no route at all instead of a route that
+				-- ran out partway. For a navigation aid the partial IS the answer:
+				-- the caller only ever draws the first few tens of metres anyway, so
+				-- a path that stops short is indistinguishable from a complete one.
+				--
+				-- Note this ALSO catches the genuinely-unreachable goal, because a
+				-- sealed region reaches max_nodes before it exhausts its frontier. So
+				-- an unreachable target now yields "as close as the mesh gets"
+				-- rather than nothing, and the caller is told which it got via
+				-- search_partial(). That is the right trade for navigation: being
+				-- walked to the building whose interior the mesh does not cover is
+				-- useful, and the beacon still marks where the target actually is.
+				-- A partial is always a REAL walkable path, never a straight line at
+				-- the goal, so it cannot cut through the geometry that stopped it.
+				local path = rebuild(S, S.best_vid)
+				if #path >= 2 then
+					if o.pull then path = string_pull(S, path) end
+					out, state, partial, closest = path, "done", true, S.best_h
+					-- WHERE it stopped, not just how far short (R2.33g). A closest approach
+					-- that is FLAT across budgets is a barrier rather than a shortfall, and
+					-- the barrier's shape is the diagnosis: a height step between the best
+					-- node and the goal means stairs, a platform or a ladder -- ground the
+					-- AI graph does not traverse (R2.2f) -- where a purely horizontal gap
+					-- means a doorway the expansion probes never landed in.
+					local bp = vpos(S, S.best_vid)
+					-- DOES THE GRAPH GO ANY FURTHER (R2.33n)? "Unreachable" has two very
+					-- different meanings and this separates them. One probe from the best
+					-- node straight at the goal: if it moves, the mesh continues that way
+					-- and the search simply never went there -- our problem. If it does
+					-- not move at all, the level graph STOPS at that node, and no budget,
+					-- probe scheme or heuristic will ever cross it -- the level's problem,
+					-- and R2.2f's accepted limit rather than a defect here.
+					--
+					-- Worth the one call: a player can walk ground the AI mesh does not
+					-- cover, so "there is a clear path to that location" and "the search
+					-- cannot get there" are both true at once, and only this tells you
+					-- which side of that line you are on.
+					local reach = 0
+					if level.vertex_in_direction then
+						local gx, gz = S.goal.x - bp.x, S.goal.z - bp.z
+						local gl = sqrt(gx * gx + gz * gz)
+						if gl > 1e-3 then
+							_pdir:set(gx / gl, 0, gz / gl)
+							local nv = level.vertex_in_direction(S.best_vid, _pdir, gl)
+							if valid_vid(nv) and nv ~= S.best_vid then
+								reach = xz_dist(bp, vpos(S, nv))
+							end
+						end
+					end
+					say("gave up after %s nodes; partial route of %s points (closest approach %s m, %s m of height to the goal, mesh continues %s m toward it)",
+						S.nodes, #path, string.format("%.1f", S.best_h),
+						string.format("%.2f", (S.goal.y or 0) - (bp.y or 0)),
+						string.format("%.2f", reach))
+					return state
+				end
+				say("!gave up after %s nodes with nowhere to go (closest approach %s m)",
+					S.nodes, string.format("%.1f", S.best_h))
+				state = "failed"
+				return state
+			end
+
+			S.expand(S, vid)
+		end
+	end
+	return state
+end
+
+--- Run a search to completion right now. For the harness and the debug drivers;
+--  the game path should step it instead.
+function route_now(from, to, opts)
+	if not search_begin(from, to, opts) then return nil end
+	local guard = 0
+	while search_step(200) == "working" do
+		guard = guard + 1
+		if guard > 200 then break end   -- max_nodes should bite long before this
+	end
+	return out
+end
+
+--- Resample a coarse node list so the renderer gets points every `step` metres.
+--  The ribbon snaps each point onto the navmesh, so this is what lets it drape
+--  over ground that rises and falls between two nodes 8 m apart instead of
+--  cutting a straight chord through the hill.
+function densify(nodes, step)
+	if not (nodes and #nodes >= 2) then return nodes end
+	step = step or OPT.step_out
+	local outp, m = {}, 0
+	for i = 1, #nodes - 1 do
+		local a, b = nodes[i], nodes[i + 1]
+		local len = xz_dist(a, b)
+		-- ceil, not floor: flooring a 3.9 m leg at a 2 m step gives ONE interval
+		-- of 3.9 m, i.e. nearly double the spacing that was asked for, and the
+		-- ribbon's occlusion cull quantises to exactly this spacing.
+		local n = max(1, ceil(len / step))
+		-- emit [a, b) here; the final point is appended once at the end, so
+		-- joints are not duplicated
+		for k = 0, n - 1 do
+			local t = k / n
+			m = m + 1
+			outp[m] = vector():set(a.x + (b.x - a.x) * t,
+			                       a.y + (b.y - a.y) * t,
+			                       a.z + (b.z - a.z) * t)
+		end
+	end
+	m = m + 1
+	outp[m] = vector():set(nodes[#nodes])
+	return outp
+end
+
+-- --------------------------------------------------------------------------
+-- Clearance
+-- --------------------------------------------------------------------------
+-- The cover surcharge in the search decides which WAY round a space to go; it cannot
+-- decide where in a two-metre corridor to walk, because the search only ever stands on
+-- graph nodes and steps between them in 8 m hops. So the last metre is a separate pass,
+-- run on the DENSE point list after smoothing: push each point directly away from whatever
+-- is crowding it.
+--
+-- The push direction is a gradient, not a wall normal: sum the eight compass directions
+-- weighted by the cover in each and negate. Two useful properties fall out of that. A
+-- corridor is symmetric, so the sum cancels and a point in the middle of one is left where
+-- it is -- exactly right, since it is already as clear as it can be. And an inside corner
+-- pushes diagonally, out along the bisector, without anything having to identify a corner.
+--
+-- Every push is PERMISSIONED against the navmesh before it is taken, and taken whole or not
+-- at all -- see the test at the bottom for why that one is a node lookup rather than the
+-- directional probe every other reachability question here uses.
+--
+-- Offsets are computed for every point first and then SMOOTHED along the path before being
+-- applied. Cover is quantised to the AI grid (0.7 m cells, 4 bits per quadrant), so raw
+-- per-point offsets step as the points cross cell boundaries, and a stroke drawn through
+-- them picks up a visible ripple. A three-tap average costs nothing and removes it.
+local CLR_MAX  = 0.75   -- m: the most any one point may be moved
+local CLR_REF  = 1.20   -- gradient magnitude that earns the full push
+local CLR_MIN  = 0.12   -- m: below this the push is not worth an engine call
+local CLR_ENDS = 2      -- points at each end left alone; see below
+local CLR_TOL  = 0.9    -- m: how near a node's centre must be to count as "inside it"
+
+--- Push `pts` away from nearby geometry, in place, and return it.
+--
+--  The first and last CLR_ENDS points are never moved. The ends of a route are the actor's
+--  own feet and the target's, and a route that starts half a metre to the left of you --
+--  or points at the wall beside the trader rather than at the trader -- is worse than one
+--  that hugs a corner in the middle.
+function clearance(pts, opts)
+	local n = pts and #pts or 0
+	if n < CLR_ENDS * 2 + 1 then return pts end
+	if not (level and level.high_cover_in_direction and level.vertex_id) then
+		return pts
+	end
+	local o = opts or {}
+	local wmax = o.clr_max or CLR_MAX
+	if wmax <= 0 then return pts end
+	local D = dirs()
+	local ox, oz = {}, {}                 -- the offset chosen for each point
+
+	for i = 1, n do
+		ox[i], oz[i] = 0, 0
+		if i > CLR_ENDS and i <= n - CLR_ENDS then
+			local p = pts[i]
+			local vid = level.vertex_id(p)
+			if valid_vid(vid) then
+				local gx, gz = 0, 0
+				for k = 1, 8 do
+					local c = level.high_cover_in_direction(vid, D[k])
+					gx = gx - D[k].x * c
+					gz = gz - D[k].z * c
+				end
+				local m = sqrt(gx * gx + gz * gz)
+				if m > 1e-4 then
+					local want = wmax * (m < CLR_REF and (m / CLR_REF) or 1)
+					if want >= CLR_MIN then
+						ox[i], oz[i] = gx / m * want, gz / m * want
+					end
+				end
+			end
+		end
+	end
+
+	-- Smooth the offsets along the path (see above), then apply. Two arrays rather than
+	-- one so a smoothed offset never feeds into its neighbour's average.
+	local sx, sz = {}, {}
+	for i = 1, n do
+		local a = (i > 1) and (i - 1) or 1
+		local b = (i < n) and (i + 1) or n
+		sx[i] = (ox[a] + ox[i] * 2 + ox[b]) * 0.25
+		sz[i] = (oz[a] + oz[i] * 2 + oz[b]) * 0.25
+	end
+
+	for i = CLR_ENDS + 1, n - CLR_ENDS do
+		if sqrt(sx[i] * sx[i] + sz[i] * sz[i]) >= CLR_MIN then
+			local p = pts[i]
+			local nx, nz = p.x + sx[i], p.z + sz[i]
+			-- Permission, R2.15's test applied to the DESTINATION: a node exists there AND
+			-- its centre is within half a cell of the point, which is what distinguishes
+			-- "inside mapped floor" from "the nearest mapped floor to a point over a void".
+			--
+			-- Deliberately not a vertex_in_direction probe, which is what every other
+			-- reachability question here uses. The push direction is derived from cover, so
+			-- it points AWAY from geometry by construction and cannot be aimed at a wall;
+			-- what it can be aimed at is a drop -- the open side of a catwalk or a ledge has
+			-- no cover either -- and a drop is exactly what this test catches. It also saves
+			-- the expensive call on every point of the path.
+			local vid = level.vertex_id(vector():set(nx, p.y, nz))
+			if valid_vid(vid) then
+				local v = level.vertex_position(vid)
+				local dx, dz = v.x - nx, v.z - nz
+				if dx * dx + dz * dz <= CLR_TOL * CLR_TOL then
+					p:set(nx, p.y, nz)
+				end
+			end
+		end
+	end
+	return pts
+end
+
+-- --------------------------------------------------------------------------
+-- Test drivers
+-- --------------------------------------------------------------------------
+-- Feedback goes to the F7 debugger's console when it is around (its send_output
+-- mirrors to the log too), else straight to the log. Body in iqm_util.dbg_out;
+-- called through the namespace rather than aliased, since it is never hot.
+
+-- The driver kicks off a real budgeted search and lets the per-frame step drive
+-- it, rather than calling route_now, so what gets tested in game is the code
+-- path the feature will actually use.
+local pending = false
+local STEP_BUDGET = 40      -- node expansions per frame while a search is live
+local DBG_OWNER   = "debug"
+
+-- True from the moment a debug route is asked for until it is cleared. iqm_nav
+-- parks itself while this holds, so the ribbon and the search belong to whoever
+-- is standing in the Zone pressing F7 rather than being fought over.
+local debug_hold = false
+function debug_active()
+	return debug_hold
+end
+
+local function on_search_done()
+	local pts = out
+	if not (pts and #pts >= 2) then
+		iqm_util.dbg_out("!IQM-ROUTE: no route")
+		return
+	end
+	-- same smooth -> densify chain the live driver runs, so what F7 draws is what the
+	-- feature draws
+	local dense = clearance(densify(smooth(pts), 2.0))
+	if iqm_pathline then
+		iqm_pathline.show(dense, { ties = 5, cull = true })
+	end
+	local len = 0
+	for i = 1, #pts - 1 do len = len + xz_dist(pts[i], pts[i + 1]) end
+	iqm_util.dbg_out("-IQM-ROUTE: %s nodes -> %s points over %s m",
+		#pts, #dense, string.format("%.1f", len))
+end
+
+--- Route from your feet to whatever you are aiming at (or 40 m down the camera
+--  ray) and draw it, depth-culled. Aim through a doorway or round a building:
+--  the interesting question is whether the coarse probe finds the gap (R2.2b).
+function debug_route()
+	if not db.actor then return end
+	local from = db.actor:position()
+	local obj  = level.get_target_obj and level.get_target_obj()
+	local to
+	if obj then
+		to = obj:position()
+	else
+		local d = device()
+		to = vector():set(d.cam_pos.x + d.cam_dir.x * 40,
+		                  d.cam_pos.y + d.cam_dir.y * 40,
+		                  d.cam_pos.z + d.cam_dir.z * 40)
+	end
+	-- the hold parks the live route (iqm_nav reads debug_active), so it must not
+	-- be taken until the search is actually ours -- an aim at the sky returns
+	-- below, and a hold left set here would kill the player's route for good
+	if not search_begin(from, to, { owner = DBG_OWNER }) then
+		iqm_util.dbg_out("!IQM-ROUTE: one end is off the navmesh")
+		return
+	end
+	debug_hold = true
+	pending = true
+	iqm_util.dbg_out("-IQM-ROUTE: searching to %s m away%s",
+		string.format("%.1f", xz_dist(from, to)),
+		obj and (" (" .. obj:name() .. ")") or "")
+end
+
+function debug_route_clear()
+	pending, debug_hold = false, false
+	search_abort()
+	if iqm_pathline then iqm_pathline.hide() end
+	iqm_util.dbg_out("-IQM-ROUTE: cleared -- the live route may take the ribbon back")
+end
+
+-- --------------------------------------------------------------------------
+-- Wiring
+-- --------------------------------------------------------------------------
+local function actor_on_update()
+	if not pending then return end
+	-- only step a search that is still ours (see `owner` above)
+	if owner ~= DBG_OWNER then pending = false; return end
+	local st = search_step(STEP_BUDGET)
+	if st == "working" then return end
+	pending = false
+	if st == "done" then
+		on_search_done()
+	else
+		iqm_util.dbg_out("!IQM-ROUTE: search failed (target unreachable or off-mesh)")
+	end
+end
+
+function on_game_start()
+	-- The once-per-process flag and the launcher guard live in iqm_util; the list is
+	-- the only part that was ever this module's own.
+	iqm_util.inject_actions("iqm_route", {
+		{ name = "IQM: Route To Aim Point", functor = { debug_route },       hide_ui = 2 },
+		{ name = "IQM: Route Clear",        functor = { debug_route_clear }, hide_ui = 2 },
+	})
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end

@@ -1,0 +1,862 @@
+-- ======================================================================
+--  Immersive Quest Markers: world-space polyline (PROTOTYPE)
+-- ======================================================================
+-- Draws a polyline in WORLD space, in real 3D, using the engine's script
+-- gizmo queue (debug_render). This is the renderer half of the "AR route
+-- to the quest giver" idea, deliberately built and testable on its own,
+-- with no pathfinding attached: hand it a list of world points and it
+-- paints them as a ribbon on the ground.
+--
+-- Why debug_render and not the card renderer in iqm_core:
+--   * It is genuinely 3D. Perspective, foreshortening and the horizon are
+--     the engine's problem, not ours; a ground ribbon 200 m out converges
+--     the way a painted line should. The UI-strip trick the cards use
+--     (project both ends, rotate a CUIStatic between them) only fakes that.
+--   * Despite the name it is NOT debug-build-only. CLevel::ScriptDebugRender
+--     is called unconditionally from CLevel::OnRender (Level.cpp:1304, outside
+--     the #ifdef DEBUG block below it) and m_debug_renderer is constructed in
+--     release (Level.cpp:258). Shipped GAMMA addons rely on it in normal play
+--     (Hideout Furniture's placement gizmos, Demonized's Ledge Grabbing).
+--
+-- What it costs us: the gizmo renderer emits an untextured 1-pixel line list
+-- (m_WireShader, D3DPT_LINELIST, dxDebugRender.cpp:55). There is no such
+-- thing as a thick or textured line here. So a "ribbon" is faked by drawing
+-- several parallel rails a fixed WORLD distance apart, which also means the
+-- ribbon narrows with distance on its own -- correct behaviour for something
+-- painted on the ground, and free.
+--
+-- SETTLED (2026-08-13, confirmed in-game and then in the engine source). The
+-- gizmo wire's render state is fixed in C++ at Blender_Editor_Wire.cpp:59 --
+--     C.r_Pass("editor", "simple_color", FALSE, FALSE, FALSE)
+-- against r_Pass(vs, ps, bFog, bZtest=TRUE, bZwrite=TRUE, bABlend=FALSE, ...)
+-- (Blender_Recorder.h:151), i.e. bZtest=FALSE, bZwrite=FALSE, bABlend=FALSE:
+--   * NO DEPTH TEST. The ribbon draws over every wall. Good for a through-wall
+--     objective beacon; wrong for a route meant to look painted on the ground,
+--     which needs either raycast culling on top or a different renderer.
+--   * NO ALPHA BLEND. Colour alpha is ignored, so fade_steps below is INERT --
+--     fading has to be done by dropping segments, not by dimming them.
+-- "editor"/"simple_color" are the shader programs; the state comes from the C++
+-- blender, NOT from anything in gamedata/shaders, so no mod can change it.
+-- See docs/ar-navigation.md.
+--
+-- RESOLVED (2026-08-13, R2.1). The alternative renderer -- particles, which DO
+-- depth-test -- was ruled out on three counts: particles_object exposes no tint
+-- and no scale (script_particles_script.cpp:19-40), so an effect can only be used
+-- exactly as authored; no effect in the library reads as a ground marker; and the
+-- effect library is one monolithic gamedata/particles.xr, so shipping our own
+-- would wholesale replace whichever particle mod won the load order. A name that
+-- isn't in the user's library is a hard R_ASSERT3 fatal (r4.cpp:743), not a
+-- catchable error, which makes borrowing one unsafe across a modpack anyway.
+-- So depth for F2 is done HERE, by raycast culling: see the cull_* options.
+--
+-- Public API (all soft: every entry point no-ops if debug_render is absent,
+-- e.g. on a bare Anomaly exe without the modded binaries):
+--   iqm_pathline.show(points, opts)   -- points: array of vector, >= 2
+--   iqm_pathline.hide()               -- stop drawing, keep the gizmos parked
+--   iqm_pathline.clear()              -- drop the gizmos entirely
+--   iqm_pathline.is_shown()
+--   iqm_pathline.is_available()       -- false on an exe without debug_render
+--   iqm_pathline.suppress(on)         -- blank without dropping the geometry
+--   iqm_pathline.snap(points, lift)   -- pull points onto the AI navmesh
+--   iqm_pathline.sample(a, b, step)   -- straight A->B sampled every `step` m
+--
+-- Test drivers (F7 -> Execute tab, or the Lua execute box):
+--   iqm_pathline.debug_hide()
+--   iqm_pathline.debug_clear()
+--
+-- Logic is covered offline by tools/pathline-harness/harness.lua (rail geometry,
+-- pool reuse, the line cap, fade bucketing, snap tolerances, and recovery from
+-- the queue wipe): luajit tools/pathline-harness/harness.lua
+
+local floor, sqrt, abs, min, max = math.floor, math.sqrt, math.abs, math.min, math.max
+
+-- Gizmo id namespace. Ids are global across every mod using debug_render, and
+-- add_object silently evicts whatever already holds an id, so pick a range no
+-- one else is in: Weapon Cover Tilt sits at 71000+, Hideout Furniture lower.
+local ID_BASE   = 815000
+local MAX_LINES = 512     -- hard cap on gizmos we will ever hold (see push)
+
+-- Per-frame liveness probe reads this id; it is always the first one we create.
+local PROBE_ID  = ID_BASE + 1
+
+local OPT = {
+	-- IQM's accent gold (224, 196, 122) in the 0..1 floats fcolor wants
+	r = 0.878, g = 0.769, b = 0.478, a = 1.0,
+
+	-- `width` + `rails` do double duty, and which of the two jobs they are doing is
+	-- just a matter of scale:
+	--   wide + few rails  -> a RIBBON: separate lines with ground visible between them
+	--   narrow + few rails -> a STROKE: rails a couple of centimetres apart merge into
+	--     one bold line by a few metres out, which is the only way to get a line
+	--     thicker than 1 px out of this renderer (see the header)
+	-- The route uses the second. Nothing extra is needed for it: rails = 3,
+	-- width = 0.04 IS the bold stroke.
+	width      = 0.55,  -- metres: full width of the ribbon on the ground
+	rails      = 4,     -- parallel lines spanning that width (1 = a single hairline)
+	lift       = 0.10,  -- metres above the navmesh, so the line isn't z-fighting the floor
+	snap       = true,  -- pull each point onto the AI navmesh before drawing
+	ties       = 0,     -- metres between cross-ties (0 = none); reads as a track/ladder
+
+	-- Chevrons: the "axis of advance" mark off a military map, lying flat on the
+	-- ground and pointing the way the path runs. Two straight arms is precisely what
+	-- a wire renderer is good at, and direction is the one thing a bare line cannot
+	-- say -- which end of it is the way to the target.
+	arrows     = 0,     -- metres between chevrons along the path (0 = none)
+	arrow_len  = 0.6,   -- metres tip to back
+	arrow_wide = 0.5,   -- metres across the back
+	-- Thickness, by the same trick the stroke uses: draw the chevron a few times,
+	-- nested a couple of centimetres apart ALONG the path. Offsetting along travel
+	-- rather than across it keeps the arms parallel to themselves, so the mark
+	-- thickens instead of smearing into a wedge.
+	arrow_bold = 3,
+	arrow_gap  = 0.025,
+
+	-- Occlusion culling. The wire shader has no depth test (see the header), so
+	-- "is this bit of ground actually visible" has to be answered by us, with a
+	-- ray, and applied by blanking segments. This is what turns the through-wall
+	-- prototype into a depth-respecting ground ribbon -- F2's whole premise.
+	-- Approximate by construction: a segment is drawn only when BOTH its ends are
+	-- visible, so the granularity of the occlusion edge is the point spacing.
+	cull       = false, -- off by default so the prototype's original look is intact
+	cull_rate  = 8,     -- points re-tested per frame, round-robin
+	cull_tol   = 0.30,  -- metres of slack at the camera end of the ray
+	cull_lift  = 0.25,  -- EXTRA metres for the ray origin only (see cull_test)
+	cull_grace = 200,   -- ms a point must stay occluded before it is actually hidden
+
+	-- What an occluded segment does. nil hides it outright: the honest depth read,
+	-- and what the prototype was judged on. A number 0..1 instead keeps it drawn in
+	-- the colour scaled by that factor -- the ordinary AR treatment, where hidden
+	-- geometry goes dim rather than absent.
+	--
+	-- Worth being explicit about the trade, because it reverses a decision: dimming
+	-- means you CAN see the route through a building. For the route driver that is
+	-- the point -- it only draws when the target is out of sight, so the stretch
+	-- going round the building is exactly the stretch the cull was blanking, i.e.
+	-- the feature was hiding itself precisely when it was needed. Dimming keeps the
+	-- depth cue and keeps the line.
+	--
+	-- Costs one extra draw call and nothing else: the gizmo renderer batches its
+	-- line list by colour (dxDebugRender.cpp:48-59), so two colours is two batches
+	-- however many segments are in each.
+	cull_dim   = nil,
+
+	-- Distance fade. INERT: the wire shader has alpha blending off (see the
+	-- header), so varying alpha changes nothing on screen. Kept because the
+	-- bucketing is still the right shape if this ever moves to a renderer that
+	-- does blend -- the gizmo renderer batches its line list BY COLOUR and issues
+	-- one draw call per distinct colour (dxDebugRender.cpp:48-59), so a smooth
+	-- per-segment gradient would cost one draw call per segment.
+	-- Leave at 1 (one colour, one draw call). To actually fade, drop segments.
+	fade_steps = 1,
+	fade_near  = 25,    -- metres: full alpha within this range of the camera
+	fade_far   = 70,    -- metres: floor alpha at/after this range
+	fade_min   = 0.25,  -- alpha multiplier at fade_far
+}
+
+-- Navmesh snapping sanity limits. level.vertex_id finds the nearest node in XZ,
+-- so on a slope a legitimate answer can sit a couple of metres below the query
+-- point; but an answer far away horizontally means the point is off the mesh
+-- (inside geometry, over a void) and snapping it would yank the ribbon sideways.
+local SNAP_MAX_XZ = 1.5
+local SNAP_MAX_Y  = 5.0
+
+local INVALID_VID = 4294967295   -- u32(-1), what level.vertex_id returns on a miss
+
+verbose = false   -- set true to have the module narrate to the log
+
+-- --------------------------------------------------------------------------
+-- State
+-- --------------------------------------------------------------------------
+local available = nil    -- nil = not probed yet, false = no debug_render on this exe
+local pool      = {}     -- [i] = DBG_ScriptLine handle, or nil if not created yet
+local held      = 0      -- how many gizmos we believe exist in the engine's queue
+local segs      = {}     -- [i] = {a, b, col, pa, pb}: what to draw (pa/pb index pts)
+local shown     = false  -- is the ribbon meant to be visible right now
+local blanked   = false  -- ...but suppressed this frame (HUD hidden / PDA open)
+-- Caller-side blanking, on top of the HUD rule this module applies itself. The
+-- driver (iqm_nav) owns the mod's other overlay gates -- the reveal hotkey and the
+-- fullscreen PDA -- and neither is visible from here, so it pushes its verdict in
+-- rather than this file growing a second opinion about when the HUD is up.
+local ext_blank = false
+
+-- Occlusion cull state. `pts` is the point list the current segs were built from
+-- (post-snap, so the ray tests the geometry we actually drew). vis[i] is the
+-- applied verdict for point i -- absent means visible, which is what makes the
+-- whole cull vanish cleanly when it is switched off. occ_since[i] is when point i
+-- FIRST tested occluded, for the grace window.
+local pts       = {}
+local vis       = {}
+local occ_since = {}
+local cull_on   = false  -- resolved per show() from opts.cull
+local cull_i    = 0      -- round-robin cursor over pts
+local cull_opt  = OPT    -- the option table the live ribbon was drawn with
+-- The colour occluded segments take instead of vanishing, or nil to vanish.
+-- Built once per show() from opts.cull_dim; shared by every dimmed segment so the
+-- renderer's colour batching sees one extra value, not one per segment.
+local dim_col   = nil
+
+-- The body is iqm_util.logger's: seven modules were carrying the same two lines,
+-- differing only in the tag and in which flag gated them. The gate is a FUNCTION
+-- rather than a value because `verbose` is flipped at run time, and capturing it
+-- once would freeze the logger at whatever it was when the file loaded.
+local say = iqm_util.logger("[IQM-PATH] ", function() return verbose end)
+
+-- --------------------------------------------------------------------------
+-- Gizmo pool
+-- --------------------------------------------------------------------------
+-- Handles are C++ pointers with no lifetime guarantees on the Lua side, and the
+-- engine wipes the whole queue out from under us on save load and on new game
+-- (CLevel::OnAlifeSimulatorLoaded / OnAlifeSimulatorUnLoaded both call
+-- delete_data(m_debug_render_queue), Level.cpp:1774,1781). Touching a stale
+-- handle after that is a dangling read, i.e. a crash. So: never assume the pool
+-- survived a frame boundary. tick() probes one id per frame and rebuilds the
+-- whole pool if the queue went away, which covers every wipe path at once
+-- without us having to enumerate the callbacks that might cause one.
+local function drop_pool()
+	pool, held = {}, 0
+end
+
+-- Confirm the handles we hold are still the engine's before dereferencing any of
+-- them. Probing a single id is enough because the wipe takes the whole map, and
+-- get_object answers nil for a missing id rather than handing back the stale
+-- pointer, so this read is itself safe. Returns false if the pool was stale --
+-- in which case it has been dropped and the caller is starting from nothing.
+--
+-- EVERY path that writes through a pooled handle goes through here first. Doing
+-- it only in the per-frame tick was not enough: show() can land between a load
+-- and the next tick (a callback firing on the load frame), and that write would
+-- go to freed memory.
+local function revalidate()
+	if held > 0 and not debug_render.get_object(PROBE_ID) then
+		say("gizmo queue was wiped (save load?) -- dropping %s stale handles", held)
+		drop_pool()
+		return false
+	end
+	return true
+end
+
+local function ensure(i)
+	local h = pool[i]
+	if h then return h end
+	h = debug_render.add_object(ID_BASE + i, DBG_ScriptObject.line)
+	if not h then return nil end
+	h = h:cast_dbg_line()
+	h.hud     = false        -- world projection, not the weapon/HUD one
+	h.visible = false
+	pool[i] = h
+	if i > held then held = i end
+	return h
+end
+
+-- The two reasons the whole ribbon goes dark: this module's own HUD rule, and
+-- whatever the driver pushed through suppress(). One place, so push(), suppress()
+-- and tick() can never disagree about which is in force.
+local function want_shown()
+	if ext_blank then return false end
+	return main_hud_shown == nil or main_hud_shown()
+end
+
+-- Should this segment be on screen right now? A segment spans two path points
+-- and is drawn only when the camera can see BOTH of them, so a segment crossing
+-- an occlusion edge is dropped whole rather than clipped -- the documented
+-- approximation, whose granularity is the point spacing. `vis` is keyed by point
+-- index and only ever holds `false`, so with culling off this is one nil lookup.
+local function seg_visible(s)
+	return vis[s.pa] ~= false and vis[s.pb] ~= false
+end
+
+-- The two writes a segment's verdict turns into. With cull_dim off these keep the
+-- original behaviour exactly (drop the segment); with it on the segment stays up
+-- and changes colour instead. Kept as a pair so push() and apply_visibility() can
+-- never apply one without the other -- a segment left bright but hidden, or dim but
+-- visible, is a whole class of bug that only shows up on one code path.
+local function seg_colour(s)
+	if dim_col and not seg_visible(s) then return dim_col end
+	return s.col
+end
+
+local function seg_drawn(s)
+	return dim_col ~= nil or seg_visible(s)
+end
+
+-- Write the cached segment list into the gizmo queue. Cheap enough to call on
+-- demand (a few hundred field writes) and only called when the path CHANGES,
+-- not per frame: gizmos persist in the queue until told otherwise, so a static
+-- ribbon costs nothing on the Lua side once it's up.
+local function push()
+	revalidate()
+	-- Re-derive the blanking here rather than trusting the last tick's verdict: a
+	-- show() landing while the PDA is open (or on the frame a load finished) would
+	-- otherwise pop the ribbon into view for a frame before tick corrected it.
+	blanked = not want_shown()
+	local n = #segs
+	for i = 1, n do
+		local h = ensure(i)
+		if not h then break end
+		local s = segs[i]
+		h.point_a = s.a
+		h.point_b = s.b
+		h.color   = seg_colour(s)
+		-- respect a HUD-hidden frame: pushing a fresh path while the PDA is open
+		-- must not pop the ribbon into view behind it
+		h.visible = (not blanked) and seg_drawn(s)
+	end
+	-- park the leftovers rather than removing them: hiding is a bool write,
+	-- removing is an allocation we'd pay back the moment the path grows again.
+	for i = n + 1, held do
+		local h = pool[i]
+		if h then h.visible = false end
+	end
+	say("pushed %s segments (pool holds %s)", n, held)
+end
+
+-- Re-apply the cull verdicts to the gizmos already in the queue. Only called when
+-- a verdict actually flipped (or the HUD state did), so a ribbon whose visibility
+-- is settled costs nothing per frame. Caller must have revalidated.
+local function apply_visibility()
+	for i = 1, min(#segs, held) do
+		local h = pool[i]
+		if h then
+			local s = segs[i]
+			if dim_col then h.color = seg_colour(s) end
+			h.visible = (not blanked) and seg_drawn(s)
+		end
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- Occlusion culling
+-- --------------------------------------------------------------------------
+-- The MECHANICS -- one ray_pick built once and re-aimed for every cast, and the
+-- cast-toward-the-camera occlusion test over it -- live in iqm_util, because
+-- iqm_nav was carrying a byte-for-byte copy of both. The two are aliased into
+-- locals rather than called through the namespace because point_occluded fires
+-- cull_rate times EVERY frame, and a namespace lookup per cast is exactly the kind
+-- of per-frame cost the rest of this file goes out of its way to avoid.
+--
+-- What stays here is the POLICY, which is the only thing the two copies ever
+-- disagreed about: this module reads its lift and tolerance off the OPTION TABLE
+-- the ribbon was shown with (they are user-tunable per show()), where iqm_nav reads
+-- fixed module constants. Hence cull_lift/cull_tol passed at each call site below.
+--
+-- Sharing one ray handle between the two modules is safe: every query sets position,
+-- direction and range immediately before :query(), so nothing carries over but the
+-- flags, and both want flags = 2. See iqm_util for what that means and why it is
+-- deliberately not demonized_geometry_ray.
+local ray_ready      = iqm_util.ray_ready
+local point_occluded = iqm_util.point_occluded
+local RAY_WARN = "!IQM-PATH: ray_pick missing -- occlusion culling disabled"
+
+--- Re-test the next `cull_rate` points. Returns true if any verdict changed.
+--  Asymmetric, like the beacon/card crossover in iqm_core: a point that comes
+--  into view is shown at once, but one that goes out of view must stay occluded
+--  for cull_grace before it is hidden. Ducking behind a post, weapon sway and the
+--  foliage edge all produce sub-100 ms occlusions, and a ribbon that strobes at
+--  those reads far worse than one that is briefly a little too generous.
+local function cull_step()
+	local n = #pts
+	if n == 0 or not ray_ready(RAY_WARN) then return false end
+	local o     = cull_opt
+	local cam   = device().cam_pos
+	local now   = time_global()
+	local dirty = false
+	for _ = 1, min(o.cull_rate, n) do
+		cull_i = (cull_i % n) + 1
+		local i = cull_i
+		local want
+		if point_occluded(pts[i], cam, o.cull_lift, o.cull_tol) then
+			occ_since[i] = occ_since[i] or now
+			want = (now - occ_since[i]) < o.cull_grace
+		else
+			occ_since[i] = nil
+			want = true
+		end
+		-- store only the negative verdict, so seg_visible stays a nil lookup
+		local had = vis[i] ~= false
+		if had ~= want then
+			if want then vis[i] = nil else vis[i] = false end
+			dirty = true
+		end
+	end
+	return dirty
+end
+
+--- Test every point at once. Run when a new path is pushed so the ribbon never
+--  flashes through a wall for the few frames the round-robin would take to sweep
+--  it. Capped: past CULL_SYNC_MAX points the tail starts out visible and the
+--  per-frame cursor catches up, which is the lesser evil against a ray spike.
+local CULL_SYNC_MAX = 96
+local function cull_sync()
+	local n = #pts
+	if n == 0 or not ray_ready(RAY_WARN) then return end
+	local o   = cull_opt
+	local cam = device().cam_pos
+	local now = time_global()
+	for i = 1, min(n, CULL_SYNC_MAX) do
+		if point_occluded(pts[i], cam, o.cull_lift, o.cull_tol) then
+			-- no grace on a fresh path: there is no previous frame to smooth
+			occ_since[i], vis[i] = now - o.cull_grace, false
+		else
+			occ_since[i], vis[i] = nil, nil
+		end
+	end
+	cull_i = min(n, CULL_SYNC_MAX)
+end
+
+-- --------------------------------------------------------------------------
+-- Geometry helpers
+-- --------------------------------------------------------------------------
+
+--- Pull each point down onto the AI navmesh and lift it clear of the floor.
+--  Returns a NEW array; the caller's vectors are left alone. Points the mesh
+--  can't vouch for are passed through unsnapped rather than dropped, so a route
+--  that clips a bit of unmapped ground still draws continuously.
+function snap(points, lift)
+	lift = lift or OPT.lift
+	local out, kept = {}, 0
+	for i = 1, #points do
+		local p   = points[i]
+		local vid = level.vertex_id(p)
+		local q
+		if vid and vid ~= INVALID_VID then
+			local v = level.vertex_position(vid)
+			-- vertex_position returns (0,0,0) for an id the graph rejects
+			-- (level_script.cpp:394), which is a real position on some levels,
+			-- so range-check the answer instead of testing it against zero.
+			local dx, dz = v.x - p.x, v.z - p.z
+			if (dx * dx + dz * dz) <= (SNAP_MAX_XZ * SNAP_MAX_XZ)
+			   and abs(v.y - p.y) <= SNAP_MAX_Y then
+				q = vector():set(v.x, v.y + lift, v.z)
+				kept = kept + 1
+			end
+		end
+		out[i] = q or vector():set(p.x, p.y + lift, p.z)
+	end
+	say("snap: %s/%s points landed on the navmesh", kept, #points)
+	return out
+end
+
+--- Per-point travel directions, over a BASELINE rather than to the next point.
+--
+--  Returns {x, z} unit vectors, one per input point.
+--
+--  WHY THIS IS NOT JUST points[i+1] - points[i]. Every point on a route has been
+--  snapped to a navmesh vertex, and snap() will move one up to SNAP_MAX_XZ sideways to
+--  get there -- on Anomaly's roughly 0.7 m node grid, a lateral wobble of a few tens of
+--  centimetres per point, with no correlation between neighbours. Take the direction
+--  from one point to the next and that wobble lands on a baseline only one step long:
+--  at a 3 m step it is about +/-13 degrees of heading noise, alternating sign down the
+--  route, on a path that is dead straight.
+--
+--  It went unnoticed for as long as the marks were CHEVRONS. A chevron's direction cue
+--  is a blunt 112 degree apex that projection pushes toward 180 anyway, so rotating it
+--  13 degrees changes almost nothing you can see. The tapered dart is a far sharper
+--  pointer -- a 3.6:1 taper is a 16 degree half-angle -- and it renders the noise
+--  faithfully, which is how the noise finally showed up: as marks that would not line up.
+--
+--  So the fix belongs here and not in either renderer. Widening the baseline divides the
+--  angular error by the number of metres it spans, and taking it SYMMETRICALLY about the
+--  point drops that point's own wobble out of the answer entirely. The baseline is in
+--  METRES rather than in points so it does not silently change meaning with the step.
+function headings(points, baseline)
+	baseline = baseline or 6.0
+	local n = #points
+	local out = {}
+	if n == 0 then return out end
+	if n == 1 then return { { x = 0, z = 1 } } end
+
+	local last = nil
+	for i = 1, n do
+		-- Walk outward symmetrically until the chord is long enough, or we run out of
+		-- route. Near the ends this degenerates to a one-sided difference, which is the
+		-- best available answer there rather than a special case.
+		local lo, hi = i, i
+		local dx, dz, len = 0, 0, 0
+		for _ = 1, n do
+			if lo > 1 then lo = lo - 1 end
+			if hi < n then hi = hi + 1 end
+			dx, dz = points[hi].x - points[lo].x, points[hi].z - points[lo].z
+			len = sqrt(dx * dx + dz * dz)
+			if len >= baseline or (lo == 1 and hi == n) then break end
+		end
+		if len > 0.0001 then
+			last = { x = dx / len, z = dz / len }
+		end
+		-- A route that doubles back on itself can give a zero chord. Reuse the previous
+		-- answer rather than inventing one: a mark pointing nowhere is worse than a mark
+		-- pointing where its neighbour does.
+		out[i] = last or { x = 0, z = 1 }
+	end
+	return out
+end
+
+--- Straight line from a to b, a point every `step` metres (both ends included).
+--  Only useful for testing the renderer -- a real route comes from the level
+--  graph -- but it is exactly the shape a route will arrive in.
+function sample(a, b, step)
+	step = step or 2.0
+	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
+	local len = sqrt(dx * dx + dy * dy + dz * dz)
+	local n   = max(1, floor(len / step))
+	local out = {}
+	for i = 0, n do
+		local t = i / n
+		out[i + 1] = vector():set(a.x + dx * t, a.y + dy * t, a.z + dz * t)
+	end
+	return out
+end
+
+-- Horizontal perpendicular to a segment, used to spread the rails. Deriving it
+-- in the XZ plane (rather than crossing with world up) keeps the ribbon flat on
+-- the ground and sidesteps the degenerate case where the segment is vertical --
+-- which for a walked route only happens on a ladder, where the fallback below
+-- gives an arbitrary but stable orientation instead of a NaN.
+local function perp(ax, az, bx, bz)
+	local dx, dz = bx - ax, bz - az
+	local m = sqrt(dx * dx + dz * dz)
+	if m < 0.0001 then return 1, 0 end
+	return -dz / m, dx / m
+end
+
+-- --------------------------------------------------------------------------
+-- Building the ribbon
+-- --------------------------------------------------------------------------
+
+-- Alpha bucket for a point, so the whole ribbon collapses to `fade_steps`
+-- distinct colours no matter how long it is (see the fade_steps comment).
+local function fade_alpha(o, px, pz, cam)
+	if o.fade_steps <= 1 then return o.a end
+	local dx, dz = px - cam.x, pz - cam.z
+	local d = sqrt(dx * dx + dz * dz)
+	local t = (d - o.fade_near) / max(0.001, o.fade_far - o.fade_near)
+	t = min(1, max(0, t))
+	-- quantise BEFORE turning it into a colour, so equal buckets share one fcolor
+	local q = floor(t * (o.fade_steps - 1) + 0.5) / (o.fade_steps - 1)
+	return o.a * (1 - q * (1 - o.fade_min))
+end
+
+--- Draw `points` as a ground ribbon. Replaces whatever was drawn before.
+--  opts overrides any field of OPT for this call only.
+--- Build ONE channel's segments, appending to the shared `pts` and `segs`.
+--
+--  TWO CHANNELS (R2.33q), so the raw search answer and the path actually drawn can be
+--  compared side by side instead of by flipping between them. Almost nothing had to change
+--  to allow it, which is the useful part: `segs[i]` has carried its own colour since R2.1
+--  and `pa`/`pb` are INDICES rather than references -- so several channels share one flat
+--  point list, each is tinted separately, and the occlusion cull, which walks `pts` and
+--  keys `vis` by index, needs no change whatsoever.
+--
+--  `base` is where this channel's points start in that flat list. Every pa/pb below is
+--  offset by it; getting one wrong would cull one channel's segments against the other
+--  channel's visibility, which is why they all read base + i rather than i.
+local function emit_channel(o, src, rgb, cam, n, base)
+	-- One fcolor per alpha bucket, PER CHANNEL. The renderer keys its batches on the
+	-- colour value, so sharing the object is not what saves the draw call -- producing
+	-- identical values is -- but reusing it saves the allocations too. Per channel because
+	-- two channels differ in exactly this, and a cache shared between them would hand the
+	-- second one the first one's colour.
+	local cols = {}
+	local function colour_for(alpha)
+		local key = floor(alpha * 255 + 0.5)
+		local c = cols[key]
+		if not c then
+			c = fcolor():set(rgb.r, rgb.g, rgb.b, key / 255)
+			cols[key] = c
+		end
+		return c
+	end
+
+	local rails = max(1, o.rails)
+	local half  = o.width * 0.5
+	-- rail offsets across the ribbon width, -half .. +half
+	local off = {}
+	for k = 1, rails do
+		off[k] = (rails == 1) and 0 or (-half + o.width * (k - 1) / (rails - 1))
+	end
+
+	-- One dim colour, from the LAST channel emitted. The cull is off for the two-channel
+	-- overlays, and a per-channel dim would mean another colour object per alpha bucket
+	-- for a case nothing currently exercises.
+	dim_col = o.cull_dim
+		and fcolor():set(rgb.r * o.cull_dim, rgb.g * o.cull_dim, rgb.b * o.cull_dim, o.a)
+		or nil
+
+	local tie_acc, arr_acc = 0, 0
+	local capped = false
+
+	for i = 1, #src - 1 do
+		local a, b = src[i], src[i + 1]
+		local nx, nz = perp(a.x, a.z, b.x, b.z)
+		local col = colour_for(fade_alpha(o, a.x, a.z, cam))
+		local sx, sz = b.x - a.x, b.z - a.z
+		local slen = sqrt(sx * sx + sz * sz)
+
+		for k = 1, rails do
+			if n >= MAX_LINES then
+				capped = true
+				break
+			end
+			local d = off[k]
+			n = n + 1
+			segs[n] = {
+				a   = vector():set(a.x + nx * d, a.y, a.z + nz * d),
+				b   = vector():set(b.x + nx * d, b.y, b.z + nz * d),
+				col = col,
+				pa  = base + i, pb = base + i + 1,
+			}
+		end
+		if capped then break end
+
+		-- cross-ties every `ties` metres of path, measured along the path so the
+		-- spacing stays even however unevenly the route was sampled
+		if o.ties > 0 then
+			tie_acc = tie_acc + slen
+			if tie_acc >= o.ties and n < MAX_LINES then
+				tie_acc = 0
+				n = n + 1
+				-- a tie sits ON point i+1, so it lives or dies with that one point
+				segs[n] = {
+					a   = vector():set(b.x + nx * half, b.y, b.z + nz * half),
+					b   = vector():set(b.x - nx * half, b.y, b.z - nz * half),
+					col = col,
+					pa  = base + i + 1, pb = base + i + 1,
+				}
+			end
+		end
+
+		-- chevrons, on the same arclength accumulator the ties use so their spacing
+		-- is even however unevenly the route was sampled. Like a tie, a chevron sits
+		-- ON point i+1 and lives or dies with that one point.
+		if o.arrows > 0 and slen > 0.0001 then
+			arr_acc = arr_acc + slen
+			if arr_acc >= o.arrows then
+				arr_acc = 0
+				local ux, uz = sx / slen, sz / slen         -- unit direction of travel
+				local hl, hw = o.arrow_len * 0.5, o.arrow_wide * 0.5
+				for k = 0, max(1, o.arrow_bold) - 1 do
+					if n + 2 > MAX_LINES then capped = true; break end
+					-- nest the copies BACKWARD along travel, so the arms stay parallel
+					-- to themselves and the mark reads as one thick chevron
+					local sh = k * o.arrow_gap
+					local tx, tz = b.x + ux * (hl - sh), b.z + uz * (hl - sh)
+					local rx, rz = b.x - ux * (hl + sh), b.z - uz * (hl + sh)
+					n = n + 1
+					segs[n] = {
+						a   = vector():set(tx, b.y, tz),
+						b   = vector():set(rx + nx * hw, b.y, rz + nz * hw),
+						col = col, pa = base + i + 1, pb = base + i + 1,
+					}
+					n = n + 1
+					segs[n] = {
+						a   = vector():set(tx, b.y, tz),
+						b   = vector():set(rx - nx * hw, b.y, rz - nz * hw),
+						col = col, pa = base + i + 1, pb = base + i + 1,
+					}
+				end
+			end
+		end
+		if capped then break end
+	end
+
+	return n, capped
+end
+
+--- The built geometry, for the harness: the flat point list and the segments that index
+--  into it. Public because the one property the two-channel change put at risk -- that
+--  every segment's pa/pb are offset by its own channel's `base` -- is invisible on screen
+--  until the occlusion cull is switched on, at which point one channel would be culled
+--  against the other's visibility. A thing no test can see is a thing no test will catch.
+function debug_geometry()
+	return pts, segs
+end
+
+--- One polyline. The common case, and a wrapper since R2.33q.
+function show(points, opts)
+	return show_channels({ { points = points } }, opts)
+end
+
+--- Several polylines at once, each with its own colour.
+--
+--  chans[i] = { points = {...}, r = , g = , b = }   -- rgb optional, falls back to opts
+--
+--  A channel with fewer than two points is SKIPPED and reported rather than refusing the
+--  whole call. With two paths on screen the interesting case is precisely when one of them
+--  came back empty, and failing outright would hide the very thing being looked for.
+--  Returns how many channels were actually drawn, so a caller can say which is missing.
+function show_channels(chans, opts)
+	if available == false then return 0 end
+	if not (chans and #chans > 0) then return 0 end
+
+	local o = {}
+	for k, v in pairs(OPT) do o[k] = v end
+	if opts then for k, v in pairs(opts) do o[k] = v end end
+
+	local cam = device().cam_pos
+	pts, segs = {}, {}
+	local n, drawn = 0, 0
+
+	for ci = 1, #chans do
+		local ch = chans[ci]
+		local raw = ch and ch.points
+		if not (raw and #raw >= 2) then
+			say("channel %s has %s points -- nothing to draw", ci, raw and #raw or 0)
+		else
+			-- Our own copy: snap() returns a fresh array, but an unsnapped caller may keep
+			-- mutating theirs (the trail driver appends and ring-trims as you walk) and the
+			-- cull indexes into ours every frame, so an alias would silently re-point the
+			-- verdicts at the wrong ground.
+			local src = o.snap and snap(raw, o.lift) or raw
+			local base = #pts
+			for i = 1, #src do pts[base + i] = src[i] end
+			local rgb = { r = ch.r or o.r, g = ch.g or o.g, b = ch.b or o.b }
+			local capped
+			n, capped = emit_channel(o, src, rgb, cam, n, base)
+			drawn = drawn + 1
+			if capped then
+				say("!capped at %s lines -- later channels dropped", MAX_LINES)
+				break
+			end
+		end
+	end
+
+	if drawn == 0 then
+		shown = false
+		push()
+		return 0
+	end
+
+	-- Fresh path, fresh verdicts: a stale `false` from the previous route would blank a
+	-- segment of this one that nothing has actually tested yet.
+	cull_on, cull_opt = o.cull and true or false, o
+	vis, occ_since, cull_i = {}, {}, 0
+	if cull_on then cull_sync() end
+
+	shown = true
+	push()
+	return drawn
+end
+
+function hide()
+	if available == false then return end
+	shown = false
+	if not revalidate() then return end   -- already gone; nothing to blank
+	for i = 1, held do
+		local h = pool[i]
+		if h then h.visible = false end
+	end
+end
+
+function clear()
+	if available == false then return end
+	for i = 1, held do
+		if pool[i] then debug_render.remove_object(ID_BASE + i) end
+	end
+	drop_pool()
+	segs, shown = {}, false
+	pts, vis, occ_since, cull_i = {}, {}, {}, 0
+end
+
+function is_shown()
+	return shown
+end
+
+--- False only once on_game_start has run and found no debug_render (a bare
+--  Anomaly exe). nil-safe for callers that ask before then: unprobed reads as
+--  available, and every entry point re-checks anyway.
+function is_available()
+	return available ~= false
+end
+
+--- Blank the ribbon without dropping it. Keeps the geometry and the cull
+--  verdicts, so coming back is a pass of boolean writes and no recompute --
+--  the same trade the HUD rule below makes.
+function suppress(sup)
+	sup = sup and true or false
+	if sup == ext_blank then return end
+	ext_blank = sup
+	if not shown then return end
+	if not revalidate() then return end
+	blanked = not want_shown()
+	apply_visibility()
+end
+
+-- --------------------------------------------------------------------------
+-- Per-frame upkeep
+-- --------------------------------------------------------------------------
+-- Deliberately tiny: with the ribbon static this is one pointer lookup and a
+-- boolean compare per frame. The gizmos hold their own state in the engine, so
+-- there is nothing to re-send until the path itself changes.
+local function tick()
+	if not shown then return end
+
+	-- Rebuild after the engine wiped the queue (save load / new game).
+	if not revalidate() then
+		say("rebuilding %s segments after a queue wipe", #segs)
+		push()
+		return
+	end
+
+	-- Follow the mod's existing rule: no overlay while the HUD is down or the
+	-- fullscreen PDA is up. Toggling `visible` keeps the geometry cached, so
+	-- coming back costs one pass of boolean writes and no recompute.
+	local want = want_shown()
+	if want == blanked then
+		blanked = not want
+		apply_visibility()
+		return          -- the pass above already wrote every gizmo
+	end
+	if blanked then return end   -- nothing to cull toward while it's all hidden
+
+	-- Occlusion. Only the points whose verdict FLIPPED cost anything beyond the
+	-- cull_rate rays: apply_visibility is skipped entirely on a settled ribbon,
+	-- which is the common case once you stop moving.
+	if cull_on and cull_step() then apply_visibility() end
+end
+
+-- --------------------------------------------------------------------------
+-- Test drivers
+-- --------------------------------------------------------------------------
+-- Feedback goes to the F7 debugger's console when it is around (its send_output
+-- mirrors to the log too), else straight to the log. Body in iqm_util.dbg_out;
+-- called through the namespace rather than aliased, since it is never hot.
+
+local function guard()
+	if available == false then
+		iqm_util.dbg_out("!IQM-PATH: debug_render is not available on this exe")
+		return false
+	end
+	return db.actor ~= nil
+end
+
+function debug_hide()
+	hide()
+	iqm_util.dbg_out("-IQM-PATH: hidden -- the live route may take the ribbon back")
+end
+
+function debug_clear()
+	clear()
+	iqm_util.dbg_out("-IQM-PATH: cleared -- the live route may take the ribbon back")
+end
+
+local function actor_on_update()
+	if available == false then return end
+	tick()
+end
+
+function on_game_start()
+	-- debug_render and the DBG_ScriptObject enum come from the modded exes that
+	-- GAMMA ships. Absent them the whole module parks itself rather than throwing
+	-- on the first draw, matching how the rest of IQM treats its soft deps.
+	available = (debug_render ~= nil and DBG_ScriptObject ~= nil)
+	if not available then
+		printf("!IQM-PATH: debug_render missing -- world-space path renderer disabled")
+		return
+	end
+	-- The once-per-process flag and the launcher guard live in iqm_util; the list is
+	-- the only part that was ever this module's own.
+	iqm_util.inject_actions("iqm_pathline", {
+		{ name = "IQM: Path Hide",  functor = { debug_hide },  hide_ui = 2 },
+		{ name = "IQM: Path Clear", functor = { debug_clear }, hide_ui = 2 },
+	})
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end

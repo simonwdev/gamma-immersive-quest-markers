@@ -1,0 +1,233 @@
+-- ======================================================================
+-- iqm_meshview -- draw the AI navmesh in the world, coloured by how far
+-- each node is ON FOOT from where you are standing.
+--
+-- WHY THIS EXISTS. The route is only ever as good as the mesh under it, and the mesh is
+-- invisible. Three separate sessions were spent arguing about routes that looked wrong and
+-- were in fact correct -- correct with respect to a navmesh nobody could see. The question
+-- that actually needed answering, every time, was "does the mesh go through that doorway",
+-- and there is no engine command for it: the ai_dbg_* console flags are AI *behaviour*
+-- switches (goap, vision, motion), and none of them draws a node.
+--
+-- WHAT THE COLOUR MEANS, and it is the whole design. Drawing which cells have nodes is
+-- nearly useless -- you cannot see connectivity in it, and connectivity is the thing that
+-- goes wrong. So each node is coloured by its HOP DISTANCE from the actor's own node, over
+-- level.vertex_link. A red tick standing a metre from a green one is then unmissable, and
+-- it means exactly one thing: those two patches of floor are not joined, whatever your eyes
+-- say about the gap between them. That is what an unmeshed doorway looks like, and it is
+-- what turned a 29 m walk into 178 m in the Bar (R2.36).
+--
+-- Deliberately a SNAPSHOT, not a live overlay. The BFS is one flood fill over up to 30000
+-- vertices and it runs on the game thread; doing that every frame would be a stutter, and
+-- the answer does not change while you stand still. Press again to re-take it.
+--
+-- Public API:
+--   iqm_meshview.show(radius_m)  -- take a snapshot around the actor
+--   iqm_meshview.hide()          -- blank the ticks, keep the gizmos
+--   iqm_meshview.clear()         -- drop the gizmos entirely
+--   iqm_meshview.toggle()        -- what the F7 action calls
+--   iqm_meshview.is_shown()
+--
+-- F7 -> Execute -> "IQM: Navmesh Snapshot"
+
+local floor, sqrt, abs = math.floor, math.sqrt, math.abs
+
+local INVALID_VID = 4294967295
+-- level.vertex_link's own sentinel, which is NOT u32(-1): the level graph packs neighbour
+-- indices into 23 bits, so "no link that way" comes back as 2^23 - 1 (R2.37b). Measured
+-- over 1136 vertices as the only non-neighbour value it returns. Reading it as a real
+-- vertex costs this tool its whole point -- the phantom joins the flood fill, and the
+-- severed room on the far side of a doorway can be reached "through" it and drawn green.
+local LINK_NONE = 8388607
+local ID_BASE     = 770000   -- clear of iqm_pathline's block
+
+-- One tick per node, drawn as a short vertical line. Vertical because the alternative --
+-- a horizontal dash -- disappears at grazing angles, which is precisely the angle you look
+-- at a floor from. The height is enough to read across a room and low enough not to hide
+-- the geometry you are trying to compare it against.
+local TICK_LO, TICK_HI = 0.03, 0.45
+
+-- Hop bands. 0.7 m a hop on Anomaly's grid, so these are roughly 28 m and 84 m of walking.
+-- The bands matter less than the CONTRAST between them: the eye is looking for two colours
+-- side by side, not for an absolute value.
+local NEAR_HOPS, MID_HOPS = 40, 120
+
+local BFS_CAP  = 30000   -- vertices; one frame's worth of flood fill
+local MAX_TICKS = 900    -- gizmos; past this the picture is soup anyway
+
+local shown, held = false, 0
+local pool = {}
+
+-- No gate: this module only ever runs because someone pressed the F7 action, so
+-- everything it has to say is wanted. The body is iqm_util.logger's -- seven files
+-- were carrying the same two lines apart from the tag and the flag.
+local say = iqm_util.logger("-IQM-MESHVIEW: ")
+
+local function available()
+	return debug_render ~= nil and DBG_ScriptObject ~= nil
+	       and level ~= nil and level.vertex_link ~= nil
+end
+
+local function ensure(i)
+	local h = pool[i]
+	if h then return h end
+	h = debug_render.add_object(ID_BASE + i, DBG_ScriptObject.line)
+	if not h then return nil end
+	h = h:cast_dbg_line()
+	h.hud     = false
+	h.visible = false
+	pool[i] = h
+	if i > held then held = i end
+	return h
+end
+
+--- Hop distance from `start` over the link graph, capped.
+--
+--  level.vertex_link is the REAL adjacency -- four neighbours, baked at level compile time.
+--  It is not the same thing as vertex_in_direction, which is a ray-like walk the search
+--  uses; the links are what "connected" actually means, so they are what this must read or
+--  the picture would be of the search rather than of the mesh.
+local function hop_field(start)
+	local dist = { [start] = 0 }
+	local q, head, n = { start }, 1, 1
+	while head <= n and n < BFS_CAP do
+		local v = q[head]
+		head = head + 1
+		local dv = dist[v] + 1
+		for i = 0, 3 do
+			local nb = level.vertex_link(v, i)
+			if nb and nb ~= INVALID_VID and nb ~= LINK_NONE and dist[nb] == nil then
+				dist[nb] = dv
+				n = n + 1
+				q[n] = nb
+			end
+		end
+	end
+	return dist, n
+end
+
+--- Every distinct node within `rad` metres of the actor, sampled on the AI grid.
+--
+--  Sampled rather than enumerated because there is no Lua binding that lists the vertices
+--  in a box -- only vertex_id(position). Stepping at the grid pitch hits each cell about
+--  once; the `seen` table absorbs the duplicates where the step and the grid disagree.
+local function nodes_near(apos, rad)
+	local seen, list = {}, {}
+	local probe = vector()
+	local steps = floor(rad / 0.7)
+	for gx = -steps, steps do
+		for gz = -steps, steps do
+			probe:set(apos.x + gx * 0.7, apos.y, apos.z + gz * 0.7)
+			local v = level.vertex_id(probe)
+			if v and v ~= INVALID_VID and not seen[v] then
+				local vp = level.vertex_position(v)
+				-- Reject nodes on another storey. Without this a building's upper floor
+				-- lands on top of the ground floor in plan and the picture is unreadable.
+				if vp and abs(vp.y - apos.y) < 3.0 then
+					seen[v] = true
+					list[#list + 1] = v
+					if #list >= MAX_TICKS then return list end
+				end
+			end
+		end
+	end
+	return list
+end
+
+function show(rad)
+	if not available() then
+		say("debug_render or level.vertex_link missing -- nothing to draw")
+		return 0
+	end
+	local a = db.actor
+	if not a then return 0 end
+	local apos = a:position()
+	local start = a:level_vertex_id()
+	if not start or start == INVALID_VID then
+		say("you are not on a navmesh node, so there is nothing to measure from")
+		return 0
+	end
+
+	local dist, visited = hop_field(start)
+	local list = nodes_near(apos, rad or 11.0)
+
+	local near, mid, far, orphan = 0, 0, 0, 0
+	for i = 1, #list do
+		local v  = list[i]
+		local vp = level.vertex_position(v)
+		local h  = ensure(i)
+		if not h then break end
+		h.point_a = vector():set(vp.x, vp.y + TICK_LO, vp.z)
+		h.point_b = vector():set(vp.x, vp.y + TICK_HI, vp.z)
+		local c = fcolor()
+		local d = dist[v]
+		if d == nil then
+			-- Not reached at all: either genuinely severed from you, or past the BFS cap.
+			-- Grey rather than red so the two are never confused -- claiming "unreachable"
+			-- when the truth is "I stopped looking" is the mistake this whole tool exists
+			-- to stop people making.
+			c:set(0.50, 0.50, 0.60, 1); orphan = orphan + 1
+		elseif d <= NEAR_HOPS then
+			c:set(0.20, 1.00, 0.30, 1); near = near + 1
+		elseif d <= MID_HOPS then
+			c:set(1.00, 0.85, 0.10, 1); mid = mid + 1
+		else
+			c:set(1.00, 0.15, 0.10, 1); far = far + 1
+		end
+		h.color   = c
+		h.visible = true
+	end
+	for i = #list + 1, held do
+		local p = pool[i]
+		if p then p.visible = false end
+	end
+	shown = true
+	say("%s nodes: %s green (<=%s hops), %s amber, %s RED (>%s hops), %s grey",
+		#list, near, NEAR_HOPS, mid, far, MID_HOPS, orphan)
+	say("flood fill reached %s vertices%s", visited,
+		(visited >= BFS_CAP) and " -- HIT THE CAP, grey may just mean unexplored" or "")
+	if far > 0 or orphan > 0 then
+		say("a RED tick beside a GREEN one is floor you can walk between and the mesh cannot")
+	end
+	return #list
+end
+
+function hide()
+	for i = 1, held do
+		local h = pool[i]
+		if h then h.visible = false end
+	end
+	shown = false
+end
+
+function clear()
+	for i = 1, held do
+		if pool[i] then debug_render.remove_object(ID_BASE + i) end
+		pool[i] = nil
+	end
+	held, shown = 0, false
+end
+
+function is_shown() return shown end
+
+function toggle()
+	if shown then hide() else show(11.0) end
+end
+
+-- NOT routed through iqm_util.inject_actions, deliberately. This one's flag does
+-- double duty: it also gates the RegisterScriptCallback below, so the whole body
+-- runs once per process rather than once per load, and the early return on a
+-- missing launcher takes the callback with it. Handing the injection to iqm_util
+-- would either register on_level_changing afresh on every save load or need a
+-- second flag beside iqm_util's -- both worse than leaving five lines alone.
+local _injected = false
+
+function on_game_start()
+	if _injected then return end
+	if not (ui_debug_launcher and ui_debug_launcher.inject) then return end
+	_injected = true
+	ui_debug_launcher.inject("action",
+		{ name = "IQM: Navmesh Snapshot", functor = { toggle }, hide_ui = 2 })
+	-- World points on one level, so both of these invalidate the whole picture.
+	RegisterScriptCallback("on_level_changing", clear)
+end

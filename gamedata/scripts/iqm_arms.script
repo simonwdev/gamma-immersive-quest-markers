@@ -1,0 +1,577 @@
+-- ======================================================================
+--  Immersive Quest Markers: route marks as TWO ARMS (PROTOTYPE)
+-- ======================================================================
+-- Option C. A chevron is two bars, so draw two bars -- each with its OWN rect and its
+-- own heading, rather than one rect holding a picture of both.
+--
+-- WHY THIS IS BACK, having been dropped in R2.20. The project shipped two-quad arms
+-- (R2.18-R2.22), hit the apex problem, tried three fixes -- an overlap, an asymmetric
+-- mitre, and finally the whole mark as one texture -- and kept the last. That was the
+-- right call on the evidence available, and the evidence has changed:
+--
+--   * ONE rect can only rotate and scale: three degrees of freedom. The projected
+--     ground quad needs four (shear) and really eight (keystone). The one-texture
+--     glyph therefore buys a clean apex by giving up the shear ENTIRELY.
+--   * The shear was assumed small. Measured, it is not: the deviation of the mark's
+--     two projected axes from perpendicular runs 28 degrees at 15 degrees off-axis at
+--     3 m, and 78 degrees at 12 m. At any real distance the ground compresses until
+--     the mark's axes are nearly parallel, and a rect forces them to 90.
+--   * Two arms have two independent headings, which is exactly the freedom the shear
+--     needs -- at TWO widgets per mark, fewer than the eight iqm_strip spends.
+--
+-- AND THE TRADE IS NOT WHAT IT LOOKED LIKE, because the two artefacts live at
+-- opposite ends of the distance range:
+--
+--     up close   the apex wedge is visible; the shear is at its SMALLEST
+--     far away   the shear is at its worst; the apex is a sub-pixel detail
+--
+-- So "clean apex vs correct angles" was never a straight fight -- each defect is
+-- worst where the other is invisible. That is the case for measuring rather than
+-- re-litigating R2.20, and it is what arm_rects and the harness exist to do.
+--
+-- THE APEX, concretely. Two rectangles cannot meet cleanly at a point: overlap them
+-- and the doubled alpha leaves a(2-a) -- a light spot; butt them and the wedge
+-- between their square end cuts is a notch. R2.22's answer, kept here, is neither: a
+-- SOFT tip. iqm_arm ramps its alpha over the last 14% at the tip end (ARM_TIP in
+-- tools/stroke-tex/build.py), so the arm asks no question about where exactly it
+-- stops, and the wedge has nothing hard to be a notch in. What is new is that the
+-- wedge's SIZE is now computed rather than eyeballed -- see apex_wedge_deg.
+--
+-- Public API:
+--   iqm_arms.draw(marks)          -- marks[i] = {x, y, z, ux, uz}
+--   iqm_arms.hide()
+--   iqm_arms.arm_rects(m, proj)   -- the geometry, pure, for the harness
+--   iqm_arms.apex_wedge_deg(m, proj)
+--
+-- Test drivers (F7 -> Execute):
+--   iqm_arms.debug_to_target()
+--   iqm_arms.debug_hide()
+--
+-- Logic is covered offline by tools/arms-harness/harness.lua.
+
+local sqrt, atan2, abs = math.sqrt, math.atan2, math.abs
+local min, max, cos, sin = math.min, math.max, math.cos, math.sin
+
+local MAX_MARKS = 12
+
+-- MIRRORS tools/stroke-tex/build.py (MARK_LEN / MARK_WIDE / MARK_ARM) and RTE.alen /
+-- awide / aw in iqm_core.script. Three copies of the same three numbers is not a
+-- design anyone would choose; it is what the engine leaves us with, since the artwork
+-- is baked in the mark's own metric and nothing can read it back at runtime. Change
+-- one, change all three, or the glyph sits off its own box.
+local MARK_LEN  = 0.50    -- m, tip to the back of the arms, along travel
+local MARK_WIDE = 1.48    -- m, across the back, tip to tip
+local MARK_ARM  = 0.304   -- m, thickness of an arm
+
+-- See iqm_strip: NOT a constant. (h/w) / (768/1024), so 1 on 4:3 and 0.75 on 16:9.
+UI_KX = 1
+local _ui_w = 0
+
+function refresh_kx()
+	local dev = device and device()
+	if dev and dev.width and dev.width > 0 and dev.width ~= _ui_w then
+		_ui_w = dev.width
+		UI_KX = (dev.height / dev.width) / (768 / 1024)
+	end
+	return UI_KX
+end
+
+local LMIN, TMIN = 0.5, 0.5
+
+-- HOW FAR EACH ARM REACHES PAST THE APEX, as a fraction of its own length.
+--
+-- Without it the two arms stop AT the tip and the wedge between their ends is
+-- uncovered. Straight-on that wedge is 20-37 degrees and iqm_arm's soft tip hides it;
+-- at an oblique angle it opens to 47-58 and the mark visibly breaks into two separate
+-- bars -- which is exactly what the first in-game oblique shot showed.
+--
+-- 0.14 because that is ARM_TIP in tools/stroke-tex/build.py: the texture ramps its
+-- alpha from 0 to opaque over the first 14% of the arm. Extending by exactly that puts
+-- each arm's OPAQUE core at the apex and hangs its ramp past it, so the cores meet and
+-- the two ramps overlap in the wedge beyond.
+--
+-- Overlapping is safe here for the reason the decal artwork established: two
+-- TRANSLUCENT layers give a(2-a) and read as a bright rib (the R2.19 light spot), but
+-- at alpha 1 an overlap is invisible. The cores are opaque, so where they meet there
+-- is nothing to double; only the ramps overlap, and there brightening is what fills
+-- the wedge rather than a defect. This is the same trade R2.22 tried as "an overlap"
+-- and rejected -- but it was rejected with SQUARE-cut arms, where the overlap was
+-- between two opaque ends and produced a visible lump instead of a point.
+local TIP_EXTEND = 0.14
+
+-- THE LEAST ELONGATED an arm's rect is allowed to be, length over thickness.
+--
+-- An arm is 0.78 m long and 0.304 m thick, so straight-on its rect is about 5:1 and
+-- th/ln measures a steady 0.19-0.20 at every distance. Turn the mark off-axis and its
+-- length foreshortens while its thickness barely moves, and the ratio climbs until it
+-- CROSSES ONE: measured 1.07 at 6 m / 60 degrees, 2.04 at 12 m, 3.31 at 25 m. Past
+-- that point the rect is wider across than it is along.
+--
+-- That is where the artwork breaks. iqm_arm's soft tip and tapered tail both run along
+-- the arm's LENGTH, and SetStretchTexture maps the picture to the rect -- so once
+-- length is the short side, the whole glyph is crushed into a handful of pixels while
+-- the thickness stretches out. It stops reading as an arm and becomes a blob with a
+-- gradient running sideways across it. This is the stub in the first oblique
+-- screenshot, and it is a rect artefact rather than honest perspective: the projection
+-- is right, a rotate-and-scale rect just cannot carry a quad collapsed along its own
+-- axis.
+--
+-- The floor is applied by pushing the BACK end out, never the apex end -- the apex is
+-- the feature the eye lands on and the one thing the tip-sharing above exists to keep
+-- exact. So an end-on arm overstates its length, in the one direction where its true
+-- length has already gone to nothing, and stays a recognisable bar.
+--
+-- 1.6 rather than 1.0: a square is still a blob. This is where the tail taper and the
+-- tip ramp still occupy distinguishable spans.
+--
+-- What this does NOT fix, deliberately: past about 75 degrees off-axis the two arms
+-- become collinear and the mark reads as a bar rather than a chevron (the apex wedge
+-- measures 127-169 degrees there). That is not an artefact -- a chevron seen side-on
+-- IS a line, and real ground paint does the same. Straightening it would mean lying
+-- about the mark's orientation on the ground, which is the whole thing this renderer
+-- exists to get right. The direction is carried by the SEQUENCE of marks there.
+local ARM_ASPECT_MIN = 1.6
+
+-- THE DIALOG AND ITS WIDGETS LIVE IN A NAMESPACE GLOBAL, not in locals, and that is
+-- load-bearing rather than a style choice.
+--
+-- Loading a save RE-READS every .script file, so a top-level `local WND` comes back
+-- nil and ensure_wnd builds a SECOND dialog. The first is not collected: the engine's
+-- CDialogHolder keeps m_dialogsToRender as a plain vector, entries are only ever
+-- removed by RemoveDialogToRender (which disables them, to be sorted and popped later)
+-- or by CleanInternals, and a save load calls neither. So the orphan keeps drawing
+-- forever, frozen at whatever rects it last had -- and a rect frozen in SCREEN space
+-- is glued to the camera. That is the "marks moving with me" symptom, and it appears
+-- right after a reload because a reload is what causes it.
+--
+-- A namespace global survives a re-read where a local does not, so ensure_wnd
+-- reattaches to the existing dialog instead of orphaning it. teardown() is the second
+-- line of defence, for the case where the namespace table itself is replaced.
+HUD_STATE = HUD_STATE or { wnd = nil, pool = {}, used = 0, shown = false }
+local ST = HUD_STATE
+
+-- --------------------------------------------------------------------------
+-- The ground normal
+-- --------------------------------------------------------------------------
+-- ray_pick:get_normal() is NEW. It is absent from the engine snapshot this project
+-- read for months and present in the running build (MT-TEST_2026.5.15,
+-- level_script.cpp:2616) -- which is why every renderer here until now assumed the
+-- ground was flat and laid its marks in a horizontal plane. On a ramp or a stair
+-- tread that is visibly wrong: one end of the mark cuts into the slope and the other
+-- floats off it.
+--
+-- SOFT, and genuinely so: probed once by CALLING it inside a pcall rather than by
+-- testing for the field. luabind userdata does not answer `r.get_normal` the way a
+-- table does, so a field test is not a reliable existence check -- and getting that
+-- wrong on an older exe is a hard error on the first mark drawn, not a graceful
+-- degradation. Absent, ground_normal returns nil, mark_corners falls back to world
+-- up, and the behaviour is exactly what it was before.
+local PROBE_UP, PROBE_RANGE = 0.6, 3.0
+local _ray, _ray_ok = nil, nil
+local _rn_org, _rn_dir = vector(), vector()
+
+--- The ground normal under a world point, or nil if unavailable.
+function ground_normal(x, y, z)
+	if _ray_ok == false then return nil end
+	if not _ray then
+		if ray_pick == nil then _ray_ok = false; return nil end
+		local r = ray_pick()
+		r:set_flags(2)                       -- statics only, as iqm_pathline's cull does
+		_rn_org:set(x, y + PROBE_UP, z)
+		_rn_dir:set(0, -1, 0)
+		r:set_position(_rn_org)
+		r:set_direction(_rn_dir)
+		r:set_range(PROBE_RANGE)
+		local ok = pcall(function() r:query(); return r:get_normal() end)
+		if not ok then
+			_ray_ok = false
+			printf("!IQM-ARMS: ray_pick:get_normal missing on this exe -- "
+				.. "marks stay flat, which is what they were before")
+			return nil
+		end
+		_ray, _ray_ok = r, true
+	end
+	_rn_org:set(x, y + PROBE_UP, z)
+	_rn_dir:set(0, -1, 0)
+	_ray:set_position(_rn_org)
+	_ray:set_direction(_rn_dir)
+	_ray:set_range(PROBE_RANGE)
+	if not _ray:query() then return nil end
+	local n = _ray:get_normal()
+	if not n then return nil end
+	local l = sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+	if l < 1e-6 then return nil end
+	-- Face it upward. A triangle's winding decides the sign, and a downward normal
+	-- would flip the mark's across-axis -- mirroring the chevron rather than tilting it.
+	if n.y < 0 then return vector():set(-n.x / l, -n.y / l, -n.z / l) end
+	return vector():set(n.x / l, n.y / l, n.z / l)
+end
+
+-- --------------------------------------------------------------------------
+-- Geometry
+-- --------------------------------------------------------------------------
+
+--- The mark's THREE defining world points -- tip, and the two back corners -- built in
+--  the GROUND'S TANGENT PLANE rather than in a horizontal one.
+--
+--  m.n is the ground normal (a vector) and is OPTIONAL: absent, this uses world up and
+--  reproduces the flat behaviour exactly, which is what every renderer in this project
+--  did before ray_pick:get_normal() turned out to exist (see ground_normal). So the
+--  slope handling is additive -- nothing regresses on an engine that cannot supply a
+--  normal, and nothing needs a second code path.
+--
+--  The travel direction is PROJECTED ONTO the plane rather than used as given. m.ux/uz
+--  come from the route, which is a horizontal path; on a ramp the direction you
+--  actually walk is that vector tilted into the slope. Using it unprojected would put
+--  the mark's long axis out of the plane and the chevron would cut into the hill at one
+--  end and float at the other -- the exact artefact a ground marker cannot have.
+--
+--  Returns tip, back_left, back_right as {x,y,z}, plus the in-plane basis, or nil if
+--  the geometry is degenerate (travel exactly along the normal, i.e. a vertical face).
+function mark_corners(m)
+	local hl, hw = MARK_LEN * 0.5, MARK_WIDE * 0.5
+	local nx, ny, nz = 0, 1, 0
+	if m.n then nx, ny, nz = m.n.x, m.n.y, m.n.z end
+	local nl = sqrt(nx * nx + ny * ny + nz * nz)
+	if nl < 1e-6 then return nil end
+	nx, ny, nz = nx / nl, ny / nl, nz / nl
+
+	-- travel, minus its component along the normal
+	local d = m.ux * nx + m.uz * nz
+	local tx, ty, tz = m.ux - d * nx, -d * ny, m.uz - d * nz
+	local tl = sqrt(tx * tx + ty * ty + tz * tz)
+	if tl < 1e-6 then return nil end          -- travel parallel to the normal
+	tx, ty, tz = tx / tl, ty / tl, tz / tl
+
+	-- across = normal x travel; unit already, both being unit and perpendicular
+	local ax = ny * tz - nz * ty
+	local ay = nz * tx - nx * tz
+	local az = nx * ty - ny * tx
+
+	return {
+		tip  = { x = m.x + tx * hl, y = m.y + ty * hl, z = m.z + tz * hl },
+		back = {
+			{ x = m.x - tx * hl + ax * hw, y = m.y - ty * hl + ay * hw, z = m.z - tz * hl + az * hw },
+			{ x = m.x - tx * hl - ax * hw, y = m.y - ty * hl - ay * hw, z = m.z - tz * hl - az * hw },
+		},
+		t = { x = tx, y = ty, z = tz },
+		n = { x = nx, y = ny, z = nz },
+	}
+end
+
+--- The two arms' screen rects.
+--
+--  Each arm is the bar from the chevron's TIP to one back corner. A bar is thin and
+--  long, which is the one figure a rotate-then-scale rect represents faithfully --
+--  which is the whole reason this decomposition works where iqm_strip's uniform
+--  slicing did not. Slicing cut the arms lengthwise and rebuilt each as a staircase
+--  of offset bars; here an arm is never cut at all.
+--
+--  Returns { {cx, cy, ln, th, ang, tipx, tipy}, ... } (two entries), or nil.
+function arm_rects(m, proj)
+	local g = mark_corners(m)
+	if not g then return nil end
+	local ha = MARK_ARM * 0.5
+	local T, N = g.tip, g.n
+
+	-- The tip is ONE world point, projected ONCE and shared by both arms. Projecting
+	-- it per arm would let the two copies disagree by a rounding, and the apex is the
+	-- one place on this mark where a sub-pixel disagreement is visible.
+	local tipx, tipy, tok = proj(T.x, T.y, T.z)
+	if not tok then return nil end
+
+	local out = {}
+	for i = 1, 2 do
+		local B = g.back[i]
+		local ex, ey, eok = proj(B.x, B.y, B.z)
+		if not eok then return nil end
+
+		-- Thickness measured ACROSS the arm's own axis and WITHIN the ground plane --
+		-- normal x arm, not the mark's across-axis. Two reasons, and both bite: an arm
+		-- runs diagonally, so the mark's axis would make it too thick by 1/cos(rake);
+		-- and on a slope a horizontal perpendicular leaves the plane, so the arm's
+		-- measured width would shrink with the tilt instead of staying constant.
+		local dx, dy_, dz = B.x - T.x, B.y - T.y, B.z - T.z
+		local al = sqrt(dx * dx + dy_ * dy_ + dz * dz)
+		if al < 1e-6 then return nil end
+		dx, dy_, dz = dx / al, dy_ / al, dz / al
+
+		-- Reach PAST the apex by TIP_EXTEND, so the two arms' opaque cores meet there
+		-- instead of leaving the wedge bare. Projected separately from the true tip:
+		-- the tip is still the mark's anchor and what the apex tests check, this is
+		-- only where the rect's far end is drawn.
+		local ox = T.x - dx * al * TIP_EXTEND
+		local oy = T.y - dy_ * al * TIP_EXTEND
+		local oz = T.z - dz * al * TIP_EXTEND
+		local ax_, ay_, aok = proj(ox, oy, oz)
+		if not aok then return nil end
+		local px = N.y * dz - N.z * dy_
+		local py = N.z * dx - N.x * dz
+		local pz = N.x * dy_ - N.y * dx
+		local cx, cy, cz = (T.x + B.x) * 0.5, (T.y + B.y) * 0.5, (T.z + B.z) * 0.5
+		local q0x, q0y, q0 = proj(cx + px * ha, cy + py * ha, cz + pz * ha)
+		local q1x, q1y, q1 = proj(cx - px * ha, cy - py * ha, cz - pz * ha)
+		if not (q0 and q1) then return nil end
+
+		-- The RECT spans the extended end to the back corner; the heading comes from
+		-- the same pair, so an arm still points exactly along its own axis.
+		local dxk, dyy = (ex - ax_) / UI_KX, ey - ay_
+		local ln = sqrt(dxk * dxk + dyy * dyy)
+		if ln < 1e-6 then return nil end        -- the arm projects to a point
+
+		-- THICKNESS IS THE ACROSS-AXIS COMPONENT ONLY, not the full screen distance
+		-- between the two edge points.
+		--
+		-- The edge points are offset by the in-plane perpendicular, which is genuinely
+		-- perpendicular IN THE WORLD -- but the projection shears, so on screen that
+		-- offset is NOT perpendicular to the arm's own screen axis. Part of it points
+		-- ALONG the arm. Measuring the whole segment therefore charges that along-part
+		-- to the thickness, and a rotated rect cannot express it in any case: the one
+		-- thing a rect cannot do is shear (see the header). So the along-component is
+		-- not merely wasted, it is fed into the one dimension it does not belong in.
+		--
+		-- Measured against the arm's true projected quad, this made the rect up to
+		-- 3.4x too thick -- 9.7 px where the truth was 2.8 -- and the error GROWS with
+		-- distance and with obliquity, which is exactly where the marks looked like
+		-- blobs rather than bars. Straight-on at 3 m it is only 1.03x, which is why
+		-- the near head-on case always looked right and nothing pointed here sooner.
+		local wxk, wy = (q1x - q0x) / UI_KX, q1y - q0y
+		local th = abs(wxk * -dyy + wy * dxk) / ln
+
+		-- Hold the rect to ARM_ASPECT_MIN by pushing the BACK end away from the apex,
+		-- leaving the apex end exactly where the projection put it. Done in
+		-- UI_KX-corrected space, so the stretch runs along the arm's own axis on a
+		-- 16:9 screen rather than a sheared version of it.
+		local bx, by = ex, ey
+		if ln > 1e-3 and ln < th * ARM_ASPECT_MIN then
+			local s = th * ARM_ASPECT_MIN / ln
+			bx = ax_ + dxk * s * UI_KX
+			by = ay_ + dyy * s
+			ln = th * ARM_ASPECT_MIN
+		end
+
+		out[i] = {
+			cx = (ax_ + bx) * 0.5,
+			cy = (ay_ + by) * 0.5,
+			ln = max(ln, LMIN),
+			th = max(th, TMIN),
+			-- Each arm's OWN heading. This is the degree of freedom the one-texture
+			-- glyph does not have, and the reason this can carry the shear at all.
+			ang = atan2(-dyy, dxk),
+			tipx = tipx, tipy = tipy,
+		}
+	end
+	return out
+end
+
+--- The angular wedge left uncovered at the apex, in degrees.
+--
+--  Two bars meeting at a point, each cut square across its own axis, cannot tile the
+--  corner: outside the joint there is a wedge neither covers. Its size is the turn
+--  between the two arms, and it is what R2.20 recorded as reading like a notch. It is
+--  computed here rather than judged from a screenshot because it is the ONE number
+--  that decides whether this renderer is usable, it varies with viewing angle and
+--  distance, and it is exactly the thing three earlier attempts argued about.
+--
+--  iqm_arm's soft tip (ARM_TIP = 0.14 of the arm's length) is what fills it: the ends
+--  fade instead of stopping, so there is no hard edge for the wedge to be a notch in.
+--  A wedge much wider than that ramp will show through anyway.
+function apex_wedge_deg(m, proj)
+	local r = arm_rects(m, proj)
+	if not r then return nil end
+	local d = abs(math.deg(r[1].ang - r[2].ang)) % 360
+	if d > 180 then d = 360 - d end
+	return 180 - d
+end
+
+-- --------------------------------------------------------------------------
+-- Widgets
+-- --------------------------------------------------------------------------
+local _P, _S = vector2(), vector2()
+local function P(x, y) _P.x, _P.y = x, y; return _P end
+local function S(w, h) _S.x, _S.y = w, h; return _S end
+
+local _v = vector()
+local function project(x, y, z)
+	local ui = game.world2ui_with_depth(_v:set(x, y, z), false, true)
+	if not ui or ui.z < 0 then return nil, nil, false end
+	return ui.x, ui.y, true
+end
+
+class "IqmArmsWnd" (CUIScriptWnd)
+
+function IqmArmsWnd:__init() super()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+	self:SetAutoDelete(true)
+	self.xml = CScriptXmlInit()
+	self.xml:ParseFile("iqm_arms.xml")
+	for mi = 1, MAX_MARKS do
+		ST.pool[mi] = {}
+		for k = 1, 2 do
+			local w = self.xml:InitStatic("arm_bar", self)
+			w:SetStretchTexture(true)
+			w:Show(false)
+			ST.pool[mi][k] = w
+		end
+	end
+end
+
+local function ensure_wnd()
+	if ST.wnd then return true end
+	local hud = get_hud()
+	if not hud then return false end
+	ST.pool = {}
+	ST.wnd = IqmArmsWnd()
+	hud:AddDialogToRender(ST.wnd)
+	return true
+end
+
+--- Drop the dialog while we can still reach it.
+--
+--  The engine never reclaims a dialog we forget: RemoveDialogToRender is the only way
+--  out of m_dialogsToRender short of CleanInternals, and a save load calls neither. So
+--  this MUST run while the handle is still live -- actor_on_net_destroy, which fires
+--  on unload, before the re-read wipes it.
+local function teardown()
+	if not ST.wnd then return end
+	local hud = get_hud()
+	if hud then hud:RemoveDialogToRender(ST.wnd) end
+	ST.wnd, ST.pool, ST.used, ST.shown = nil, {}, 0, false
+end
+
+-- --------------------------------------------------------------------------
+-- Drawing
+-- --------------------------------------------------------------------------
+function draw(marks)
+	if not ensure_wnd() then return 0 end
+	refresh_kx()
+	-- TWO counters, and conflating them was a bug. `n` is how many marks DREW; `hi` is
+	-- the highest pool row this pass touched. The parking loop below must run from
+	-- `hi`, not from `n`: pool row mi always belongs to marks[mi], so if mark 3 fails
+	-- to project while 4..9 succeed, n is 8 while rows up to 9 are in use -- and
+	-- parking from n + 1 would blank row 9 immediately after drawing it. The visible
+	-- effect is marks winking out as you move, since which mark fails changes with
+	-- the camera.
+	local n, hi = 0, 0
+	for mi = 1, min(#marks, MAX_MARKS) do
+		local r = arm_rects(marks[mi], project)
+		local row = ST.pool[mi]
+		if r then
+			for k = 1, 2 do
+				local a, w = r[k], row[k]
+				w:SetWndSize(S(a.ln, a.th))
+				w:SetWndPos(P(a.cx - a.ln * 0.5, a.cy - a.th * 0.5))
+				w:EnableHeading(true)
+				w:SetHeading(a.ang)
+				w:Show(true)
+			end
+			n, hi = n + 1, mi
+		else
+			row[1]:Show(false); row[2]:Show(false)
+		end
+	end
+	for mi = hi + 1, ST.used do
+		local row = ST.pool[mi]
+		if row then row[1]:Show(false); row[2]:Show(false) end
+	end
+	ST.used, ST.shown = hi, true
+	return n
+end
+
+function hide()
+	if not ST.wnd then return end
+	for mi = 1, ST.used do
+		local row = ST.pool[mi]
+		if row then row[1]:Show(false); row[2]:Show(false) end
+	end
+	ST.used, ST.shown = 0, false
+end
+
+function is_shown() return ST.shown end
+
+-- --------------------------------------------------------------------------
+-- Test drivers
+-- --------------------------------------------------------------------------
+-- Feedback goes to the F7 debugger's console when it is around, else to the log;
+-- the body is iqm_util.dbg_out, which five files were each carrying a copy of. Not
+-- aliased into a local, because it only ever runs from a debug action.
+local live_marks = nil
+
+function debug_to_target()
+	if not db.actor then return end
+	local from = db.actor:position()
+	local obj = level.get_target_obj and level.get_target_obj()
+	local to
+	if obj then
+		to = obj:position()
+	else
+		local d = device()
+		to = vector():set(d.cam_pos.x + d.cam_dir.x * 30,
+		                  d.cam_pos.y + d.cam_dir.y * 30,
+		                  d.cam_pos.z + d.cam_dir.z * 30)
+	end
+	local pts = iqm_pathline.snap(iqm_pathline.sample(from, to, 3.0), 0.05)
+	-- Headings over a 6 m baseline, NOT from this point to the next one. snap() moves
+	-- every point up to SNAP_MAX_XZ sideways to reach a navmesh vertex, so a one-step
+	-- baseline carries that wobble as roughly +/-13 degrees of alternating heading noise
+	-- on a dead-straight path. See iqm_pathline.headings.
+	local dirs = iqm_pathline.headings(pts)
+	live_marks = {}
+	for i = 1, #pts - 1 do
+		local a, d = pts[i], dirs[i]
+		if d and #live_marks < MAX_MARKS then
+			-- Normal probed ONCE per mark, here, not per frame in draw(). The marks are
+			-- fixed world points and the ground under them does not move, so a raycast
+			-- per mark per frame would buy nothing and cost 12 picks a frame.
+			live_marks[#live_marks + 1] = {
+				x = a.x, y = a.y, z = a.z, ux = d.x, uz = d.z,
+				n = ground_normal(a.x, a.y, a.z),
+			}
+		end
+	end
+	local tilted = 0
+	for i = 1, #live_marks do
+		local n = live_marks[i].n
+		if n and n.y < 0.999 then tilted = tilted + 1 end
+	end
+	-- Report the apex wedge for the nearest mark, since that is where it is worst and
+	-- it is the number this whole prototype turns on.
+	local w = live_marks[1] and apex_wedge_deg(live_marks[1], project)
+	iqm_util.dbg_out("-IQM-ARMS: %s marks; apex wedge on the nearest is %s deg; %s sitting on "
+		.. "sloped ground", #live_marks,
+		w and string.format("%.1f", w) or "n/a", tilted)
+end
+
+function debug_hide()
+	live_marks = nil
+	hide()
+	iqm_util.dbg_out("-IQM-ARMS: hidden")
+end
+
+-- --------------------------------------------------------------------------
+-- Wiring
+-- --------------------------------------------------------------------------
+local function actor_on_update()
+	if live_marks then draw(live_marks) end
+end
+
+function on_game_start()
+	-- A save load RE-READS this file, and that is a new incarnation of the module even
+	-- when the dialog from the last one is still alive and still rendering. Drop it here
+	-- rather than relying on actor_on_net_destroy having fired: whether that callback
+	-- runs on every path into a load is not something to bet the symptom on, and the
+	-- symptom is marks frozen at fixed SCREEN rects, i.e. glued to the camera.
+	--
+	-- Under pcall because the handle may be STALE rather than merely old: if the engine
+	-- destroyed the window with the level, HUD_STATE still holds the userdata and
+	-- touching it is not safe. A failed teardown must not take on_game_start with it.
+	pcall(teardown)
+	-- The once-per-process flag and the launcher guard are iqm_util.inject_actions';
+	-- only the list was ever this module's own.
+	iqm_util.inject_actions("iqm_arms", {
+		{ name = "IQM: Arms Path to Aim", functor = { debug_to_target }, hide_ui = 2 },
+		{ name = "IQM: Arms Hide",        functor = { debug_hide },      hide_ui = 2 },
+	})
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", teardown)
+end

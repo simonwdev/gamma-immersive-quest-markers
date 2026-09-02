@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 -960 960 960" fill="currentColor">
+<!-- House, the mark for a FAST TRAVEL point. Drawn BARE, with no badge ring - see
+     NO_BADGE in build.py, where this glyph is the worked example of the no-circle rule.
+
+     Material Symbols "home", outlined weight 400 (Apache 2.0), INVERTED: the source
+     draws a house as an outline, i.e. its filled region is the strokes, and what is
+     kept here is the OUTER subpath alone. That fills the silhouette and leaves the
+     doorway as a hole, which is the shape below.
+
+     WHY IT REPLACED TABLER'S home-2-filled (R2.56). The Tabler glyph was solid and,
+     once its window subpath came out, featureless. Rendered at the 26 px this spot
+     actually draws, its heavy corner rounding and near-absent eave overhang left a
+     ROUNDED PENTAGON: legible as a shape, not readable as a house, which is what
+     "doesn't look very good" was reporting. Two things fix that and both are geometry
+     rather than size. Material's eaves overhang the walls, so the roof line reads as a
+     roof instead of as the top two edges of a blob; and the doorway breaks the solid
+     mass without adding an interior feature that has to survive a downsample.
+
+     THE DOORWAY IS 12.5% OF THE HOUSE WIDTH (80 of 640 units) and it is worth knowing
+     that number, because a doorway is what got REJECTED here once already. Tabler's
+     home-filled cuts a door that runs off the bottom edge and splits the base into two
+     feet, and at this size those feet came out ~2 px each and merged with the keyline
+     into a ragged bottom edge. Material's is narrower and its feet are ~11 px at 26 px
+     drawn, so the same feature that failed there works here. Check the feet, not the
+     door, before ever swapping this glyph again.
+
+     THE NO-CIRCLE RULE IS NOT WHY THIS IS A HOUSE, and that correction matters because
+     the rule is quoted elsewhere as though it settled the question. It said: the handheld
+     3D PDA squashes every map spot to 0.75 of its width, and a circle squashed becomes an
+     oval that the eye reports, while a straight-edged glyph merely narrows. The first half
+     is true and the conclusion does not follow, because THE SAME IS TRUE OF EVERYTHING
+     ELSE IN THIS ATLAS - twelve ringed badges are circles, they oval in exactly that view,
+     and the pack has always accepted it. Rendering a squashed badge beside a squashed pin
+     shows identical distortion. So a circular glyph was never disqualified here.
+
+     A PIN WAS RE-TESTED ON THAT BASIS (Tabler map-pin-filled, kept at home-pin.alt) and
+     REVERTED - on preference, not on the geometry. It reads cleanly at every size once it
+     is 12 units with a 7 px keyline, which is what the original pin lacked; the house was
+     simply judged the better mark. Recorded so the next person does not re-litigate the
+     squash: that argument is spent, and if this cell changes again it should be for how it
+     reads, which is the only thing either swap actually turned on.
+
+     TEAL 80,229,202, which is NOT a colour this atlas chose. It is sampled straight out
+     of AlphaLion's ui_MapSpots.dds, the art actually on screen for this spot in this
+     pack, so the mark changes shape without changing what the player has learned it
+     means. See the fast_travel_spot entry in modxml_n_iqm_map_icons.script for why that
+     art, and not vanilla's half transparent ui_hud_icon_sleep, is the thing replaced.
+
+     ONE MEASUREMENT TO CARRY FORWARD. This glyph inks 50.4% of its cell against the
+     medic badge's 34.9%, because a solid silhouette is not a ring. Sizing this spot by
+     matching a badge's FOOTPRINT therefore overshoots its visual weight by ~1.4x, which
+     is what put a 20 unit house next to 19 unit badges and had it read as the largest
+     mark on the map. Size it by ink, not by box. -->
+<path d="M160-120v-480l320-240 320 240v480H520v-240h-80v240H160Z" />
+</svg>

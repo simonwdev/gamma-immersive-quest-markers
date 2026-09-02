@@ -1,0 +1,444 @@
+<!-- Immersive Quest Markers - the minimap trail's calibration spot.
+
+     NOT a marker anyone is meant to see. iqm_minimap measures the HUD minimap's
+     centre and scale by putting a spot on an object whose world position it knows
+     and asking the engine where the spot's widget ended up (see docs/minimap-route.md,
+     sections 4 and 6a). That measurement is the only reason this file exists.
+
+     Spliced into map_spots*.xml by modxml_n_iqm_map_icons.script via
+     insertFromXMLString, the same way Personal Adjustable Waypoint adds its own -
+     overriding map_spots*.xml outright is not an option here, since the winning copy
+     in GAMMA is Sota UI EGUI Style HUD's and a whole-file override would revert it.
+
+     WHY 1x1. The spot has to be effectively invisible, and there are only two ways to
+     get that: a fully transparent texture, or a size nothing can see. There is no
+     transparent cell available - iqm_map_icons.dds is a 4x3 grid with all twelve cells
+     used - and a map spot's alpha comes from its texture's own pixels rather than from
+     any attribute here (which is why vanilla's fast_travel house reads as half
+     transparent: its source art is). So: one pixel, at stretch="1", pointed at a cell
+     we already ship. The texture id is irrelevant to the result and is only named
+     because the element needs one.
+
+     It is also SHORT-LIVED. iqm_minimap adds this spot only while it is solving and
+     removes it as soon as it has, and the solved transform is cached per level and
+     resolution - so in practice the pixel exists for a handful of frames after a level
+     change and never again.
+
+     mini_map only, deliberately: no <level_map> child means it can never appear on the
+     fullscreen PDA map, the same way vanilla's own *_on_guider spots are minimap-only.
+
+     location_level="-1" and hint="disable_hint" both follow the vanilla blink spots -
+     no floor-relative swapping and no hint string to look up. -->
+<iqm_calib hint="disable_hint" location_level="-1">
+	<mini_map spot="iqm_calib_spot"/>
+</iqm_calib>
+<iqm_calib_spot x="0" y="0" width="1" height="1" stretch="1" alignment="c" location_level="-1">
+	<texture>iqm_mapspot_handin</texture>
+</iqm_calib_spot>
+
+<!-- ==================================================================
+     TASK-KIND SPOTS (R2.48): what KIND of job that pin is.
+
+     Five location types the base game does not have. iqm_taskspot moves a task's
+     map location onto one of these while the task is a mutant hunt, a fight (a
+     bounty, a rescue or a defend) or a delivery and its objective is not yet done -
+     or, for the two hollow reticles below, while the pin is sitting on top of a mark
+     the map was already drawing - and puts the task's own type back when none of that
+     holds.
+     Everything about how that is decided lives in iqm_taskspot.script; this file is
+     only the art.
+
+     WHY NEW TYPES RATHER THAN A TINT. A spot's colour is an r/g/b attribute on its
+     <texture> element, read once when map_spots.xml is parsed. There is no runtime
+     tint on a map spot and no per-task one - every task sharing a type shares its
+     colour - so "this pin is red" can only be said by pointing the task at a
+     different type. That is the whole reason these exist.
+
+     THESE ARE CLONES of secondary_task_spot, deliberately, and the geometry below is
+     vanilla's byte for byte apart from two things:
+
+       * the textures and tints are ours (the point of the exercise), and
+       * static_border sits at x="-5" y="-5" rather than vanilla's x="-4" y="-5".
+         The border is 29 units against the spot's 19, so centred is -(29-19)/2 = -5
+         on both axes; vanilla gets y right and x wrong by one. modxml_n_iqm_map_icons
+         applies the same correction to the four vanilla task spots and the note there
+         records how it was measured. Authoring it correctly here rather than patching
+         it afterwards is the only difference in method.
+
+     Keeping vanilla's numbers matters for a reason beyond tidiness: Dynamic Aspect
+     Ratio Tweaks rewrites spot geometry per aspect ratio and knows nothing about
+     these two elements, so on a non-16:9 setup they will keep whatever is written
+     here while the vanilla spots get corrected. Written as vanilla's, that drift is
+     bounded by exactly the correction DART would have applied; invented numbers
+     would compound with it.
+
+     ONE TYPE PER KIND, not per kind x storyline/secondary. A storyline mutant hunt
+     is still a mutant hunt, and the atlas's own grammar says shape separates
+     categories while colour separates within one - so the skull carries "mutant"
+     whichever tier of task asked for it, and the gold/bone split it gives up was
+     never the thing the player needed from that pin.
+
+     A NOTE ON SAVES, because it is the real cost of this feature. A task's location
+     type string is written into the save (SLocationKey::save, map_manager.cpp:62) and
+     reconstructed through CMapLocation's constructor on load, which asserts on a type
+     map_spots.xml does not declare (map_location.cpp:105) - an engine fatal, not a
+     catchable error. So a save taken while a bounty is flagged red will NOT load with
+     this mod removed. Personal Adjustable Waypoint carries the identical hazard for
+     its own ~100 types, so this is the pack's normal rather than a new class of risk,
+     but it is the reason iqm_taskspot puts the vanilla type back the moment the
+     feature is switched off rather than merely stopping.
+     ================================================================== -->
+
+<!-- REVERTED (R2.59): this mod no longer supplies an off-screen pointer.
+
+     Five elements used to live here, one per task colour, and modxml_n_iqm_map_icons
+     repointed storyline / primary / secondary at two of them. All six of our own task types
+     now name quest_pointer, the game's own arrow, exactly as vanilla's task locations do.
+
+     THE ORIGINAL REASONING IS WORTH KEEPING because it was half right. Redefining
+     quest_pointer itself would have been wrong: those names are shared by the level
+     changers, the treasure spots, the fourteen faction circles and the combat pointer, so
+     an override would be this mod deciding what every other mod's off-screen cue looks
+     like. Declaring our OWN elements avoided that, and it is why the repoint was thought
+     safe. What it did not avoid is that the arrow is a SHARED VOCABULARY even when the
+     element is private: the player learns one off-screen arrow, and giving task markers a
+     different one from everything else on the map splits that vocabulary rather than
+     enriching it. The pin at the destination is ours to style; the arrow that says "keep
+     walking that way" is the map's.
+
+     The atlas cell (iqm_mapspot_pointer) and its texture id are kept, unused, the way
+     `skull` and `home` are. To reinstate: put these elements back, restore the POINTERS
+     table in modxml_n_iqm_map_icons, and point the task types below at them again. Note
+     the two constraints that cost the most to find, so they are not rediscovered:
+     heading="1" makes the engine rotate the quad, so the element must be SQUARE or the
+     arrow shears; and stretch="1" is required, because CMapSpot::Load only forces it when a
+     spot has no heading (map_spot.cpp:37-41), so without it a 128 px cell draws 128 units
+     across. -->
+
+<!-- MUTANT HUNT. Acid lime (176,216,72): a mutant belongs to no faction and has no
+     colour to borrow, and this clears the turn-in green by dE 36 and the storyline
+     gold by dE 39, both over the dE 28 floor the palette works to. The separation
+     does less work here than usual anyway - nothing else on the map is a skull.
+
+     THE MARK IS A RETICLE WITH A SKULL IN IT (R2.49), not the bare skull it started
+     as. Both halves are needed: the reticle says "a task, go and find it" and the
+     glyph says which kind, which is the same grammar the service badges use. The bare
+     skull said only "mutant" and dropped the fact that it was a task at all.
+     It costs the skull size - 74 px inside the frame against 110 px bare, so a third
+     off each side and just over half the area - and at the 26 px of the minimap its
+     sockets start to close. iqm_mapspot_skull is still built and still declared, so
+     backing this out is one id per texture element here and nothing else. -->
+<iqm_task_mutant>
+	<level_map spot="iqm_task_mutant_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_mutant_spot_mini" pointer="quest_pointer"/>
+</iqm_task_mutant>
+<iqm_task_mutant_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="176" g="216" b="72">iqm_mapspot_taskmutant</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="176" g="216" b="72">iqm_mapspot_select</texture>
+	</static_border>
+</iqm_task_mutant_spot>
+<iqm_task_mutant_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="176" g="216" b="72">iqm_mapspot_taskmutant</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="176" g="216" b="72">iqm_mapspot_select</texture>
+	</static_border>
+	<texture_below r="176" g="216" b="72">iqm_mapspot_below</texture_below>
+	<texture_above r="176" g="216" b="72">iqm_mapspot_above</texture_above>
+</iqm_task_mutant_spot_mini>
+
+<!-- BOUNTY. The task reticle with a BUST in it, in red. It shipped first as the plain
+     reticle recoloured, on the reasoning that the reticle was already the right mark
+     and only the colour needed to change; what that missed is that a bounty and an
+     ordinary task then differed by hue ALONE at 26 px, with identical shapes. The
+     glyph is what makes the two different marks rather than two colours.
+
+     The bust is Tabler's user-filled, the same drawing vip.svg uses, and it is copied
+     as svg/bounty.svg rather than shared so the two can diverge. The FRAME separates
+     them before the colour does: a ring badge means "a person who is here", the
+     reticle means "a task, go and find it". It also costs nothing - the glyph is
+     already drawn at ~70 px inside the badge ring for the VIP, and it gets 74 px here.
+
+     THE RED IS NOW A DARKER, DULLER ONE (172,60,66), down from the 214,44,60 this
+     shipped with. That first red was picked to sit as close as possible to the engine's
+     own enemy-relation dot (237,28,36) on the reasoning that a bounty IS a hostile human
+     and red agreeing with red is the convention working. What it missed is that the
+     enemy dot is an ALERT - a thing that appears without being asked for and wants to
+     interrupt you - while this pin is a job you accepted and went looking for. A marker
+     that shouts every time the PDA is open is reading its own urgency wrong.
+     So both of the things that make a colour shout are pulled back rather than just the
+     lightness: L* 47.5 -> 41.8 and, more to the point, chroma 72.9 -> 50.9, a 30% drop.
+     dE 8 from the old red, so it is a visible change and not a nudge; still dE 20 from
+     medic salmon and dE 23 from the barman magenta, the two nearest warm colours on the
+     map. It also had to clear the hostage azure by dE 55 until R2.55, when rescues folded
+     into this same mark and that pairing stopped existing - the note below records why
+     those two are the SAME GLYPH.
+     It does not go darker than this. question_location's red sits at L* 43.1 and is the
+     darkest tint the atlas ships; every mark here is drawn over a black keyline, so a
+     tint much below that stops separating from its own outline at 26 px, which is the
+     wash the OUTLINE note in tools/map-icons/build.py was written about. -->
+<iqm_task_bounty>
+	<level_map spot="iqm_task_bounty_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_bounty_spot_mini" pointer="quest_pointer"/>
+</iqm_task_bounty>
+<iqm_task_bounty_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="172" g="60" b="66">iqm_mapspot_taskbounty</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="172" g="60" b="66">iqm_mapspot_select</texture>
+	</static_border>
+</iqm_task_bounty_spot>
+<iqm_task_bounty_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="172" g="60" b="66">iqm_mapspot_taskbounty</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="172" g="60" b="66">iqm_mapspot_select</texture>
+	</static_border>
+	<texture_below r="172" g="60" b="66">iqm_mapspot_below</texture_below>
+	<texture_above r="172" g="60" b="66">iqm_mapspot_above</texture_above>
+</iqm_task_bounty_spot_mini>
+
+<!-- THERE WAS A HOSTAGE-RESCUE TYPE HERE FROM R2.51 TO R2.55: the bounty's mark in azure
+     (64,164,214), reusing iqm_mapspot_taskbounty and differing from the contract only in
+     tint. It is gone, and the reason is worth keeping because the argument for it was a
+     good one that turned out to be about the wrong thing.
+
+     IT SAID: a rescue and a contract are the same sentence about the objective - "it is a
+     particular person" - and differ only in the verb, so they should share a glyph and
+     split on hue. Red and azure are dE 55 apart, a hue opposition rather than a shade, so
+     the separation was never in doubt.
+
+     WHAT WAS WRONG WITH IT: the verb is the part the player does not act on. Getting the
+     hostage back means killing whoever is holding them, so the preparation, the approach
+     and the fight are identical - and a second colour asked the player to tell apart two
+     marks that call for exactly the same thing. The map was making a distinction that was
+     true and useless. iqm_scan's rescue functor now answers "bounty" outright.
+
+     WHAT IT COST: the map no longer says "someone is alive at this pin". Real, and judged
+     not worth a colour on the grounds above.
+
+     TO REINSTATE: a key in iqm_taskspot's SPOT, this type and its two spots, an
+     iqm_pointer_hostage, and a BEACON_RGB entry. No atlas cell - it never had one, which
+     was the good half of the original design and is the half worth remembering: one cell,
+     two location types, two tints, the same trick the 14 warfare squad spots use on
+     iqm_mapspot_squad. -->
+
+
+<!-- DELIVERY. The task reticle with an ENVELOPE in it, in the HAND-IN GREEN (40,172,66).
+
+     WHY IT NEEDS A MARK AT ALL. tasks_delivery hands you a package and a person to take it
+     to. Its stage 1 target is that person (tasks_delivery.script:188) and its
+     stage_complete is 2, so while the job is outstanding the pin sits on a NAMED NPC -
+     structurally the same mark as a bounty, and without a glyph the two
+     are one reticle in two colours. The envelope is what makes it a sentence.
+
+     WHY THE COLOUR IS THE HAND-IN'S RATHER THAN ONE OF ITS OWN. It shipped violet for one
+     revision, chosen by maximising distance from the other reticles, and that optimised
+     for the wrong thing: it made the mark maximally DISTINCT when what it needed was to be
+     maximally RECOGNISED. Walking a package to a named NPC is the same act as walking a
+     finished job back to its giver, and the map already has a colour that means exactly
+     that - 40,172,66, the green on both on_guider spots and on ATUE's return spot, which
+     the marker mirrors as BEACON_RGB.target. Saying it in a fifth colour would have made
+     the player learn a new word for something they already knew.
+
+     SO THIS IS THE ONE PLACE THE PALETTE'S USUAL RULE IS INVERTED, deliberately. Elsewhere
+     colour SEPARATES within a shape family; here it UNIFIES - green means "hand this to
+     somebody" and the GLYPH says which errand, the envelope against the hand-in diamond.
+     The two are the same frame in the same green and are told apart the way the service
+     badges are told apart, which is the atlas's own grammar working rather than an
+     exception to it. Note the consequence for the colour harness: a dE check between these
+     two would be measuring the thing that is supposed to be zero.
+
+     STAGE 0 WEARS IT TOO, and that is deliberate rather than overlooked. At stage 0 the
+     target is the package itself, which tasks_delivery creates in the ACTOR'S inventory
+     (`:217`), so the mark is on the player. Vanilla already draws its own task pin there;
+     this only changes which glyph, and "you are carrying the package" is a true thing for
+     it to say. -->
+<iqm_task_delivery>
+	<level_map spot="iqm_task_delivery_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_delivery_spot_mini" pointer="quest_pointer"/>
+</iqm_task_delivery>
+<iqm_task_delivery_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="40" g="172" b="66">iqm_mapspot_taskdelivery</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="40" g="172" b="66">iqm_mapspot_select</texture>
+	</static_border>
+</iqm_task_delivery_spot>
+<iqm_task_delivery_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="40" g="172" b="66">iqm_mapspot_taskdelivery</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="40" g="172" b="66">iqm_mapspot_select</texture>
+	</static_border>
+	<!-- The BARE arrows, not iqm_mapspot_above/_below. CMiniMapSpot does not decorate the
+	     marker with these, it REPLACES it, so whatever they wear is what this mark claims to
+	     be while the target is on another floor. A ring would say "someone is here", which is
+	     a different statement from the envelope's "go and give this to a named person" - and
+	     the player would watch the mark change category by walking upstairs. -->
+	<texture_below r="40" g="172" b="66">iqm_mapspot_belowbare</texture_below>
+	<texture_above r="40" g="172" b="66">iqm_mapspot_abovebare</texture_above>
+</iqm_task_delivery_spot_mini>
+
+<!-- HAND-IN: the objective is done and the marker has moved onto whoever gave you the job.
+     The diamond, in the same green as the delivery envelope beside it, and sharing its
+     pointer for the same reason - both marks mean "walk to a person and give them
+     something", and the glyph is what separates a package from a finished job.
+
+     THIS MARKER USED TO BELONG TO ANOTHER MOD. gamma-active-task-ui-enhancements set its own
+     atue_return_task_location for exactly this state, and all this pack did was RE-TEXTURE
+     it (the atue_ entries in modxml_n_iqm_map_icons, still there and still correct for
+     anyone running it). Uninstalling that mod took the marker away entirely, because we
+     owned the picture and it owned the meaning. iqm_scan.handin_state now decides it here.
+
+     IT CARRIES A static_border LIKE EVERY OTHER TASK TYPE HERE, and the reasoning that
+     briefly left it off was wrong in an instructive way. That argument ran: the border is a
+     framing device, a hand-in is a destination rather than an objective, so there is nothing
+     to search your way towards and no frame is wanted. It confused two different jobs. The
+     GRAMMAR - ring means someone is here, reticle means go and find this, bare glyph means
+     go and give this to a named person - is carried by the spot TEXTURE, and that is what
+     had to lose its reticle. static_border is not part of that grammar at all: it is the
+     engine's ACTIVE-TASK indicator (show_static_border, driven from CMapLocation against
+     ActiveTask), the only on-map signal of which task you have selected. Dropping it does
+     not simplify the mark, it removes the answer to "which one am I following". A task you
+     cannot see is selected is worse than one wearing an extra ring.
+
+     The same distinction is why the delivery envelope kept its border through the same
+     change: only its texture left the reticle family. -->
+<iqm_task_handin>
+	<level_map spot="iqm_task_handin_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_handin_spot_mini" pointer="quest_pointer"/>
+</iqm_task_handin>
+<iqm_task_handin_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="40" g="172" b="66">iqm_mapspot_handin</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="40" g="172" b="66">iqm_mapspot_select</texture>
+	</static_border>
+</iqm_task_handin_spot>
+<iqm_task_handin_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="40" g="172" b="66">iqm_mapspot_handin</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="40" g="172" b="66">iqm_mapspot_select</texture>
+	</static_border>
+	<!-- Bare, for the same reason as the delivery envelope above: these REPLACE the mark
+	     rather than decorate it, and the tag's statement is "go and give this to a named
+	     person", which a badge ring contradicts. -->
+	<texture_below r="40" g="172" b="66">iqm_mapspot_belowbare</texture_below>
+	<texture_above r="40" g="172" b="66">iqm_mapspot_abovebare</texture_above>
+</iqm_task_handin_spot_mini>
+
+<!-- THE OPEN RETICLE. The reticle with NOTHING in it, in the secondary task's own bone
+     (240,244,248) - so it is the ordinary side-task marker minus its middle, which is
+     exactly what this is for: a pin that has landed on top of a mark the map was already
+     drawing, and should ring that mark rather than cover it.
+
+     WHY A WHOLE LOCATION TYPE FOR A HOLE. There is no way to say "this one reticle is
+     hollow" in XML, because a spot type is shared with every task in the game that carries
+     it - so this is the same answer R2.48 reached for mutant hunts and bounties: the thing
+     that needs saying becomes a location type, and iqm_taskspot moves the task onto it. The
+     difference is that this one is not about what the task IS. It is about what is already
+     underneath it, which is why it is the LAST question iqm_scan.task_kind asks and why
+     every answer about the job outranks it.
+
+     IT WAS CALLED iqm_task_waypoint UNTIL R2.52, and the rename is the interesting part of
+     the history. It arrived (R2.49e) for exactly one thing: Personal Adjustable Waypoint's
+     pin IS an Anomaly task (task_placeable_waypoint, storyline = false), so its spot is
+     plain secondary_task, and PAW puts BOTH marks on the same object - change_map_location
+     for the task and map_add_object_spot for its own pin
+     (tasks_placeable_waypoints.script:1547-1548). The player picks that pin from a library
+     of 85 and the reticle lands squarely on it; since R2.49b the crosshair is 2.0/23 and
+     solid through the middle, so it does not merely overlap the pin, it hides it.
+     That was never a fact about waypoints. The DRX quest-item tasks point straight at a
+     stash the player has already found (tasks_stash.script:159, 21 sections) and bury the
+     stash icon the same way, and so does anything else a mod aims at a marked object. The
+     type is named for the shape it draws, not for the first thing that needed it.
+
+     CONDITIONAL, and that is still the whole point of it. A task only wears this while its
+     target ALREADY carries some other map mark - a service badge, a stash, a level changer,
+     another task's pin. On bare ground it keeps the ordinary reticle, because an empty ring
+     over empty ground is just a marker with its middle missing. iqm_scan asks the ENGINE
+     what is drawn there (level.map_get_object_spots_by_id, level_script.cpp:485) rather
+     than guessing from a list of spot types it happens to know, so the rule covers whatever
+     any mod draws. The one case it cannot query - a mark on a DIFFERENT object at the same
+     position, which is how the nta_stash tasks are built - is named in TARGET_KIND instead,
+     and the reasoning for that exception is written there.
+
+     IT HAS static_border AGAIN AS OF R2.55, and dropping it was a real bug rather than a
+     debatable trade. The paragraph that used to sit here argued that a task wearing this
+     type should give up its selection ring, because a ring around a mark that has its own
+     ring is one ring too many. That reasoning was sound for the waypoint case it was
+     written for and false for every other case, and the difference is not cosmetic:
+
+     static_border IS the active-task indicator. CMapLocation::UpdateSpot compares the
+     location against GameTaskManager().ActiveTask() and calls show_static_border on the
+     result (map_location.cpp:371-391) - and show_static_border is a SILENT NO-OP when the
+     element was never declared (map_spot.cpp:140-146). The engine's other cue, the
+     GetSpotBorder overlay (map_location.cpp:661-700), is dead in this pack: Sota UI
+     declares level_map_spot_border with <texture a="0">, fully transparent. So a type with
+     no static_border has no way to say "this is the one you are tracking", and the reported
+     symptom - "capture encrypted documents doesn't seem to be clickable" - was that with
+     one word wrong. The click lands (CMapSpot::OnMouseAction, map_spot.cpp:97-118) and the
+     task DOES become active (UIMapWnd.cpp:1161-1181); nothing on screen changes, so the
+     player correctly concludes the pin is dead.
+
+     THE FIX IS A TYPE SPLIT, not a border added to one shared type, because the original
+     argument still holds for the case it was made about. See iqm_task_waypoint below.
+
+     Same save rule as the other four: the type name never reaches a save, because
+     iqm_taskspot reverts every flagged task in the pre-save callback. -->
+<iqm_task_open>
+	<level_map spot="iqm_task_open_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_open_spot_mini" pointer="quest_pointer"/>
+</iqm_task_open>
+<iqm_task_open_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="240" g="244" b="248">iqm_mapspot_select</texture>
+	</static_border>
+</iqm_task_open_spot>
+<iqm_task_open_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
+	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
+		<texture r="240" g="244" b="248">iqm_mapspot_select</texture>
+	</static_border>
+	<texture_below r="240" g="244" b="248">iqm_mapspot_below</texture_below>
+	<texture_above r="240" g="244" b="248">iqm_mapspot_above</texture_above>
+</iqm_task_open_spot_mini>
+
+<!-- THE WAYPOINT RETICLE. Byte-for-byte iqm_task_open except that it declares NO
+     static_border - and it exists ONLY to carry that difference.
+
+     This is the name and the shape the open reticle shipped under until R2.52, brought back
+     as a type of its own in R2.55 rather than reverted to. The R2.52 rename was right about
+     the SHAPE: a hollow reticle is for any pin that has landed on a mark the map already
+     draws, and Personal Adjustable Waypoint was just the first thing that needed one. What
+     the rename flattened was that PAW is still special in a way the shape does not capture.
+
+     PAW SUPPLIES ITS OWN ANIMATED RING. Its pin is a real Anomaly task
+     (task_placeable_waypoint, storyline = false), and it puts BOTH marks on the same object
+     - change_map_location for the task, then map_add_object_spot for its own highlight
+     (tasks_placeable_waypoints.script:1547-1548). That highlight is paw_task_default at 39
+     units, which modxml_n_iqm_map_icons re-textures to iqm_mapspot_blink. Give this type a
+     static_border and a selected waypoint wears TWO concentric pulsing rings on different
+     periods, which is worse than the missing one it replaced.
+
+     EVERY OTHER TASK THAT WEARS A HOLLOW RETICLE SUPPLIES NOTHING. A stash mark, a service
+     badge, a level changer - none of them animate, so the selection ring is the only moving
+     thing on the pin and it has no competition. That asymmetry is the whole reason there are
+     two types here instead of one: the trade the old comment described is a good trade
+     exactly once, and a bad one everywhere else.
+
+     WHAT DECIDES WHICH. iqm_scan.task_kind returns "waypoint" only from its first branch,
+     which tests the task id against task_placeable_waypoint directly, and returns "open"
+     from its last, which asks the engine what else is drawn on the target. So this type is
+     reachable by exactly one mod's tasks and the split cannot leak.
+
+     Same save rule as every type in this file. -->
+<iqm_task_waypoint>
+	<level_map spot="iqm_task_waypoint_spot" pointer="quest_pointer"/>
+	<mini_map spot="iqm_task_waypoint_spot_mini" pointer="quest_pointer"/>
+</iqm_task_waypoint>
+<iqm_task_waypoint_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
+</iqm_task_waypoint_spot>
+<iqm_task_waypoint_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
+	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
+	<texture_below r="240" g="244" b="248">iqm_mapspot_below</texture_below>
+	<texture_above r="240" g="244" b="248">iqm_mapspot_above</texture_above>
+</iqm_task_waypoint_spot_mini>

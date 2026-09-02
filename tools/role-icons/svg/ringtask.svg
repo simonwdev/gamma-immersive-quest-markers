@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"
+     fill="none" stroke="#000000" stroke-linecap="butt">
+  <!-- The SELECTED task's RING (R2.63): task.svg's outer arcs, byte for byte, with the
+       crosshair dropped. Not a new shape - the same TASK_OUT_R 0.455, TASK_OUT_W 2/23,
+       TASK_GAP_DEG 11 and cardinal gaps that iqm_mapspot_task and iqm_role_task both
+       carry, so the R2.29 mirror rule holds for this cell exactly as it does for those:
+       the bracket the PDA draws round the task you picked is the bracket you look for
+       through a wall.
+
+       WHY THE CROSSHAIR GOES. iqm_role_task is a GLYPH - the whole mark, drawn when the
+       kind resolved nothing better - and its crosshair is what fills the middle. This
+       cell is a FRAME, drawn UNDER another glyph (iqm_cards draws the ring first so it
+       frames the role mark rather than competing with it), and the middle is therefore
+       already occupied: the hand-in tag, the delivery envelope, the mutant skull. A
+       crosshair behind those is a second mark showing through the first at 20 px, which
+       is exactly the merge task.svg's own note spends its length avoiding.
+
+       SIZE IS NOT SET HERE. The ring draws at its own k (1.58, RING_GEOM in iqm_cards)
+       times the marker size, with the glyph inside it at 0.85 -- so what this file fixes
+       is only the arcs' proportions to each other; the same cell would read as a heavy
+       hoop if it were ever drawn AS a glyph. It is not, and BEACON_RING is the only
+       table that names it.
+
+       THE GAPS ARE THE LOAD-BEARING PART, which was not obvious when this was drawn.
+       They sit on the cardinals at +-11 degrees, mirroring TASK_GAP_DEG -- and the
+       WAYPOINT ring's sit in the same place at +-20. That difference is why the two
+       rings need different proportions rather than sharing RING_K: the hand-in tag's
+       widest points are at 15 and 75 degrees, so they pass through the waypoint's wide
+       openings and land squarely on this ring's long arcs. See RING_GEOM in iqm_cards.
+       Widening these gaps to match would fix that for free and is the one change this
+       file must not make: it would leave the two rings differing by stroke weight alone.
+
+       Judge any change to this at 20 px over the tag, never at 128 alone: the question
+       is whether ring and glyph stay separable, not whether the ring is pretty. -->
+  <g stroke-width="8.6957">
+    <path d="M 94.664 58.682 A 45.5 45.5 0 0 1 58.682 94.664"/>
+    <path d="M 41.318 94.664 A 45.5 45.5 0 0 1 5.336 58.682"/>
+    <path d="M 5.336 41.318 A 45.5 45.5 0 0 1 41.318 5.336"/>
+    <path d="M 58.682 5.336 A 45.5 45.5 0 0 1 94.664 41.318"/>
+  </g>
+</svg>

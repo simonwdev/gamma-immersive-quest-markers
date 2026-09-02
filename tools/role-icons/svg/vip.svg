@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-user">
+<!-- The bust, and the COMPANION marker's glyph (R2.57). The SAME art as
+     ../map-icons/svg/vip.svg, for the R2.29 rule that governs every shared cell here: the
+     mark you look for through a wall must be the mark the PDA map already draws for that
+     thing. Only the rendering differs - the map atlas wraps this in its badge ring because
+     a map spot stands alone, while this stays a bare keylined glyph because the marker
+     badge already supplies the ground.
+
+     WHY A COMPANION WEARS THE VIP BUST. Because the map does. modxml_n_iqm_map_icons points
+     ui_pda2_companion_location_spot (and Warfare's companion_tex / companion_spot_mini) at
+     iqm_mapspot_vip in the companion green, deliberately: "a companion should not look like
+     two different things depending on which path drew it", and glyph-alone is not what
+     separates a companion from a VIP there either - the GREEN is. Mirroring the map means
+     mirroring that decision rather than inventing a companion pictogram this mod would then
+     be the only view to use.
+
+     WHY NOT iqm_role_important, WHICH IS ALSO A PERSON. That cell is a tabler STAR, it is
+     card-only, and it is distressed - none of which is the map's bust. Two person-ish cells
+     in one atlas is the honest outcome of the two views having different sources: one is
+     the card's own art, this one is the map's. -->
+<path stroke="none" d="M0 0h24v24H0z" fill="none" /><path d="M12 2a5 5 0 1 1 -5 5l.005 -.217a5 5 0 0 1 4.995 -4.783z" /><path d="M14 14a5 5 0 0 1 5 5v1a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-1a5 5 0 0 1 5 -5h4z" /></svg>

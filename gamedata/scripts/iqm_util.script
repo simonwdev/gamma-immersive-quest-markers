@@ -1,0 +1,185 @@
+-- ======================================================================
+--  Immersive Quest Markers: the pieces every module had its own copy of
+-- ======================================================================
+-- Four helpers had been copy-pasted across the mod, and each copy was drifting
+-- at its own pace: a debug logger (7 files), the F7 debugger's output shim
+-- (5 files), the F7 action-registration boilerplate (5 files), and the whole
+-- ray_pick / occlusion pair (2 files, byte-for-byte identical apart from where
+-- the tolerance came from). What lives here is only the MECHANICS. Every
+-- policy that made a copy different -- the log tag, the flag that gates it, the
+-- action list, the lift and tolerance the occlusion test uses -- stays with the
+-- module that owns it and is passed in.
+--
+-- WHY THIS IS SAFE TO REACH AT FILE SCOPE, which the rest of the mod is careful
+-- never to do. Indexing a missing name on `_G` is not a plain lookup in this
+-- engine: CScriptEngine::setup_auto_load installs an __index metamethod on _G
+-- (script_engine.cpp:353) whose body calls process_file_if_exists on the name
+-- (:340-351), and every script's own environment is `setmetatable(this,
+-- {__index = _G})` (script_storage.cpp:50). So `iqm_util` read from any other
+-- IQM module -- at file scope or otherwise -- LOADS this file on the spot,
+-- whatever the alphabetical order of axr_main's enumeration says. That makes a
+-- `local say = iqm_util.logger(...)` at the top of a module well-defined rather
+-- than a load-order bet.
+--
+-- The flip side, stated plainly because it is a real change: this is now a HARD
+-- dependency. If this file ever fails to compile, every module that reads it at
+-- file scope dies with it instead of quietly losing one helper. That is the
+-- right failure for shared mechanics -- a silently missing occlusion test is a
+-- far worse day than a module that refuses to load -- but it is why this file
+-- stays small, dependency-free and boring.
+--
+-- Nothing here registers a callback or holds per-game state that outlives a
+-- level, so there is deliberately no on_game_start.
+
+local sqrt = math.sqrt
+
+-- --------------------------------------------------------------------------
+-- Debug logging
+-- --------------------------------------------------------------------------
+--- Build a module's `say`. Returns a closure, so the caller still keeps exactly
+--  one top-level local for it and the call site does not change:
+--
+--      local say = iqm_util.logger("[IQM-NAV] ", function() return DEBUG end)
+--
+--  `tag` is prepended to the format string, and `gate` is called per message --
+--  a function rather than a value because the flag it reads is flipped at run
+--  time by MCM, and capturing it once would freeze the logger at whatever the
+--  setting was when the file loaded. Pass no gate for a logger that always
+--  speaks (iqm_meshview's, which only ever runs when you asked it to).
+--
+--  printf SUBSTITUTES "%s" AND NOTHING ELSE (_g.script:612): a stray "%.1f"
+--  prints raw and shifts every later argument left by one. That contract is
+--  unchanged here on purpose -- callers pre-format their floats into strings,
+--  and the harnesses assert that they do.
+function logger(tag, gate)
+	if gate then
+		return function(fmt, ...)
+			if gate() then printf(tag .. fmt, ...) end
+		end
+	end
+	return function(fmt, ...)
+		printf(tag .. fmt, ...)
+	end
+end
+
+--- Feedback for the F7 test drivers. Lands in the debugger's output console when
+--  it is around (its send_output also mirrors to the log), else straight in the
+--  log. Called as `iqm_util.dbg_out(...)` rather than aliased into a local,
+--  because it only ever runs from a debug action -- nothing here is hot.
+function dbg_out(fmt, ...)
+	if ui_debug_launcher and ui_debug_launcher.send_output then
+		ui_debug_launcher.send_output(fmt, ...)
+	else
+		printf(fmt, ...)
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- F7 debug actions
+-- --------------------------------------------------------------------------
+-- The launcher's content table lives for the whole game process, so injection
+-- must happen once -- but on_game_start runs again on every load, so each module
+-- carried a `_f7_injected` flag beside its own copy of the guard-and-inject
+-- loop. The flag lives here now, KEYED BY MODULE: one shared boolean would let
+-- whichever module wired up first silence all the others.
+local injected = {}
+
+--- Register a module's debug actions, once per process.
+--  `actions` is a list of the tables ui_debug_launcher.inject takes -- the list
+--  itself stays in the calling module, because it is the only part of this that
+--  was ever different. Absent the debugger this is a no-op and the flag is NOT
+--  set, so a launcher that arrives later (it is an optional dependency) still
+--  gets the actions on the next load.
+function inject_actions(key, actions)
+	if injected[key] then return end
+	if not (ui_debug_launcher and ui_debug_launcher.inject) then return end
+	injected[key] = true
+	for i = 1, #actions do
+		ui_debug_launcher.inject("action", actions[i])
+	end
+end
+
+-- --------------------------------------------------------------------------
+-- Rays
+-- --------------------------------------------------------------------------
+-- ONE ray_pick, re-aimed per query, shared by iqm_nav (can the actor see the
+-- target, and is this bit of route hidden) and iqm_pathline (is this bit of
+-- ribbon hidden). Sharing the handle is safe because every query sets position,
+-- direction and range immediately before calling :query() -- nothing survives
+-- between calls but the flags, which both modules set to the same value.
+--
+-- Deliberately NOT demonized_geometry_ray, which iqm_core uses for its
+-- per-NPC LOS: the wrapper's :get() allocates two vectors and a result table per
+-- call, and this fires several times EVERY frame rather than once per NPC per
+-- 150 ms. It is also one fewer soft dependency -- ray_pick is stock Anomaly.
+--
+-- flags = 2 is Statics only (1 Objects, 2 Statics, 4 Shapes, 8 Obstacles). Walls,
+-- buildings and terrain occlude; a stalker or a crate standing in the way does
+-- NOT, which is deliberate -- a route or ribbon flickering as people walk over it
+-- would read as a bug, and the actor's own body would otherwise cull the path at
+-- his own feet.
+local _ray, _ray_ok = nil, nil
+local _rorg, _rdir  = vector(), vector()
+-- Warned-once set, keyed by the message. Each module says its own piece about
+-- what it is losing ("route disabled" vs "occlusion culling disabled") and both
+-- are worth having in the log; with a single shared flag only the module that
+-- probed first would ever get to speak.
+local _warned = {}
+
+local function warn_once(w)
+	if w and not _warned[w] then
+		_warned[w] = true
+		printf(w)
+	end
+end
+
+--- Is there a usable ray? Probed lazily on first use and remembered either way;
+--  `warn` is the message to log, once, on an exe with no ray_pick binding.
+function ray_ready(warn)
+	if _ray then return true end
+	if _ray_ok == false then
+		warn_once(warn)
+		return false
+	end
+	if ray_pick == nil then
+		_ray_ok = false
+		warn_once(warn)
+		return false
+	end
+	local r = ray_pick()
+	r:set_flags(2)
+	_ray, _ray_ok = r, true
+	return true
+end
+
+--- Is the point `p` hidden from `cam` by static geometry?
+--  Cast from the POINT toward the camera and stop the range `tol` short of it, so
+--  any hit at all means something is in between: there is no distance comparison
+--  to get wrong and no long ray wasted past the viewer.
+--
+--  The ray leaves from `lift` metres ABOVE the drawn point. A ground mark sits
+--  only centimetres off the floor, and a ray launched from there toward a camera
+--  at eye height GRAZES the surface it is lying on -- on any downhill slope that
+--  self-hit reports the point as occluded by the very ground it is painted on.
+--  Raising the origin (and only the origin) clears the graze; it costs a little
+--  accuracy at the foot of a low wall, which is the right trade.
+--
+--  `lift` and `tol` are arguments rather than constants because that is the ONLY
+--  way the two copies of this ever differed: iqm_nav reads fixed module constants
+--  (the route's geometry does not vary), iqm_pathline reads them off the option
+--  table it was shown with (the ribbon's does). Callers must have had ray_ready()
+--  answer true first -- this does not re-check, because it runs per point per
+--  frame and the check would be pure overhead on every one of them.
+function point_occluded(p, cam, lift, tol)
+	local ox, oy, oz = p.x, p.y + lift, p.z
+	local dx, dy, dz = cam.x - ox, cam.y - oy, cam.z - oz
+	local dist = sqrt(dx * dx + dy * dy + dz * dz)
+	local range = dist - tol
+	if range <= 0.1 then return false end   -- practically under the camera
+	_rorg:set(ox, oy, oz)
+	_rdir:set(dx / dist, dy / dist, dz / dist)
+	_ray:set_position(_rorg)
+	_ray:set_direction(_rdir)
+	_ray:set_range(range)
+	return _ray:query() and true or false
+end

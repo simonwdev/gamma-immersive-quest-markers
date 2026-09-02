@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<!-- Skull, the mark for a MUTANT HUNT task. Silhouette from Tabler Icons (MIT),
+     converted from an outline drawing to a FILLED one with its features knocked out.
+
+     THE QUESTION THAT PRODUCED THIS was whether to remove the circular eye sockets,
+     which looked like the problem because NO_BADGE forbids circles in a bare glyph.
+     Four variants were built and measured at the sizes a spot is really drawn at, and
+     the answer was the other way round  -  the circles were never the problem, the
+     HOLLOW FACE was:
+
+       outline, dot eyes (Tabler as shipped)   396 inked px @26, 36% black
+       outline, eyes removed                   322 inked px @26, 35% black
+       FILLED, eyes+teeth knocked out          436 inked px @26, 20% black   <- this
+       filled, three tooth slots               436 inked px @26, 22% black
+
+     Removing the eyes makes it an ARCH, not a skull  -  the two sockets are most of
+     what identifies the silhouette, and without them there is a horseshoe left. And
+     the outline version wastes its area: the face interior is transparent, so the mark
+     is all rim, and rim is mostly keyline at 27 px. Filling the face and cutting the
+     sockets out of it puts the same features back as NEGATIVE space and doubles the
+     ink, which is the whole of the difference.
+
+     20% BLACK BY AREA is the lowest in this atlas  -  below the ~23% the ring badges
+     were tuned to in the OUTLINE note in build.py, and well below the 37-49% that
+     measurement was diagnosing. A mark's apparent colour is its mean over its own
+     area, so this one carries more of its tint than anything else here.
+
+     STILL BARE, not ringed: at 19 units the badge ring would take half the cell and
+     close the sockets up. And it still contains circles, which NO_BADGE forbids on
+     paper  -  checked at the 0.75 the handheld 3D PDA applies, and a slightly narrower
+     skull is still a skull, the same latitude vanilla's bare house gets. Re-check that
+     if the glyph is swapped again; it is a property of this drawing, not a general
+     exemption.
+
+     Geometry, in the 24-unit viewBox: sockets r=2.05 centred (9,11.2) and (15,11.2);
+     tooth slots 1.44 wide from y=16.6 through the jaw edge at 20.3, so the teeth read
+     as cut rather than as tabs hanging below the chin (which is what a slot ending at
+     20.8 gave  -  see git history). fill-rule="evenodd" is what makes the subpaths
+     holes rather than islands. -->
+<path fill="#fff" fill-rule="evenodd" d="M12 4c4.418 0 8 3.358 8 7.5c0 1.901 -.755 3.637 -2 4.96l0 2.54a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-2.54c-1.245 -1.322 -2 -3.058 -2 -4.96c0 -4.142 3.582 -7.5 8 -7.5z M6.95 11.2 a2.05 2.05 0 1 0 4.1 0 a2.05 2.05 0 1 0 -4.1 0 z M12.95 11.2 a2.05 2.05 0 1 0 4.1 0 a2.05 2.05 0 1 0 -4.1 0 z M9.28 16.6h1.44v3.7h-1.44z M13.28 16.6h1.44v3.7h-1.44z"/>
+</svg>
