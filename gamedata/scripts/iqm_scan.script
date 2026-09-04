@@ -296,8 +296,8 @@ local function handin_state(task)
 	       and tonumber(task.current_target) == tonumber(giver)
 end
 
---- What KIND of job is this task -- "mutant", "bounty", "delivery", "open"/"waypoint", or
---  nil for anything else?
+--- What KIND of job is this task -- "mutant", "bounty", "delivery", "handin", or nil for
+--  anything else?
 --
 --  Drives the skull and the coloured reticles: iqm_taskspot swaps the task's map location
 --  type on this answer, and iqm_beacon picks the marker's glyph and tint from it.
@@ -362,8 +362,7 @@ end
 --  freeze a lair task on the plain reticle for ever; not caching at all would flicker the
 --  spot back and forth in that three-second window, which is exactly what a sticky
 --  positive prevents.
-local KIND_RECHECK = 5000       -- ms between re-tests of a task that answered "neither"
-local kind_seen, kind_next = {}, {}
+local kind_seen = {}
 
 local function squad_comm(id)
 	local sq = id and alife_object(id)
@@ -488,7 +487,6 @@ local STATUS_KIND = { hostage_task = "bounty", delivery_task = "delivery",
 -- section name, and Monolith and the zombied are both human communities. One functor, two
 -- sections, both bounty.
 local TARGET_KIND = { top_10_task_target_functor = "bounty",
-                      nta_stash_task_target_functor = "open",
                       barrier_defense_target_functor = "bounty" }
 
 -- THE ASSAULT FAMILY (R2.55b), and this entry replaces a mistake worth recording because
@@ -539,75 +537,6 @@ local function assault_kind(f)
 	return is_squad_monster[first] and "mutant" or "bounty"
 end
 
-local WP_TASK = "task_placeable_waypoint"   -- tasks_placeable_waypoints.script:238
-local wp_target, wp_kind, wp_next = nil, nil, nil
--- The general coverage answer, per task. Deliberately NOT kind_seen: everything cached
--- there is a property of the JOB and cannot change, and this is a property of the GROUND.
--- `open_tgt` is what makes a target change re-test at once rather than after the throttle.
-local open_kind, open_tgt = {}, {}
-
---- Spot types that are THIS TASK'S OWN PRESENTATION rather than a mark the map was already
---  drawing. Each sits on the task's target BECAUSE the task is there, so counting any of
---  them makes bare ground look occupied and hollows a reticle over nothing.
---
---  paw_task_default is PAW's animated highlight, added on the line after its own task
---  (tasks_placeable_waypoints.script:1547-1548), so it is on every placed waypoint.
---
---  THE TWO BLINKS ARE THE ENGINE'S NEW-TASK PULSE, and they were the R2.55c bug. A task's
---  own "you just picked this up" highlight is a SEPARATE map location on the same object,
---  so for the ~15 s it lives, every newly taken task looked covered and wore the hollow
---  reticle. It was reported on placed waypoints -- drop one on empty ground and the cross
---  shows for the 750 ms until the first sync, then vanishes -- but nothing about it was
---  specific to waypoints: the same self-trigger reached every task the coverage test could
---  answer for, and it healed itself once the pulse expired, which is exactly what made it
---  read as intermittent and unreproducible. Both names were already known to this mod --
---  modxml_n_iqm_map_icons retextures ui_storyline_task_blink_spot and
---  ui_secondary_task_blink_spot to iqm_mapspot_blink -- which is worth noticing: the fact
---  needed to see the bug was already written down two files away.
---
---  THE RULE FOR ADDING A FOURTH, since the list is otherwise just three names: the question
---  is not "did another mod draw this", it is "is this mark here BECAUSE of this task". A
---  mark that would still be on that object with the task cancelled is real coverage.
-local NOT_COVER = {
-	paw_task_default        = true,
-	ui_storyline_task_blink = true,
-	ui_secondary_task_blink = true,
-}
-
---- Does object `id` already carry a map mark other than this task's own?
---
---  Three exclusions, and each is a way the answer would otherwise always be yes:
---    * `own` is the task's OWN spot type, which change_map_location has just put on the
---      object - counting it would make open ground look occupied;
---    * NOT_COVER above - this task's own highlight and its new-task pulse;
---    * anything of ours, so that once iqm_taskspot has moved the task onto iqm_task_open
---      the test does not start reading its own output back.
---
---  Everything else counts, deliberately - a service badge, a stash, a level changer,
---  another task's reticle, a PAW pin the player placed. The rule is "something is drawn
---  here", not "something I recognise is drawn here".
---
---  One case it cannot see: a pin dropped on the target of ANOTHER side task, whose
---  reticle is the same spot type as this task's own and so collapses onto one map location
---  under SLocationKey. That is the least costly miss available - the mark underneath is an
---  identical reticle, so hollow and solid look near enough the same there.
---
---  The OTHER case it cannot see is the one TARGET_KIND covers above: a mark drawn on a
---  DIFFERENT object at the same place. This asks about an object, not about a position,
---  and there is no positional query to ask instead.
-local function target_covered(id, own)
-	local list = level.map_get_object_spots_by_id and level.map_get_object_spots_by_id(id)
-	if type(list) ~= "table" then return false end
-	for _, s in pairs(list) do
-		local t = type(s) == "table" and s.spot_type
-		if t and t ~= own and not NOT_COVER[t]
-		   and not tostring(t):find("^iqm_") then
-			return true
-		end
-	end
-	return false
-end
-
 function task_kind(task)
 	if not (task and task.id) then return nil end
 	-- Once the marker is on the person you report back to, the KIND of job stops being the
@@ -621,49 +550,9 @@ function task_kind(task)
 	end
 	local id = task.id
 
-	-- PAW'S PLACED WAYPOINT, and it is neither a kind of job nor cached like one.
-	--
-	-- The `waypoint` kind exists only so iqm_taskspot can give this task a reticle with a
-	-- HOLE in it, and that is only wanted when there is something underneath to see. PAW
-	-- puts the task's spot and its own highlight on the same object
-	-- (tasks_placeable_waypoints.script:1547-48), so a waypoint dropped on a service NPC,
-	-- a stash or a level changer buries that mark under a solid crosshair - while one
-	-- dropped on open ground has nothing beneath it and wants the full reticle, because
-	-- an empty ring on empty ground is just a smaller marker.
-	--
-	-- SO THE TEST IS "IS ANYTHING ELSE DRAWN HERE", asked of the engine rather than
-	-- guessed from a list of interesting spot types. level.map_get_object_spots_by_id
-	-- returns EVERY map location on an object as {spot_type=, text=}
-	-- (level_script.cpp:485, bound at :2544), which is the difference between a rule that
-	-- covers whatever any mod happens to draw and one that covers the types we thought of.
-	--
-	-- NOT STICKY, and that is why this sits above kind_seen rather than in it. The other
-	-- two kinds are properties of the JOB and never change; this one is a property of the
-	-- GROUND, and the player moves the waypoint (func_wp_mov, :1531) without the task id
-	-- ever changing. Cached on the TARGET instead, and re-tested on the same slow timer as
-	-- everything else so that pinning an icon under an existing waypoint is picked up too.
-	if id == WP_TASK then
-		local tgt = task.current_target
-		local tg = time_global()
-		if tgt ~= wp_target or not wp_next or tg >= wp_next then
-			wp_target, wp_next = tgt, tg + KIND_RECHECK
-			wp_kind = (tgt and target_covered(tgt, task.spot)) and "waypoint" or nil
-		end
-		return wp_kind
-	end
 	local hit = kind_seen[id]
 	if hit then return hit end
 	local tgt = task.current_target
-	local tg = time_global()
-	-- Between rechecks, hand back the COVERAGE answer rather than nil. Every other kind
-	-- latches in kind_seen and so survives this early return by itself; `open` is re-derived
-	-- every pass, and returning nil here would flip the pin back to a solid reticle for the
-	-- whole of KIND_RECHECK. A target change re-tests immediately, for the same reason the
-	-- waypoint branch above does: the ground under the pin has moved.
-	if kind_next[id] and tg < kind_next[id] and open_tgt[id] == tgt then
-		return open_kind[id]
-	end
-	kind_next[id] = tg + KIND_RECHECK
 
 	if axr_task_manager and axr_task_manager.bounties_by_id
 	   and axr_task_manager.bounties_by_id[id] then
@@ -705,21 +594,14 @@ function task_kind(task)
 		return "mutant"
 	end
 
-	-- NOTHING SAID WHAT KIND OF JOB THIS IS -- so ask what is already DRAWN there. This is
-	-- the same question the waypoint branch above asks, generalised (R2.52) from "PAW put a
-	-- pin here" to "this pin is landing on top of something", because the two are the same
-	-- problem and only the first had been met. The DRX quest-item family is the case that
-	-- forced it: 21 sections that point straight at a stash the player has already found,
-	-- and the solid crosshair covers the stash icon completely.
+	-- NOTHING SAID WHAT KIND OF JOB THIS IS, so it keeps the pin it declared for itself.
 	--
-	-- LAST, and that ordering is the whole safety argument. Every kind above is about the
-	-- JOB and outranks this, so a bounty standing on a service badge stays a bounty; only a
-	-- task nothing else could name falls through to being dressed by its surroundings. It is
-	-- also the reason this needs no list of "interesting" targets - a wrong answer here can
-	-- only ever cost the middle of a reticle that had nothing else to say.
-	open_tgt[id] = tgt
-	open_kind[id] = (tgt and target_covered(tgt, task.spot)) and "open" or nil
-	return open_kind[id]
+	-- There was a rule here until R2.62 that asked the engine what ELSE was drawn on the
+	-- target and answered "open" when anything was, so a task landing on a service badge, a
+	-- stash or a level changer wore a hollow reticle and ringed that mark instead of covering
+	-- it. It is gone by request: a pin covering what it points at is vanilla behaviour, and
+	-- the player placing a waypoint on a bed already knows the bed is there.
+	return nil
 end
 
 local function is_markable_npc(id)
@@ -1322,8 +1204,8 @@ end
 --  hub carrying no service spot at all -- cost all seven round trips to learn nothing.
 --  At SCAN_BUDGET 10 that is ~70 registry queries on every frame of an extras pass.
 --  level.map_get_object_spots_by_id returns EVERY spot on the object as
---  {spot_type=, text=} in a single call (level_script.cpp:485) -- the same call, with
---  the same optional-and-type guard, that target_covered uses above.
+--  {spot_type=, text=} in a single call (level_script.cpp:485), behind the same
+--  optional-and-type guard the retired coverage test used (see task_kind's tail).
 --
 --  FIRST-HIT-WINS SURVIVES THE CHANGE, AND NOT BY ACCIDENT. The old loop got its
 --  precedence for free: it asked in ROLE_SPOTS order and returned on the first yes, so
@@ -1630,8 +1512,8 @@ end
 -- recycled id the previous level's role card for the whole interval before the next
 -- pass overwrites the set.
 --
--- WHAT IS DELIBERATELY NOT HERE: the TASK-keyed caches -- kind_seen/kind_next,
--- functor_cache, stage_complete_cache, open_kind/open_tgt. Those are keyed by task
+-- WHAT IS DELIBERATELY NOT HERE: the TASK-keyed caches -- kind_seen, functor_cache
+-- and stage_complete_cache. Those are keyed by task
 -- SECTION id, which is authored text out of the modpack's task list and not a recycled
 -- handle: they are bounded by that list, they stay true across a level change, and
 -- dropping them would re-run the functor walks and the stage probes to arrive back at
@@ -1640,10 +1522,6 @@ local function drop_npc_caches()
 	recruit_static = {}
 	_ttype = {}
 	_srole, _sweak = {}, {}
-	-- Keyed on the placed waypoint's TARGET id, so recycled in the same way, and held
-	-- for KIND_RECHECK without re-testing while the target compares equal. Cleared to
-	-- nil rather than re-tested, which makes the next task_kind call do the test.
-	wp_target, wp_kind, wp_next = nil, nil, nil
 end
 
 --- Start both scans over, and drop the memoized per-NPC facts with them, so a toggled

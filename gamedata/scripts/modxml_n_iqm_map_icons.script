@@ -790,6 +790,355 @@ local LEGEND_FILES = {
 	[ [[ui\pda_tasks_219.xml]] ] = true,
 }
 
+-- --------------------------------------------------------------------------
+-- STYLE: the ring badges, or the S.T.A.L.K.E.R. 2 white diamonds
+-- --------------------------------------------------------------------------
+-- Same art, framed differently: a second atlas (ui\iqm_map_icons_s2, built by
+-- `python tools/map-icons/build.py --style s2 --dds`) whose cells sit at the SAME
+-- origins under iqm_mapspot_s2_* ids, plus a white tint on everything. So the whole
+-- switch is a rename of the id this file has just written, and a tint override - which
+-- is why it is ONE pass over the finished DOM rather than a second SPOTS table.
+--
+-- RUNNING IT AFTER THE FACT, over every <texture> in the document, is deliberate and is
+-- the reason this cost nothing to add:
+--
+--   * it catches the elements SPOTS just set AND the ones it never touches - the mod's
+--     own spot types in ui\iqm_map_spots.xml, spliced into this same DOM above, which
+--     carry their ids and tints in the XML rather than in any Lua table. A per-entry
+--     branch in the SPOTS loop would have re-skinned the vanilla spots and left IQM's
+--     own task-kind pins in the ring style, i.e. the two halves of one map disagreeing;
+--   * a cell added later needs nothing here, because the pass keys on the id PREFIX
+--     rather than on a list of names.
+--
+-- WHITE IS THE DEFAULT, NOT THE RULE. S2_KEEP_COLOUR below is the list of marks that keep
+-- their tint, and every entry is there because its colour carries something the glyph
+-- cannot. The id is still renamed for all of them - the s2 atlas holds the same 26 cells
+-- at the same origins - so the two atlases stay interchangeable and nothing at runtime
+-- has to know which one is loaded.
+local S2_PREFIX = "iqm_mapspot_s2_"
+local S2_KEEP_COLOUR = {
+	-- THE SQUAD DISKS. Fourteen warfare spots and the alife_presentation set carry
+	-- faction, relation and moving/static in their own r/g/b over one white disk (see the
+	-- squad note in SPOTS): one piece of art, fourteen meanings, all of them in the tint.
+	-- White would delete the information rather than restyle it.
+	["iqm_mapspot_squad"]     = true,
+	["iqm_mapspot_squadmini"] = true,
+	-- THE LEVEL CHANGER keeps its green (102,173,88) for a reason that is not "the colour
+	-- is the information". It is not a MARKER in the sense the rest of this table is: it is
+	-- a fixture, the arch that says the map ends here, and it is the same eight-heading
+	-- arch in both styles (see S2_KEEP in build.py - it never became a diamond). Whitening
+	-- a mark whose shape did not change would have been the one edit in the pass that made
+	-- something harder to find without making it look more like S2.
+	["iqm_mapspot_transition"] = true,
+	-- THE THREE TASK-KIND TINTS, kept by request after a play-test of the all-white pass:
+	-- the hand-in green (40,172,66) for a job that is done and wants walking back, the
+	-- bounty red (172,60,66) for a fight, and the mutant olive (176,216,72) for a hunt.
+	--
+	-- These are the three places on this map where the colour answers a question the player
+	-- asks BEFORE they read the glyph - "is anything finished?", "is anything going to
+	-- shoot at me?" - and a 26 px minimap pin is read as a colour first and a drawing
+	-- second. They are also the three that a whole-map sweep is done FOR: everything else
+	-- in the whitening lost a decoration, and these lost a filter.
+	--
+	-- The delivery envelope keeps the same green as the hand-in, because it already shares
+	-- it on purpose - walking a package to a named NPC is the same act as walking a
+	-- finished job back to its giver, and iqm_map_spots.xml has that argument. Splitting
+	-- the pair here would have made the style contradict the palette.
+	--
+	-- THE SELECT BORDER FOLLOWS ITS MARK'S COLOUR, and this reverses what shipped first.
+	-- The original argument was that a selection is a STATE rather than a kind, so a white
+	-- frame on every pin would say the two things separately. On screen it did the
+	-- opposite: the frame is the largest and brightest shape in the mark, so a white
+	-- diamond around a red bounty reads as a white marker with something red inside it, and
+	-- the kind - the thing the colour is there to answer before the glyph is read - loses
+	-- to the state. Selection is already carried by the frame's PRESENCE and by its
+	-- blink (light_anim="ui_slow_blinking_alpha"); it does not need the colour channel too.
+	-- Handled in restyle_s2 rather than here, because a border's colour is a question about
+	-- the SPOT it belongs to and not about its own id - iqm_mapspot_select is one cell
+	-- under every kind of pin.
+	["iqm_mapspot_handin"]       = true,
+	["iqm_mapspot_taskdelivery"] = true,
+	["iqm_mapspot_taskbounty"]   = true,
+	["iqm_mapspot_taskmutant"]   = true,
+	-- Not used by any spot type since the mutant mark became a reticle, but still built and
+	-- still declared (see iqm_map_spots.xml), so it keeps the tint it would be drawn in.
+	["iqm_mapspot_skull"]        = true,
+}
+-- ...and the same decision keyed on the TINT, for the marks whose ID cannot carry it.
+--
+-- STORYLINE GOLD IS THE CASE THIS EXISTS FOR. A storyline task and a secondary task are
+-- the same cell - iqm_mapspot_task - and differ only in their r/g/b, so S2_KEEP_COLOUR
+-- above cannot tell them apart: keying on the id would keep both or whiten both. The
+-- storyline gold is the oldest colour convention on this map and the one the player
+-- navigates the task list by, and an all-white pass deleted the main-quest/side-quest
+-- distinction outright.
+--
+-- Keyed on the colour rather than on a list of spot names because the same gold has to
+-- survive in five places that are not all spots: the map pin, the minimap pin, that pin's
+-- off-level arrows, the new-task pulse, and the LEGEND swatch - which lives under <image>
+-- in a different file and has no spot name to match on at all. One rule reaches all five.
+--
+-- Safe to key on because these are OUR OWN literals, written by SPOTS and LEGEND earlier
+-- in this file, and restyle_s2 runs last over a DOM this file has already finished with.
+local S2_KEEP_RGB = {
+	["246,204,0"] = true,   -- storyline gold; see the SPOTS entries that write it
+}
+local WHITE = { r = 255, g = 255, b = 255 }
+-- How much bigger an s2 spot is drawn than the ring badge it replaces. 1.0 leaves the
+-- geometry alone, which is what the first cut did.
+--
+-- 1.19 IS SILHOUETTE PARITY, and it is arithmetic rather than taste: a diamond of
+-- half-diagonal d encloses 2*d^2 where a circle of radius r encloses pi*r^2, so the two
+-- match at d = r*sqrt(pi/2) = 1.2533*r. At DIA_R 60/128 against the badge ring's outer
+-- 0.4455 that is k = 1.19. The mean distance from centre to outline, averaged over all
+-- angles, agrees to within 1% at the same number, so there is nothing left to split.
+--
+-- 1.12 WAS THE FIRST ANSWER AND IT UNDERSHOT. Worth keeping written down, because the
+-- reasoning that produced it was careful and measured the wrong quantity: it counted INK -
+-- frame plus keyline plus glyph over the built atlases - found the diamond at 90% of the
+-- ring style's, put area parity at k = 1.05, and rounded up from there for the way a
+-- diamond's mass sits on its axes. But ink is not what the eye sizes a mark by. THE
+-- OUTLINE IT ENCLOSES is, and measured on the shipped pair at 21 units against 19:
+--
+--   at the four points   9.84 vs 8.46 units   +16.3%
+--   at the diagonals     6.96 vs 8.46         -17.8%
+--   mean over all angles 7.81 vs 8.46          -7.7%
+--   enclosed area         194 vs 225 units^2  -13.9%
+--
+-- Only the four tips reached further than the ring badge; everywhere else the diamond sat
+-- INSIDE it. Which is what came back from play as "the new white markers are slightly
+-- small" - a mark that is wider than its neighbour at four angles and narrower at every
+-- other one reads as the smaller of the two.
+--
+-- ROUNDED TO THE 19 -> 23 AND 14 -> 17 UNIT STEPS the file actually uses, since grow_spot
+-- writes integers - so the applied scale is 1.211, a little over the nominal. The rounding
+-- is worth knowing about because at 1.12 it went the other way and was never noticed:
+-- 19 * 1.12 = 21.28 -> 21 quietly took the effective correction down to 1.105.
+--
+-- THE FRAME'S STROKE MOVES WITH THIS. DIA_W in tools/map-icons/build.py is a fraction of
+-- the CELL, so a bigger spot draws a thicker line, and it is set to hold the drawn weight
+-- constant - 1.6/19 -> 1.5/19 for exactly this change. Retune one without the other and
+-- the diamond goes back to reading too thick, which it has already been reported as once.
+--
+-- THE SELECT BORDER FOLLOWS THE ICON, rather than being left where it was. Its offset is
+-- not a tuned constant but a derived one: the border is top-left aligned (waNone) inside a
+-- centre-aligned spot, so centring it means x = -(border - icon)/2, which is exactly the
+-- -5 the SPOTS entries carry for a 29-unit border on a 19-unit spot. Grow the icon and
+-- leave the offset alone and that -5 is 1 unit wrong on each axis, which is what a
+-- selection frame sitting up-and-left of its marker looks like. grow_spot recomputes it
+-- from the geometry and grows the border by the same number of units, so the pair cannot
+-- come apart again the next time either number moves.
+local S2_SPOT_SCALE = 1.19
+-- S2_SPOT_SCALE_BY LIVED HERE, holding the hollow reticle at 1.58 so it cleared the badge
+-- it ringed. Both types that used it are gone (R2.62) and every restyled spot now takes the
+-- one scale above. Reinstate it as `{ [id] = k }`, keyed on the id BEFORE the rename, if a
+-- mark ever needs sizing apart from the rest - and remember it has to TRACK S2_SPOT_SCALE,
+-- because what such a constant tunes is clear space in map units, not a multiplier.
+-- The geometry attributes that scale. x/y are offsets from the spot's anchor, so they
+-- scale with the box; on the ordinary spots they are 0 and this is a no-op.
+local S2_SCALE_ATTRS = { "width", "height", "x", "y" }
+-- Marks whose ART IS THE SAME IN BOTH STYLES (S2_KEEP in build.py), and which therefore
+-- must not be resized either: the correction above exists because a DIAMOND of a given
+-- extent reads smaller than a RING of it, and none of these became a diamond. Growing
+-- them would just be this mod resizing marks it did not restyle - the squad dot at 9-13
+-- units most of all, which is the engine's mark and not ours to make bigger.
+--
+-- Keyed on the id BEFORE the rename, and only the `texture` tag is consulted for it
+-- (S2_TAGS is walked in order, so a spot's own texture is always seen before its
+-- off-level swaps, and `grown` settles it from there).
+local S2_SAME_ART = {
+	["iqm_mapspot_squad"]      = true,
+	["iqm_mapspot_squadmini"]  = true,
+	["iqm_mapspot_pointer"]    = true,
+	["iqm_mapspot_blink"]      = true,
+	["iqm_mapspot_transition"] = true,
+}
+-- The tags a spot's texture id can live under. texture_above / texture_below are the
+-- minimap's off-level swaps, and they are ids like any other.
+local S2_TAGS = { "texture", "texture_above", "texture_below" }
+
+--- Which spot art the player asked for. 0 (or absent) is this mod's ring badges.
+--
+--  Read the same way and for the same reasons as icons_on above, defaults included: this
+--  is a modxml with no apply_config, running on whatever frame the engine first parses
+--  map_spots.xml, so it asks MCM directly and treats every failure as "not asked for".
+--  NEEDS A RESTART for exactly the reason that option does - g_uiSpotXml is parsed once
+--  per process - and the MCM label says so.
+local function style_s2()
+	if not (ui_mcm and ui_mcm.get) then return false end
+	local ok, v = pcall(ui_mcm.get, "iqm/general/map_icon_style")
+	if not ok or v == nil then return false end
+	return v == 1
+end
+
+--- An attribute off an element, as a number. dxml hands back the RAW token, quotes
+--  included (getElement splits on "=" without unquoting), so `width="19"` reads as the
+--  five-character string ["19"] and tonumber on it is nil.
+local function attr_num(attr, key)
+	local raw = attr and attr[key]
+	if raw == nil or raw == true then return nil end
+	return tonumber((tostring(raw):gsub('"', "")))
+end
+--- The S2_KEEP_RGB key for an element's current tint, or nil if it declares none.
+local function rgb_key(attr)
+	local r, g, b = attr_num(attr, "r"), attr_num(attr, "g"), attr_num(attr, "b")
+	if not (r and g and b) then return nil end
+	return string.format("%d,%d,%d", r, g, b)
+end
+
+--- Grow one spot's rect by S2_SPOT_SCALE. Returns true if it was touched.
+--
+--  ONLY THE SPOT, never its static_border: the border's offsets are tuned separately
+--  (BORDER_X) and scaling them would move that correction. See S2_SPOT_SCALE for why the
+--  icon can grow inside the border it already has.
+--
+--  A HEADING SPOT IS SKIPPED as well, and the reason is narrower than it looks. Without
+--  `stretch` such a spot takes its quad from the TEXTURE RECT rather than from
+--  width/height (UIStatic.cpp:117-150), so scaling the rect would change nothing on
+--  screen. It is NOT true that these spots ignore geometry outright - this mod adds
+--  stretch = 1 to the eight level changers precisely so that 19x19 applies to them (see
+--  the `el` note in SPOTS). They are skipped because the level changer keeps its art in
+--  this style and so keeps its size, which S2_SAME_ART already decides; the guard is here
+--  for the next heading spot somebody points at this atlas, where the rect may well be
+--  inert.
+local function round(v)
+	return v >= 0 and math.floor(v + 0.5) or -math.floor(-v + 0.5)
+end
+
+local function grow_spot(xml_obj, el, k)
+	local data = xml_obj:getElement(el)
+	if not data or data.name == "static_border" then return false end
+	if data.attr and (data.attr.heading or data.attr.heading_angle) then return false end
+
+	local iw0, ih0 = attr_num(data.attr, "width"), attr_num(data.attr, "height")
+	local args
+	for _, key in ipairs(S2_SCALE_ATTRS) do
+		local v = attr_num(data.attr, key)
+		if v and v ~= 0 then
+			args = args or {}
+			-- integers, because every copy of this file uses them; the sign matters for
+			-- the offsets, so round away from zero
+			args[key] = round(v * k)
+		end
+	end
+	if not args then return false end
+	xml_obj:setElementAttr(el, args)
+
+	-- ...and re-centre the selection frame on the icon's NEW size.
+	--
+	-- The border KEEPS ITS AIR rather than being scaled: it grows by the same number of
+	-- units the icon did, so the gap between the two shapes is the gap the ring style was
+	-- tuned to. Scaling it instead was tried first and opens the gap ~30% - not because
+	-- 1.19 is wrong but because the s2 selection frame's own diamond sits at 0.484 of its
+	-- cell where the ring style's arcs sit at 0.455, and multiplying a gap that is already
+	-- wider compounds the two. Holding the air constant lands the frame at 16.0 units from
+	-- centre against the ring style's 13.2, i.e. exactly the 21% the icon itself moved. The
+	-- relation is what the -5 encodes, which is why it survives a retune of the scale.
+	--
+	-- At k = 1 this is a no-op that reproduces the SPOTS entries' own -5 (air = (29-19)/2),
+	-- which is the check that the formula is that constant's MEANING rather than a second
+	-- opinion about it: the border is a top-left child of a centre-aligned spot, so half
+	-- the size difference on each axis is what centres it.
+	local iw, ih = args.width or iw0, args.height or ih0
+	if not (iw and ih and iw0 and ih0) then return true end
+	for _, b in ipairs(xml_obj:query("static_border", el) or {}) do
+		local bd = xml_obj:getElement(b)
+		local bw0, bh0 = attr_num(bd and bd.attr, "width"), attr_num(bd and bd.attr, "height")
+		if bw0 and bh0 then
+			local aw, ah = round((bw0 - iw0) / 2), round((bh0 - ih0) / 2)
+			xml_obj:setElementAttr(b, { width = iw + 2 * aw, height = ih + 2 * ah,
+			                            x = -aw, y = -ah })
+		end
+	end
+	return true
+end
+
+--- Rewrite every id this mod owns to its s2 twin, tint it white, and grow its rect.
+--  `grow` is off for the legend, whose swatches are rows in a list: the panel's geometry
+--  is the list's business and a 21% taller swatch would push the rows apart. The MAP is
+--  where a marker's apparent size is a question.
+--  Returns how many elements were restyled, for the log line.
+local function restyle_s2(xml_obj, grow)
+	local n = 0
+	-- keyed by element so a spot carrying texture AND texture_above/_below is grown once
+	-- rather than three times over - which would be 1.19^3, i.e. a 68% marker
+	local grown = {}
+	-- ...and keyed by element again for the COLOUR decision, because the off-level arrows
+	-- cannot be decided by their own id. iqm_mapspot_above is one cell shared by a gold
+	-- storyline task, a white secondary, a red alert and a green return spot, so the
+	-- question "does this arrow keep its tint" is a question about the SPOT, not about the
+	-- arrow. S2_TAGS is walked in tag order, so a spot's own <texture> is always settled
+	-- before its swaps and they can inherit its answer. A spot with no <texture> of its own
+	-- gets the default, i.e. white.
+	local kept = {}
+	-- What each spot ENDS UP drawn in, so its selection frame can be given the same thing.
+	-- Settled by the spot's own <texture> for the same reason `kept` is, and read back
+	-- rather than recomputed: whatever decided the mark's colour has already run by then.
+	local tint = {}
+	-- Selection frames, deferred to a second pass. A border cannot be coloured on sight -
+	-- it has to match a mark that may not have been decided yet, and in the minimap's
+	-- spots the border is reached before its own spot's texture_above/_below are.
+	local borders = {}
+	for _, tag in ipairs(S2_TAGS) do
+		for _, el in ipairs(xml_obj:query(tag) or {}) do
+			local id = xml_obj:getText(el)
+			-- the second test is not paranoia: this runs once per spot FILE and the
+			-- three aspect variants share included elements, so an id can arrive
+			-- already renamed. Renaming it twice would produce iqm_mapspot_s2_s2_*.
+			if id and id:find("^iqm_mapspot_") and not id:find("^" .. S2_PREFIX) then
+				xml_obj:setText(el, S2_PREFIX .. id:sub(#"iqm_mapspot_" + 1))
+				local pd = el.parent and xml_obj:getElement(el.parent)
+				if pd and pd.name == "static_border" then
+					-- el.parent is the border; the SPOT is one level above it. slaxml
+					-- sets `parent` on every parsed node, so the chain is real and not
+					-- an artefact of elements this file inserted itself.
+					borders[#borders + 1] = { el = el, spot = el.parent.parent }
+				else
+					local attr = xml_obj:getElement(el)
+					attr = attr and attr.attr
+					local key = rgb_key(attr)
+					if S2_KEEP_COLOUR[id] or (key and S2_KEEP_RGB[key])
+					   or (el.parent and kept[el.parent]) then
+						if el.parent then
+							kept[el.parent] = true
+							-- first writer wins, i.e. the spot's own <texture>
+							if tint[el.parent] == nil and key then
+								tint[el.parent] = { r = attr_num(attr, "r"),
+								                    g = attr_num(attr, "g"),
+								                    b = attr_num(attr, "b") }
+							end
+						end
+					else
+						-- 255,255,255 rather than removing r/g/b: a named `color`
+						-- attribute would otherwise win (CUIXmlInit::GetColor) and tint
+						-- the diamonds whatever the pack's PDA blue is, which is the
+						-- one result worse than either style.
+						xml_obj:setElementAttr(el, WHITE)
+						if el.parent and tint[el.parent] == nil then
+							tint[el.parent] = WHITE
+						end
+					end
+					if grow and el.parent and not grown[el.parent] and not S2_SAME_ART[id] then
+						grown[el.parent] = true
+						if S2_SPOT_SCALE ~= 1.0 then
+							grow_spot(xml_obj, el.parent, S2_SPOT_SCALE)
+						end
+					end
+				end
+				n = n + 1
+			end
+		end
+	end
+	-- THE FRAME TAKES ITS MARK'S COLOUR. White is the fallback and not a special case: a
+	-- border whose spot this pass never touched has no mark colour to inherit, and white is
+	-- what the rest of the style defaults to. See the note in S2_KEEP_COLOUR for why this
+	-- reverses the first cut's white-frame-on-everything.
+	for _, b in ipairs(borders) do
+		xml_obj:setElementAttr(b.el, (b.spot and tint[b.spot]) or WHITE)
+	end
+	return n
+end
+
 --- Swap the legend rows we have art for. Scoped per row rather than run over one flat
 --  query of every texture, so the <image> geometry and its <texture> are read from the
 --  same item and cannot drift apart on a legend whose rows are not one-to-one.
@@ -824,6 +1173,10 @@ local function patch_legend(xml_obj, xml_file_name)
 			n = n + 1
 		end
 	end
+	-- The legend follows the map into the S2 style for the same reason it follows it
+	-- into vanilla: it is a KEY, and a key drawn in the other style's marks is a key to
+	-- marks that are not on the map. Same pass as the spots, over this file's own DOM.
+	if style_s2() then restyle_s2(xml_obj, false) end   -- no geometry: see restyle_s2
 	printf("%s: DXML patched %s legend rows in %s", addon_name, n, xml_file_name)
 end
 
@@ -848,6 +1201,7 @@ local function icons_on()
 	if not ok or v == nil then return true end
 	return v and true or false
 end
+
 
 function on_xml_read()
 	RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj)
@@ -981,6 +1335,14 @@ function on_xml_read()
 					xml_obj:setElementAttr(spot[1], s.el)
 				end
 			end
+		end
+
+		-- ...and then, if the player asked for the S2 look, restyle what was just
+		-- written. Last, over the whole DOM, so it also reaches the mod's own spliced
+		-- spot types - see restyle_s2.
+		if style_s2() then
+			printf("%s: DXML restyled %s spot textures to S2 diamonds in %s",
+			       addon_name, restyle_s2(xml_obj, true), xml_file_name)
 		end
 
 		printf("%s: DXML patched map spot icons in %s", addon_name, xml_file_name)

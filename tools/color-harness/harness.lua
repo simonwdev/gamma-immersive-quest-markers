@@ -212,21 +212,13 @@ local KIND_PAIRS = {
 	{ "iqm_task_mutant_spot", "iqm_task_mutant_spot_mini" },
 	{ "iqm_task_bounty_spot", "iqm_task_bounty_spot_mini" },
 	{ "iqm_task_delivery_spot", "iqm_task_delivery_spot_mini" },
-	{ "iqm_task_open_spot", "iqm_task_open_spot_mini" },
-	{ "iqm_task_waypoint_spot", "iqm_task_waypoint_spot_mini" },
 	{ "iqm_task_handin_spot", "iqm_task_handin_spot_mini" },
 }
 
---- iqm_task_waypoint is iqm_task_open with the static_border removed and NOTHING else
---- changed (R2.55 split the two so a stash task could keep the engine's active-task ring
---- while PAW's pin, which brings its own animated ring, does not get a second one). Colour
---- is one of the things that must not change, so it is asserted rather than left to the
---- two entries above happening to hold the same literal. This is the same shape of check as
---- "delivery wears the hand-in green" below: an IDENTITY, where the rest of this file
---- checks differences, and it fails on a drift no separation test would notice.
-local SAME_TINT = {
-	{ "iqm_task_open_spot", "iqm_task_waypoint_spot" },
-}
+--- Pairs that must hold the SAME tint. Empty since R2.62 took the two hollow types out -
+--- kept because the mechanism is the useful part: it asserts an IDENTITY where the rest of
+--- this file checks differences, and it catches a drift no separation test would notice.
+local SAME_TINT = {}
 
 -- EVERY iqm_task_* TYPE IS IN ONE OF THE TWO LISTS ABOVE, checked below rather than by
 -- eye. Both MIRROR and KIND_PAIRS are hand-written, so a type added to iqm_map_spots.xml
@@ -377,17 +369,12 @@ for _, name in ipairs(SHARED_SVG) do
 	end
 end
 check("guider has no map colour",   BRGB.guider   == nil, "vanilla does not map-spot guides")
--- The waypoint's reason CHANGED in R2.49e without the check needing to: iqm_task_open
--- now gives it a spot of ours, in the secondary task's bone. It still gets no marker
--- colour, because the player's own mark keeping the accent is the point ("gold already
--- reads as yours"), and because that spot's colour is the SIDE-TASK bone rather than a
--- colour chosen for waypoints - mirroring it would tell the player their own pin is a
--- side job. R2.52 generalised that type to every task landing on an existing mark, which
--- makes the bone MORE right rather than less: it is the side-task colour and these are
--- side tasks. `open`, the second kind that wears it, is absent here for the same reason.
+-- The waypoint keeps no MARKER colour, and the reason has outlived two rewrites of why it
+-- has no map spot of its own. The player's own mark keeping the accent is the point -
+-- "gold already reads as yours" - so there is nothing on the map for it to mirror. R2.62
+-- removed the hollow type it briefly wore, which changes nothing here: it is back to being
+-- an ordinary side-task pin, and the side-task bone is not a colour chosen to mean anything.
 check("waypoint has no map colour", BRGB.waypoint == nil, "the player's own mark keeps the accent")
-check("open has no map colour",     BRGB.open     == nil,
-      "it wears the side-task bone, which is not a colour chosen to mean anything")
 
 -- ...and no arrow of ours is declared or referenced anywhere.
 do

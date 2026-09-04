@@ -1,42 +1,84 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="currentColor">
-<!-- Crossed swords, the mark for a HUMAN COMBAT (bounty / assault) task, drawn inside
-     the task reticle rather than in a badge ring. Game-icons.net "crossed-swords"
-     (CC BY 3.0), the same set skull-gameicons.alt and trader-gameicons.alt came from.
+<!-- A BLAST, the mark for a HUMAN COMBAT (bounty / assault) task, drawn inside the task
+     reticle rather than in a badge ring. Drawn here rather than sourced: ONE closed star
+     polygon, an outer vertex per ray and an inner vertex between each pair, straight
+     edges only.
 
-     IT REPLACED A BUST (R2.57), kept at svg/bounty-bust.alt, and the reason is the one
-     fact that governs any future change to either this glyph or the mutant skull:
+     IT REPLACED PLAIN CROSSED SPIKES, kept at svg/bounty-spikes4.alt, which had replaced
+     two rifle rounds (svg/bounty-rounds.alt), which had replaced crossed swords
+     (svg/bounty-swords.alt), which had replaced a bust (svg/bounty-bust.alt). Read
+     bounty-swords.alt first: the constraint it states is still the one that governs this
+     cell, and bounty-spikes4.alt is the direct parent of this shape.
 
-       A SKULL AND A BUST ARE THE SAME SILHOUETTE AT 26 PX.
+     THE CONSTRAINT, restated because it is the only thing that matters here. This mark's
+     red (172,60,66) and the mutant hunt's lime (176,216,72) sit on the red-green axis,
+     which is the axis red-green colour deficiency collapses. For those players SHAPE IS
+     THE ONLY CHANNEL separating "a firefight" from "a mutant hunt". Any candidate has to
+     be told apart from svg/skull.svg AT 26 PX WITH THE COLOUR REMOVED. Do not reason
+     about the tints; render both cells to luminance and look.
 
-     Both are a round mass on top of a wider mass. The eye sockets and the shoulders
-     that tell them apart are sub-pixel at the size a map spot is actually drawn, so
-     the mutant mark and the human mark differed in COLOUR ALONE. Four candidates were
-     built and compared at drawn size; a military helmet failed for exactly the same
-     reason (round dome, same family), and paired rounds read as two bars rather than
-     as ammunition.
+     THE FOUR LONG ARMS ARE ON THE CARDINALS, AND THAT IS THE WHOLE TRICK. It is worth
+     stating as the rule rather than the outcome, because it is the one fact that makes
+     this glyph bigger than any of its predecessors could be:
 
-     WHY AN X IS THE ANSWER, stated as the rule rather than the outcome: it is the only
-     candidate that changes the silhouette CLASS. Every other option is a solid centred
-     mass; an X is hollow in the middle with four limbs running to the corners. It is
-     also nothing but long straight strokes, which is what survives the 8x downsample
-     (the same property that makes the house work - see home.svg), and it is SQUARE, so
-     it fills the reticle's inner box instead of taking the haircut a landscape glyph
-     gets from fit(), which sizes the LONG axis. A single pistol was tried first and
-     failed on precisely that: at 1.53:1 it starts at two-thirds height before the
-     frame takes its cut, and collapses to a horizontal bar.
+       BOTH FRAMES LEAVE THE MOST ROOM ON THE CARDINALS. The ring reticle's GAPS are on
+       the cardinals (TASK_GAP_DEG; see draw_task), so its four arcs are centred on the
+       DIAGONALS. The s2 diamond is the line |x| + |y| = d, so its VERTICES are on the
+       cardinals and its edges come closest on the diagonals. The two styles disagree
+       about everything else and agree about this.
 
-     AND IT IS NOT DECORATION. The mutant lime (176,216,72) and this mark's red
-     (172,60,66) sit on the red-green axis, which is the one red-green colour
-     deficiency collapses - so for those players the silhouette is not redundancy, it
-     is the ONLY channel separating "a mutant hunt" from "a firefight". Two round-headed
-     figures meant they could not tell them apart at all. Any replacement for either
-     glyph has to clear that bar on shape alone; do not reason about the colours.
+     So the long arms point where nothing can block them and the short rays point at the
+     arcs, which is the opposite of every crossed glyph this cell has held. The gain is
+     bigger than it sounds because it also changes WHAT fit() MEASURES: with arms on the
+     cardinals the bbox half-width IS the arm length, so reach = box/2, where a diagonal X
+     reaches box/sqrt(2). The box can be ~41% larger for the same tip radius, and the ink
+     inside it - the rays and the whole centre mass - scales with the box.
 
-     The blade type carries nothing - knives would read identically, since at ~11 px of
-     inner glyph the hilts are gone and only the X remains. Do not spend detail there.
+     THE ARMS ARE EVENED UP (1.0 / 0.95 / 1.0 / 0.97) for the same reason. Rotating put
+     them on the axes where they set the bounding box, and the parent's unequal arms
+     (1.0 / 0.86 / 1.0 / 0.90) came out 1.14:1 - a landscape glyph, which fit() haircuts on
+     the short axis. Evened they are 1.05:1. The IRREGULARITY THAT SAYS "EXPLOSION" is
+     carried by the SHORT rays (0.54-0.70) and by ~6 deg of angular jitter, not by the
+     arms, and that separation is deliberate: the arms are structural, the rays are the
+     character. A regular eight-point star was built and rejected - it reads as a sparkle.
 
-     Filled rather than outline, per the measurement in skull.svg: at this size an
-     outline glyph is mostly keyline, and a mark's apparent colour is the mean over its
-     own area. -->
-<path d="M19.75 14.438c59.538 112.29 142.51 202.35 232.28 292.718l3.626 3.75.063-.062c21.827 21.93 44.04 43.923 66.405 66.25-18.856 14.813-38.974 28.2-59.938 40.312l28.532 28.53 68.717-68.717c42.337 27.636 76.286 63.646 104.094 105.81l28.064-28.06c-42.47-27.493-79.74-60.206-106.03-103.876l68.936-68.938-28.53-28.53c-11.115 21.853-24.413 42.015-39.47 60.593-43.852-43.8-86.462-85.842-130.125-125.47-.224-.203-.432-.422-.656-.625C183.624 122.75 108.515 63.91 19.75 14.437zm471.875 0c-83.038 46.28-154.122 100.78-221.97 161.156l22.814 21.562 56.81-56.812 13.22 13.187-56.438 56.44 24.594 23.186c61.802-66.92 117.6-136.92 160.97-218.72zm-329.53 125.906 200.56 200.53a402.965 402.965 0 0 1-13.405 13.032L148.875 153.53l13.22-13.186zm-76.69 113.28-28.5 28.532 68.907 68.906c-26.29 43.673-63.53 76.414-106 103.907l28.063 28.06c27.807-42.164 61.758-78.174 104.094-105.81l68.718 68.717 28.53-28.53c-20.962-12.113-41.08-25.5-59.937-40.313 17.865-17.83 35.61-35.433 53.157-52.97l-24.843-25.655-55.47 55.467c-4.565-4.238-9.014-8.62-13.374-13.062l55.844-55.844-24.53-25.374c-18.28 17.856-36.602 36.06-55.158 54.594-15.068-18.587-28.38-38.758-39.5-60.625z" />
+     MEASURED at the fit below, against the skull, over the cell: 60% of its ink (the
+     parent blast was 52%, the plain X 51%, the swords 42%, the rounds 45%), aspect 1.05,
+     ZERO pixels of overlap with the reticle arcs, and 13.5 px of margin left to the cell
+     edge.
+
+     RETICLE_FIT_SCALE IS 1.40 AND THE CEILING IS NO LONGER THE ARCS. This number is NOT
+     comparable to the 0.95 the diagonal versions used - rotating changed the measurement,
+     and the tip radius only grew 6.5% (47.4 -> 50.5 px). What caps it now, in order:
+       * the CELL EDGE. 1.70 leaves 2.4 px, under the 3 a keyline needs, and a keyline that
+         reaches the cell boundary bleeds across an atlas seam. That is the hard stop.
+       * the SHORT RAYS, which do point at the arcs. They sit at 0.70 of an arm, so they
+         stay clear until the arms reach ~71 px - past the cell stop, so not binding today.
+     1.60 was built and measured: 79% ink, still zero arc overlap, arms visibly THROUGH the
+     cardinal gaps. It was not taken because the point of more ink is to stop the mark
+     reading dim, and past ~60% it starts trading against the thing ink is for - the bigger
+     and denser the glyph, the more it fills the cell like the skull does, and its measured
+     separation from the skull got worse at every size (0.633 -> 0.658 at 26 px). Go there
+     only for the burst-out look, knowing that is the trade.
+
+     THE S2 CELL TAKES A DIFFERENT NUMBER, S2_RETICLE_FIT_SCALE, and must. That style fits
+     by L1 radius against a CLOSED diamond - no gaps, nothing to pass through - so the ring
+     scale would drive the glyph straight through the frame. 1.00 is right there, and it is
+     already larger than the 0.95 the parent used, because fit_diamond measures |x| + |y|
+     and a cardinal arm's L1 radius is just its length.
+
+     THE ONE THING IT DOES NOT SAY IS "HUMAN". It reads as hostile combat, not as people,
+     and that is a real cost against the bust that started this chain. It is accepted
+     because the bust is unusable: a skull and a bust are the same silhouette at 26 px,
+     which is the finding in bounty-swords.alt and the reason none of this can be solved by
+     picking a better figure. Crossed rifles were built and measured as the alternative
+     that does say "human" (1.03:1, 62% ink, an 8 deg splay to square the pair); they lose
+     on the small-size read and on having any detail at all to lose. If the mark must carry
+     "human" some day, that is where to start.
+
+     Filled rather than outline, per the measurement in skull.svg: at this size an outline
+     glyph is mostly keyline, and a mark's apparent colour is the mean over its own area. -->
+<path d="M432.0 256.0 L308.0 277.6 L322.9 333.1 L277.6 308.0 L273.4 422.3 L234.4 308.0
+         L170.0 328.8 L204.0 277.6 L80.0 259.1 L204.0 234.4 L185.1 192.7 L234.4 204.0
+         L273.3 86.2 L277.6 204.0 L334.7 161.2 L308.0 234.4Z" />
 </svg>

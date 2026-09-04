@@ -482,5 +482,259 @@ check("a file that is not a legend gets none of our art",
 	count(other, "iqm_mapspot_") == 0)
 check("...and keeps the art it had", count(other, "ui_AlphaLion_PrimaryMission") == 1)
 
+print("\n-- the S.T.A.L.K.E.R. 2 style switch ----------------------------------")
+
+-- Everything above ran with no ui_mcm at all, i.e. the default style, which is what a
+-- player who has never opened the menu gets. Now answer 1 for iqm/general/map_icon_style
+-- and run the SAME real files through the SAME callback again.
+--
+-- The one thing worth proving here is that the restyle is a PASS OVER THE DOM rather than
+-- a second table of selectors: nothing below names a spot type that the s2 code knows
+-- about, because it does not know about any. It keys on the id prefix, so these
+-- assertions are about the ids that came out, not about a list somebody kept in sync.
+ENV.ui_mcm = { get = function(path)
+	if path == "iqm/general/map_icon_style" then return 1 end
+	if path == "iqm/general/map_icons" then return true end
+	return nil
+end }
+
+local s2_spots  = ENV.COnXmlRead([[ui\map_spots_16.xml]], spots_in)
+local s2_legend = ENV.COnXmlRead([[ui\pda_tasks_16.xml]], al_in)
+
+for label, out in pairs({ ["the spot file"] = s2_spots, ["the legend"] = s2_legend }) do
+	local all, s2 = count(out, "iqm_mapspot_"), count(out, "iqm_mapspot_s2_")
+	check(label .. ": every id this mod owns is the s2 one", all > 0 and all == s2,
+		string.format("%d ids, %d of them s2", all, s2))
+	-- The callback fires once per spot FILE and the aspect variants share includes, so a
+	-- second rename of an already-renamed id is a real possibility rather than a
+	-- hypothetical. It would produce a texture id nothing declares, i.e. a blank marker.
+	check(label .. ": no id was renamed twice", count(out, "iqm_mapspot_s2_s2_") == 0)
+end
+
+-- WHITE ON EVERYTHING, because that is the half of the S2 look the frame does not carry.
+local s2_medic = s2_spots:match("<ui_pda2_medic_location_spot[ >].-</ui_pda2_medic_location_spot>")
+check("a service spot takes the s2 cell", s2_medic
+	and s2_medic:find("iqm_mapspot_s2_medic", 1, true) ~= nil, s2_medic)
+check("...and is tinted white, not its role colour", s2_medic
+	and s2_medic:find('r="255"', 1, true) and s2_medic:find('g="255"', 1, true)
+	and s2_medic:find('b="255"', 1, true) and not s2_medic:find('r="238"', 1, true),
+	s2_medic and s2_medic:gsub("%s+", " "):sub(1, 160))
+
+-- ...EXCEPT the squad disks. Fourteen warfare spots carry faction, relation and
+-- moving/static in their own r/g/b over one white disk, so white would delete the
+-- information rather than restyle it. The id still changes -- same art in both atlases.
+local s2_duty = s2_spots:match("<warfare_duty_tex[ >].-</warfare_duty_tex>")
+check("a squad disk takes the s2 cell too", s2_duty
+	and s2_duty:find("iqm_mapspot_s2_squad", 1, true) ~= nil, s2_duty)
+check("...but KEEPS its faction colour", s2_duty and s2_duty:find('r="192"', 1, true) ~= nil,
+	s2_duty and s2_duty:gsub("%s+", " "):sub(1, 160))
+
+-- The legend follows the map, or it is a key to marks that are not on it.
+local s2_trader_row = row_with(s2_legend, CAPTION["ui_AlphaLion_Trader-large"]) or ""
+check("the legend row takes the s2 cell",
+	s2_trader_row:find("iqm_mapspot_s2_trader", 1, true) ~= nil,
+	s2_trader_row:gsub("%s+", " "):sub(1, 160))
+check("...and the row's tint is white as well",
+	s2_trader_row:find('r="255"', 1, true) ~= nil and not s2_trader_row:find('g="198"', 1, true),
+	s2_trader_row:gsub("%s+", " "):sub(1, 160))
+
+-- ...AND THE MAIN-TASK ROW KEEPS ITS GOLD, which is the reason the storyline decision is
+-- keyed on the tint rather than on a list of spot names. A legend row is an <image> in a
+-- different FILE - it has no spot name to match on at all - so a spot-keyed rule would
+-- have kept the gold on the map and dropped it in the key to the map.
+local s2_main_row = row_with(s2_legend, CAPTION["ui_AlphaLion_PrimaryMission"]) or ""
+check("the legend's main-task row keeps the storyline gold",
+	s2_main_row:find("iqm_mapspot_s2_task", 1, true) ~= nil
+	and s2_main_row:find('r="246"', 1, true) ~= nil,
+	s2_main_row:gsub("%s+", " "):sub(1, 160))
+local s2_add_row = row_with(s2_legend, CAPTION["ui_AlphaLion_SecondaryMission"]) or ""
+check("...and the additional-task row, the same cell, does not",
+	s2_add_row:find("iqm_mapspot_s2_task", 1, true) ~= nil
+	and s2_add_row:find('r="246"', 1, true) == nil,
+	s2_add_row:gsub("%s+", " "):sub(1, 160))
+
+-- THE LEVEL CHANGER KEEPS ITS GREEN. It is the one mark held out of the whitening for a
+-- reason that is not "the colour is the information": its SHAPE does not change between
+-- the styles (the eight-heading arch never became a diamond), so whitening it would have
+-- made a fixture harder to find without making it look any more like S2.
+local s2_arch = s2_spots:match("<level_changer_up_spot[ >].-</level_changer_up_spot>")
+check("the level changer takes the s2 cell", s2_arch
+	and s2_arch:find("iqm_mapspot_s2_transition", 1, true) ~= nil, s2_arch)
+check("...and KEEPS the transition green", s2_arch
+	and s2_arch:find('r="102"', 1, true) ~= nil
+	and s2_arch:find('g="173"', 1, true) ~= nil, s2_arch)
+
+-- THE THREE TASK-KIND TINTS KEEP THEIR COLOUR TOO, by request after a play-test: the
+-- hand-in green, the bounty red and the mutant olive answer a question the player asks
+-- before reading the glyph (is anything finished, is anything hostile), which is the one
+-- job a 26 px pin's colour does better than its drawing. Everything else went white.
+local function block(out, tag)
+	return out:match("<" .. tag .. "[ >].-</" .. tag .. ">")
+end
+local s2_handin = block(s2_spots, "iqm_task_handin_spot")
+check("a hand-in keeps the green and takes the s2 cell", s2_handin
+	and s2_handin:find("iqm_mapspot_s2_handin", 1, true) ~= nil
+	and s2_handin:find('r="40"', 1, true) ~= nil
+	and s2_handin:find('g="172"', 1, true) ~= nil, s2_handin)
+local s2_mutant = block(s2_spots, "iqm_task_mutant_spot")
+check("a mutant hunt keeps the olive", s2_mutant
+	and s2_mutant:find('r="176"', 1, true) ~= nil
+	and s2_mutant:find('g="216"', 1, true) ~= nil, s2_mutant)
+local s2_delivery = block(s2_spots, "iqm_task_delivery_spot")
+check("a delivery keeps the hand-in's green, which it shares on purpose", s2_delivery
+	and s2_delivery:find('r="40"', 1, true) ~= nil, s2_delivery)
+local s2_bounty_kind = block(s2_spots, "iqm_task_bounty_spot")
+check("a bounty keeps the red", s2_bounty_kind
+	and s2_bounty_kind:find('r="172"', 1, true) ~= nil
+	and s2_bounty_kind:find('g="60"', 1, true) ~= nil, s2_bounty_kind)
+
+-- ...AND SO DOES ITS SELECTION FRAME, which is the reverse of what shipped first. A white
+-- diamond is the largest and brightest shape in the mark, so it read as a white marker with
+-- something red inside it and the KIND lost to the STATE. Selection is carried by the
+-- frame's presence and its blink; it does not need the colour channel as well.
+--
+-- The border's own id says nothing about this - iqm_mapspot_select is one cell under every
+-- kind of pin - so the pass has to walk from the border up to the spot. That is the part
+-- worth asserting: get the parent chain wrong and the frame silently falls back to white,
+-- which is exactly what it used to be and so looks like nothing broke.
+local s2_bk_border = s2_bounty_kind and s2_bounty_kind:match("<static_border[ >].-</static_border>")
+check("...and its selection frame takes the same red", s2_bk_border
+	and s2_bk_border:find("iqm_mapspot_s2_select", 1, true) ~= nil
+	and s2_bk_border:find('r="172"', 1, true) ~= nil
+	and s2_bk_border:find('g="60"', 1, true) ~= nil
+	and s2_bk_border:find('r="255"', 1, true) == nil, s2_bk_border)
+local s2_handin_border = s2_handin and s2_handin:match("<static_border[ >].-</static_border>")
+check("...a hand-in's frame takes the green", s2_handin_border == nil
+	or (s2_handin_border:find('r="40"', 1, true) ~= nil
+	    and s2_handin_border:find('g="172"', 1, true) ~= nil), s2_handin_border)
+
+-- STORYLINE GOLD SURVIVES THE WHITENING, and it cannot be kept by id: a storyline task and
+-- a secondary task are the SAME cell (iqm_mapspot_task) and differ only in r/g/b, so the
+-- pass keys that decision on the tint itself (S2_KEEP_RGB). Both halves are asserted here
+-- because keeping both, or whitening both, are the two ways to get it wrong.
+local s2_story = block(s2_spots, "storyline_task_spot")
+check("a storyline task keeps its gold", s2_story
+	and s2_story:find("iqm_mapspot_s2_task", 1, true) ~= nil
+	and s2_story:find('r="246"', 1, true) ~= nil
+	and s2_story:find('g="204"', 1, true) ~= nil, s2_story)
+local s2_story_border = s2_story and s2_story:match("<static_border[ >].-</static_border>")
+check("...and so does its selection frame", s2_story_border
+	and s2_story_border:find('r="246"', 1, true) ~= nil, s2_story_border)
+local s2_secondary = block(s2_spots, "secondary_task_spot")
+check("...while a secondary task, the same cell, still goes white", s2_secondary
+	and s2_secondary:find("iqm_mapspot_s2_task", 1, true) ~= nil
+	and s2_secondary:find('r="255"', 1, true) ~= nil
+	and s2_secondary:find('r="246"', 1, true) == nil, s2_secondary)
+local s2_story_mini = block(s2_spots, "storyline_task_spot_mini")
+local story_arrow = s2_story_mini and s2_story_mini:match("<texture_above.-</texture_above>")
+check("...and the minimap pin's off-level arrow keeps it too", story_arrow
+	and story_arrow:find('r="246"', 1, true) ~= nil, story_arrow)
+
+-- THE OFF-LEVEL ARROWS CANNOT BE DECIDED BY THEIR OWN ID, and this is the pair of checks
+-- that proves the pass does it by SPOT instead. iqm_mapspot_above is ONE cell shared by a
+-- gold storyline task, a white secondary, a red alert and the coloured task kinds, so the
+-- same id has to come out coloured under one parent and white under another.
+local s2_mutant_mini = block(s2_spots, "iqm_task_mutant_spot_mini")
+local mutant_arrow = s2_mutant_mini and s2_mutant_mini:match("<texture_above.-</texture_above>")
+check("an off-level arrow inherits its spot's colour", mutant_arrow
+	and mutant_arrow:find('r="176"', 1, true) ~= nil, mutant_arrow)
+local s2_secondary_mini = block(s2_spots, "secondary_task_spot_mini")
+local secondary_arrow = s2_secondary_mini and s2_secondary_mini:match("<texture_above.-</texture_above>")
+check("...and the SAME cell under a whitened spot stays white", secondary_arrow
+	and secondary_arrow:find('r="255"', 1, true) ~= nil
+	and secondary_arrow:find('r="240"', 1, true) == nil, secondary_arrow)
+
+-- The bare pair, same question: a hand-in that goes up a floor is still a finished job.
+local s2_handin_mini = block(s2_spots, "iqm_task_handin_spot_mini")
+local handin_arrow = s2_handin_mini and s2_handin_mini:match("<texture_above.-</texture_above>")
+check("the BARE arrow inherits it as well", handin_arrow
+	and handin_arrow:find("iqm_mapspot_s2_abovebare", 1, true) ~= nil
+	and handin_arrow:find('r="40"', 1, true) ~= nil, handin_arrow)
+
+-- THE SPOT RECTS GROW. A diamond of the same extent as a ring badge reads smaller - it
+-- encloses 2/pi of the area, and only its four points reach further than the ring - and
+-- the art has no room to answer it, the points being already at the cell edge. So the
+-- correction is on the spot: S2_SPOT_SCALE 1.19, i.e. 19 -> 23 and 14 -> 17 units.
+local function attr(block, key)
+	return block and tonumber(block:match(key .. '="(%-?%d+)"'))
+end
+local s2_medic_mini = s2_spots:match(
+	"<ui_pda2_medic_location_mini_spot[ >].-</ui_pda2_medic_location_mini_spot>")
+check("the map spot grew from 19 to 23 units",
+	attr(s2_medic, "width") == 23 and attr(s2_medic, "height") == 23,
+	s2_medic and s2_medic:gsub("%s+", " "):sub(1, 120))
+check("the minimap spot grew from 14 to 17 units",
+	attr(s2_medic_mini, "width") == 17 and attr(s2_medic_mini, "height") == 17,
+	s2_medic_mini and s2_medic_mini:gsub("%s+", " "):sub(1, 120))
+
+-- Grown ONCE. A task spot carries texture, texture_above and texture_below, and the pass
+-- walks all three tags - so an ungated scale would compound to 1.19^3 and hand that one
+-- spot a 68% marker while its neighbours got 21%.
+local s2_bounty = s2_spots:match("<iqm_task_bounty_spot[ >].-</iqm_task_bounty_spot>")
+check("a spot with off-level swaps is grown exactly once",
+	attr(s2_bounty, "width") == 23, s2_bounty and s2_bounty:gsub("%s+", " "):sub(1, 200))
+
+-- THE SELECT BORDER FOLLOWS THE ICON. This is the bug that showed up on screen first: the
+-- frame is a top-left child of a centre-aligned spot, so centring it means
+-- x = -(border - icon)/2 - which is what the -5 in the SPOTS entries IS, for a 29-unit
+-- border on a 19-unit spot. Grow the icon and leave -5 alone and the frame sits a unit up
+-- and left of the marker it is supposed to be around.
+--
+-- Asserted as the RELATION rather than as numbers, so it holds if either scale is retuned.
+local s2_border = s2_bounty and s2_bounty:match("<static_border[ >].-</static_border>")
+local function centred(icon, border)
+	local iw, ih = attr(icon, "width"), attr(icon, "height")
+	local bw, bh = attr(border, "width"), attr(border, "height")
+	if not (iw and ih and bw and bh) then return false, "missing geometry" end
+	local x, y = attr(border, "x"), attr(border, "y")
+	return x == -(bw - iw) / 2 and y == -(bh - ih) / 2,
+		string.format("icon %dx%d, border %dx%d at %s,%s -- centred would be %g,%g",
+			iw, ih, bw, bh, tostring(x), tostring(y), -(bw - iw) / 2, -(bh - ih) / 2)
+end
+do
+	local ok, why = centred(s2_bounty, s2_border)
+	check("the select border is centred on the grown icon", ok, why)
+end
+-- ...and it keeps air around the icon rather than closing onto it: the (border - icon)/2
+-- gap scales with the icon, so the frame is still outside the diamond's points.
+check("the select border kept air around the icon",
+	attr(s2_border, "width") > attr(s2_bounty, "width"),
+	s2_border and s2_border:gsub("%s+", " "):sub(1, 160))
+
+-- THE TWO HOLLOW TYPES WERE ASSERTED HERE until R2.62 removed them: iqm_task_open and
+-- iqm_task_waypoint, the pin that ringed a mark the map already drew. Their whole reason
+-- for existing was a rule that is gone, so the size and clearance arithmetic that used to
+-- live here has nothing left to measure. What replaced it is one line in the s2 pass -
+-- every restyled spot now takes S2_SPOT_SCALE and nothing else - which the medic and
+-- bounty checks above already cover.
+
+-- The LEVEL CHANGER's rect, for the same reason its colour survives: its art is the same
+-- arch in both styles, so it keeps the 19x19 this mod's own SPOTS entry gives it. Worth
+-- asserting the exact number rather than "unchanged" - 19x19 is already a patched value
+-- (vanilla is 19x21, and the entry squares it so the rotated quad does not shear the
+-- arch), so a scale slipping through here would read as a plausible size rather than as
+-- a bug.
+check("the level changer's rect is left at the mod's own 19x19",
+	attr(s2_arch, "width") == 19 and attr(s2_arch, "height") == 19,
+	s2_arch and s2_arch:gsub("%s+", " "):sub(1, 160))
+
+-- And the legend keeps its geometry: those swatches are rows in a list, and a 21% taller
+-- one would push the panel's rows apart. Same pass, geometry off.
+check("the legend swatch stays 19x19",
+	(s2_trader_row:match('<image[ >].-/?>') or ""):find('width="19"', 1, true) ~= nil,
+	s2_trader_row:gsub("%s+", " "):sub(1, 200))
+
+-- And the switch switches: 0 puts the ring badges back on the same input, which is what
+-- proves the s2 pass is reading the option rather than the atlas having been renamed
+-- somewhere upstream.
+ENV.ui_mcm = { get = function(path)
+	if path == "iqm/general/map_icon_style" then return 0 end
+	return nil
+end }
+local back = ENV.COnXmlRead([[ui\map_spots_16.xml]], spots_in)
+check("style 0 draws the ring badges again", count(back, "iqm_mapspot_s2_") == 0
+	and back:find("iqm_mapspot_medic", 1, true) ~= nil)
+ENV.ui_mcm = nil
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

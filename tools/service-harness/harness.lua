@@ -385,8 +385,8 @@ do
 	      spot_role_one_call(reply_of({ "treasure", "level_changer" })) == nil)
 	check("...and do not shadow a real one",
 	      spot_role_one_call(reply_of({ "treasure", "ui_pda2_medic_location" })) == "medic")
-	-- The guard target_covered uses, and this now shares: a non-table reply is not a
-	-- reply. An engine that returns something else must reach the loop, not error.
+	-- A non-table reply is not a reply: an engine that returns something else must reach
+	-- the loop, not error. (The retired coverage test shared this guard.)
 	check("a non-table reply takes the fallback",
 	      spot_role(set_of({ "ui_pda2_medic_location" }), false) == "medic")
 end
@@ -439,7 +439,7 @@ do
 	check("spot_role reads the whole-object query",
 	      scan_src:find("local list = map_get_spots and map_get_spots(id)", 1, true) ~= nil,
 	      "the one-call form is gone -- back to seven queries per NPC?")
-	check("...guarded exactly as target_covered guards it",
+	check("...and the reply is type-guarded before it is walked",
 	      scan_src:find("if type(list) ~= \"table\" then", 1, true) ~= nil)
 	check("the per-spot loop survives as the fallback",
 	      scan_src:find("if map_has_spot(id, e.spot) ~= 0 then return e.role, e.opt end", 1, true) ~= nil,
@@ -478,12 +478,11 @@ do
 		      body ~= nil and body:find(name .. "%s*[,=]") ~= nil,
 		      "an id-keyed cache survives the transition that recycles its keys")
 	end
-	-- the placed waypoint's cached target is an object id too
-	check("the waypoint's cached target is dropped with them",
-	      body ~= nil and body:find("wp_target", 1, true) ~= nil)
+	-- wp_target was checked here until R2.62. It was the placed waypoint's cached coverage
+	-- answer, keyed on an object id and so recycled like the rest -- and it went out with
+	-- the coverage rule itself. Nothing object-keyed is left in task_kind to drop.
 
-	local KEEP = { "kind_seen", "kind_next", "functor_cache", "stage_complete_cache",
-	               "open_kind", "open_tgt" }
+	local KEEP = { "kind_seen", "functor_cache", "stage_complete_cache" }
 	for _, name in ipairs(KEEP) do
 		check(name .. " is task-keyed and survives",
 		      body ~= nil and body:find(name, 1, true) == nil,

@@ -74,8 +74,7 @@ local spots_xml = slurp("gamedata/configs/ui/iqm_map_spots.xml")
 -- and were one type until the static_border split; they are kept apart now because that
 -- border is the engine's active-task ring, and only PAW brings an animated ring of its own.
 local SPOT = { mutant = "iqm_task_mutant", bounty = "iqm_task_bounty",
-               delivery = "iqm_task_delivery", handin = "iqm_task_handin",
-               waypoint = "iqm_task_waypoint", open = "iqm_task_open" }
+               delivery = "iqm_task_delivery", handin = "iqm_task_handin" }
 local OURS = {}
 for _, v in pairs(SPOT) do OURS[v] = true end
 
@@ -403,12 +402,16 @@ do
 	check("single-creature hunt flagged",
 	      (called_for(calls, "beasthunt") or {}).to == "iqm_task_mutant",
 	      "player_id lives on a squad; this target is one monster object")
-	check("stash task on a found stash goes hollow",
-	      (called_for(calls, "drxitem") or {}).to == "iqm_task_open",
-	      "the solid crosshair covers the stash icon completely")
-	check("...and so does the one whose mark is on a sibling object",
-	      (called_for(calls, "ntastash") or {}).to == "iqm_task_open",
-	      "named in TARGET_KIND because no query can reach it")
+	-- R2.62: the two stash families are untouched now. They used to go hollow -- the DRX
+	-- quest item because the engine could see the stash mark on its target, the NTA one
+	-- because TARGET_KIND named it, its mark sitting on a sibling object no query reaches.
+	-- Both now keep the ordinary pin and cover the stash icon, which is vanilla and is the
+	-- acknowledged cost of dropping the coverage rule.
+	check("stash task on a found stash is left alone", called_for(calls, "drxitem") == nil,
+	      "no kind names it any more, so it keeps the type it declared")
+	check("...and so is the one whose mark is on a sibling object",
+	      called_for(calls, "ntastash") == nil,
+	      "its TARGET_KIND entry went with the kind it pointed at")
 	check("fetch untouched",     called_for(calls, "fetch") == nil,
 	      "nothing is drawn on its target, so the reticle keeps its middle")
 	check("another mod's spot untouched", called_for(calls, "atue") == nil,
@@ -577,80 +580,19 @@ do
 	check("the registry still outranks a declared functor",
 	      task_kind(WORLD, T{ id = "bounty_live", current_target = 820 }) == "bounty")
 
-	-- R2.52: the coverage test is no longer PAW-only. It is the last question asked, so
-	-- everything that can name the job outranks it -- which is the entire safety argument
-	-- for letting it apply to every task rather than to a list of them.
-	check("a task pointing at a found stash goes hollow",
-	      task_kind(WORLD, T{ id = "x", current_target = 704 }) == "open")
-	check("a task on bare ground keeps its middle",
-	      task_kind(WORLD, T{ id = "x", current_target = 700, spot = "secondary_task" }) == nil)
-	check("nothing drawn there at all is not coverage",
-	      task_kind(WORLD, T{ id = "x", current_target = 999 }) == nil)
-	check("our own type still does not count as coverage",
-	      task_kind(WORLD, T{ id = "x", current_target = 702, spot = "secondary_task" }) == nil,
-	      "otherwise the general test latches on its own output too")
-	check("a bounty standing on a marked object is still a bounty",
-	      task_kind(WORLD, T{ id = "bounty_live", current_target = 704 }) == "bounty",
-	      "every answer about the JOB outranks one about the ground")
-	check("a mutant hunt on a marked object is still a mutant hunt",
-	      task_kind(WORLD, T{ id = "x", current_target = 800 }) == "mutant")
-	-- R2.55c. THE NEW-TASK PULSE IS NOT COVERAGE. 705 is bare ground carrying only the
-	-- engine's own blink, which every task wears for ~15 s after it is taken. Counting it
-	-- hollowed the reticle on empty ground -- reported on placed waypoints, but it reached
-	-- every task this test can answer for, and it healed itself when the pulse expired,
-	-- which is what made it look intermittent.
-	check("a waypoint on bare ground with only its own new-task pulse stays solid",
-	      task_kind(WORLD, T{ id = "task_placeable_waypoint", current_target = 705,
-	                          spot = "secondary_task_location" }) == nil,
-	      "ui_secondary_task_blink is the task's own highlight, not another mark")
-	check("...and the same for an ordinary task's coverage test",
-	      task_kind(WORLD, T{ id = "x", current_target = 705,
-	                          spot = "secondary_task_location" }) == nil,
-	      "nothing about this was specific to waypoints")
-	check("...while a REAL mark under the pulse still counts",
-	      task_kind(WORLD, T{ id = "x", current_target = 706,
-	                          spot = "secondary_task_location" }) == "open",
-	      "excluding the blink must not blind the test to the stash beside it")
-	check("nta_stash answers even with nothing drawn on its target",
-	      task_kind(WORLD, T{ id = "ntastash", current_target = 703 }) == "open")
-	-- R2.55. THE TWO HOLLOW TYPES ARE DISTINCT, AND DIFFER IN EXACTLY ONE ELEMENT. This
-	-- replaced a check asserting they were the SAME type, which is precisely the bug: with
-	-- one shared borderless type, selecting a stash task moved the active task and drew
-	-- nothing, because show_static_border is a no-op when the element is absent
-	-- (map_spot.cpp:140-146). So the old check was pinning the defect in place.
-	check("the two hollow types are separate",
-	      SPOT.waypoint == "iqm_task_waypoint" and SPOT.open == "iqm_task_open")
-	do
-		local o = spots_xml:match("<iqm_task_open_spot[ >].-</iqm_task_open_spot>") or ""
-		local w = spots_xml:match("<iqm_task_waypoint_spot[ >].-</iqm_task_waypoint_spot>") or ""
-		check("...open carries the active-task ring", o:find("<static_border"),
-		      "without it a selected stash task gives the player no feedback at all")
-		check("...and waypoint deliberately does not", not w:find("<static_border"),
-		      "PAW draws paw_task_default on the same object; two pulsing rings is one too many")
-		-- ...and they are otherwise the same mark, which is the half a reader has to trust
-		-- unless it is asserted: the texture is what makes them read as one shape.
-		check("...but both draw the same hollow reticle",
-		      o:find("iqm_mapspot_taskopen") and w:find("iqm_mapspot_taskopen"))
-	end
-
-	-- THE WAYPOINT KIND IS ABOUT THE GROUND, NOT THE JOB (R2.49f). It answers "waypoint"
-	-- only when something else is already drawn on the target, because the hollow reticle
-	-- exists to let that something show through - on bare ground it would just be a
-	-- marker with its middle missing.
-	local WP = function(tgt)
-		return T{ id = "task_placeable_waypoint", current_target = tgt,
-		          spot = "secondary_task" }
-	end
-	check("waypoint on bare ground keeps the full reticle",
-	      task_kind(WORLD, WP(700)) == nil,
-	      "its own spot and PAW's highlight are not 'something underneath'")
-	check("waypoint on a service NPC goes hollow",
-	      task_kind(WORLD, WP(701)) == "waypoint")
-	check("our own type does not count as coverage",
-	      task_kind(WORLD, WP(702)) == nil,
-	      "otherwise the test reads its own output back and latches on")
-	check("waypoint with no target is neither",
-	      task_kind(WORLD, WP(nil)) == nil)
+	-- THE COVERAGE RULE WAS TESTED HERE, and it is gone (R2.62). It asked the engine what
+	-- else was drawn on a task's target and answered "open" - or "waypoint", for PAW's pin -
+	-- when anything was, so the pin ringed that mark instead of covering it. Removed by
+	-- request for vanilla behaviour: a task now covers what it points at.
+	--
+	-- What went with it, so a reader knows these are absences rather than gaps: the two
+	-- hollow location types, target_covered and its NOT_COVER exclusions, the wp_target /
+	-- open_kind caches, KIND_RECHECK, and the nta_stash TARGET_KIND entry that named the
+	-- one stash family whose mark sits on a sibling object.
+	--
+	-- The tests above this line still matter and are the reason the removal is safe: every
+	-- kind that is about the JOB - registry bounty, declared functor, mutant - answered
+	-- before coverage ever ran, so dropping the last question changes nothing about them.
 end
 
 -- ------------------------------------------------- 6b. no save carries our types
@@ -799,53 +741,15 @@ check("src: the declared lists are consulted AFTER the bounty registry",
 check("src: ...and before the squad community walk",
       scan_src:find("local declared = f and") < scan_src:find("is_squad_monster%[comm%]"))
 
-check("src: positive kinds are cached, negatives are re-tested",
-      scan_src:find("kind_seen%[id%] = \"mutant\"") and scan_src:find("KIND_RECHECK"),
-      "squad_id is nil for the first frame and again every 3 s while the status "
-      .. "functor rescans -- caching that would freeze a lair on the plain reticle")
+check("src: positive kinds are cached",
+      scan_src:find("kind_seen%[id%] = \"mutant\"") ~= nil,
+      "a kind is a property of the section, so it is worked out once and kept")
 check("src: the liveness test is published for iqm_taskspot",
       scan_src:find("task_active = is_task_active"))
 
--- The waypoint kind is the one that must NOT be cached the way the others are: the other
--- two are properties of the job and never change, this one is a property of the ground and
--- the player moves the waypoint without the task id changing.
-check("src: the waypoint kind is keyed on the TARGET, not the task id",
-      scan_src:find("wp_target") ~= nil and scan_src:find("kind_seen%[id%] = \"waypoint\"") == nil,
-      "a sticky cache here would freeze the first ground it was tested on")
--- R2.52: the general one must not latch either, for the same reason, and it must survive
--- the negative throttle -- returning nil between rechecks would flap the pin every 5 s.
-check("src: the general coverage answer is not latched in kind_seen",
-      scan_src:find("kind_seen%[id%] = \"open\"") == nil and scan_src:find("open_kind%[id%]"),
-      "coverage is a property of the ground, not of the job")
-check("src: ...and the throttle hands back that answer rather than nil",
-      scan_src:find("return open_kind%[id%]\n\tend"),
-      "nil here would flip the reticle solid for the whole recheck interval")
-check("src: ...and a target change re-tests at once",
-      scan_src:find("open_tgt%[id%] == tgt"))
-check("src: the coverage test runs LAST, after every test about the job",
-      scan_src:find("target_is_monster%(tgt%)") < scan_src:find("open_kind%[id%] = %(tgt"),
-      "this is the whole safety argument for applying it to every task")
-check("src: coverage is asked of the engine, not guessed from a list",
-      scan_src:find("map_get_object_spots_by_id") ~= nil)
-check("src: the stash family whose mark is on a sibling object is named instead",
-      scan_src:find("nta_stash_task_target_functor = \"open\""),
-      "no positional query exists, so this one cannot be derived")
-check("src: the task's own spot does not count as coverage",
-      scan_src:find("t ~= own") ~= nil)
-check("src: PAW's own highlight does not count either",
-      scan_src:find("NOT_COVER%[t%]") and scan_src:find("paw_task_default%s*= true"))
--- R2.55c. The engine's NEW-TASK PULSE is the third exclusion, and the one whose absence was
--- a live bug: a separate map location on the task's own target, alive ~15 s after the task
--- is taken. Both variants must be listed -- storyline tasks carry the other one, so naming
--- only the secondary would leave every fresh storyline task hollow.
-check("src: ...nor does the engine's new-task pulse, in either variant",
-      scan_src:find("ui_secondary_task_blink%s*= true")
-      and scan_src:find("ui_storyline_task_blink%s*= true"),
-      "a task's own 'you just got this' highlight is not another mark on the ground")
-check("src: nor does anything of ours",
-      scan_src:find('find%("%^iqm_"%)') ~= nil,
-      "otherwise the test reads its own output back")
-
+-- THE COVERAGE SOURCE CHECKS LIVED HERE. They pinned down that the answer was keyed on
+-- the ground rather than the job, that it ran last, and that it was asked of the engine
+-- rather than guessed from a list. All four properties went out with the rule in R2.62.
 check("src: map_icons option declared", core_src:find('key = "map_icons"'))
 check("src: map_task_kinds option declared", core_src:find('key = "map_task_kinds"'))
 -- R2.59: the MENU no longer hides this row when map_icons is off -- setting-gated

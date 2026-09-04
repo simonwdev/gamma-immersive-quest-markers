@@ -3122,6 +3122,106 @@ the render object stays alive — the dialog bug of R2.28, with a light that can
 off instead of marks glued to the camera. Namespace-global pool plus a teardown on
 `actor_on_net_destroy`, exactly as `HUD_STATE` does.
 
+### R2.62 — The pin covers what it points at · **2026-09-04**
+
+Asked to remove the logic that stops a waypoint drawing over other markers, and to go back to vanilla
+behaviour there. Confirmed the scope first, because "remove it" turned out to be two removals.
+
+**Deleting the waypoint branch alone would not have done it.** That branch is an early `return`; take
+it out and PAW's task falls through the rest of `task_kind` to the *last* test — which is the same
+coverage question, generalised — and answers `open`. The waypoint would have swapped from one hollow
+reticle to another. Vanilla required removing the general rule too, which was the call put to the user
+and the one they took.
+
+**Gone:** the `waypoint` and `open` kinds; `target_covered` and its `NOT_COVER` exclusions;
+`wp_target` / `open_kind` / `open_tgt` / `kind_next` and `KIND_RECHECK`; the
+`nta_stash_task_target_functor` entry in `TARGET_KIND`; the `iqm_task_open` and `iqm_task_waypoint`
+location types; and the two S2 rules that existed only to size those marks, `S2_SPOT_SCALE_BY` and
+`S2_NO_GROW` — every restyled spot now takes the one scale.
+
+**One premise in my own framing of the question was wrong, and is worth recording because it nearly
+cost a working feature.** I told the user that killing the kind would make their placed waypoint
+beacon as the ordinary task reticle, on the strength of the note at `iqm_taskspot.script:88` claiming
+`BEACON_ICON.waypoint` is reached by kind. It is not: `iqm_beacon.offer_waypoint` (`:488`) passes that
+glyph **directly**, as a separate feature with its own MCM switch. The kind lookup at `:654` was a
+second, coincidental route — the file says so itself at `:181`, *"the right answer by luck rather than
+by design"*. So the beacon needed no change at all, and removing `BEACON_ICON.waypoint` as the
+question implied would have broken the waypoint beacon outright.
+
+**The acknowledged cost.** The DRX quest-item family (21 sections) points at a stash the player has
+already found, so its pin now covers the stash icon — the case that justified generalising the rule
+beyond PAW's pin in R2.52. The NTA stash family is the same by a different route: its mark sits on a
+sibling object no positional query reaches, which is why it was *named* rather than detected.
+
+**Why it is safe.** Every kind about the JOB — registry bounty, declared functor, mutant — answered
+before coverage ever ran, so dropping the last question in the chain changes none of them. Four
+harnesses had assertions pinning the old behaviour (colour, service, legend, taskspot) and all four
+are updated rather than deleted wholesale: where a mechanism survives with nothing left to check, the
+mechanism is kept and the absence is written down, so the next reader sees a decision rather than a
+gap.
+
+### R2.60 — The frame outshouted the mark · **2026-09-04**
+
+Two corrections to the S2 style's all-white pass, both reported from play.
+
+**Storyline gold could not be kept by icon id.** A storyline task and a secondary task are the *same*
+cell — `iqm_mapspot_task` — and differ only in `r`/`g`/`b`, so `S2_KEEP_COLOUR` can only keep both or
+whiten both. The all-white pass therefore deleted the main-quest / side-quest distinction outright,
+which is the oldest colour convention on this map and the one the task list is navigated by. Keyed on
+the **tint** instead (`S2_KEEP_RGB`), which is also the only rule that reaches all five places the gold
+has to survive: the map pin, the minimap pin, that pin's off-level arrows, the new-task pulse, and the
+legend swatch — which is an `<image>` in a different file and has no spot name to match on at all. Safe
+to key on because these are the mod's own literals, and `restyle_s2` runs last over a DOM this file has
+already finished writing.
+
+**The white selection frame was the larger mistake, and the original reasoning was backwards.** It was
+white on every pin because "a selection is a state rather than a kind", the idea being that a coloured
+mark inside a white frame says the two things separately. What it actually does is let the state
+outshout the kind: the frame is the largest and brightest shape in the mark, so a white diamond around
+a red bounty reads as a *white marker with something red inside it*. Selection is already carried by
+the frame's presence and by its blink (`light_anim="ui_slow_blinking_alpha"`) — it does not need the
+colour channel as well. The frame now takes its mark's colour.
+
+**That one cannot be a keep-list entry**, because a border's own id says nothing about the pin it is
+around — `iqm_mapspot_select` is one cell under every kind. `restyle_s2` defers borders to a second
+pass, walks `el.parent.parent` from the border texture to the spot, and copies whatever the mark
+resolved to; white stays the fallback for a border whose spot the pass never touched. `slaxml` sets
+`parent` on every parsed node, so the chain is real and not an artefact of elements this file inserted.
+The failure mode is worth naming: get the walk wrong and the frame falls back to white, which is
+exactly what it used to be, so nothing looks broken. Asserted directly — bounty red, hand-in green and
+storyline gold on the frames, secondary still white.
+
+### R2.59 — Two rounds, and a rejection that measured the wrong thing · **2026-09-04**
+
+Asked whether two of the rounds from a Game-icons.net "bullets" glyph could carry the bounty mark.
+R2.57 had already rejected exactly that shape — *"paired rounds read as two bars"* — so the interesting
+part is that the rejection was right about the observation and wrong about the conclusion.
+
+**Two bars is a different silhouette class from a round centred mass, which is the whole test.** The
+constraint R2.57 established still stands and has not moved: mutant lime (176,216,72) and bounty red
+(172,60,66) sit on the red–green axis, so for a player with red–green deficiency shape is the *only*
+channel separating a mutant hunt from a firefight. But "reads as ammunition" was never the requirement
+— "is not confusable with the skull" is. Rendered to luminance at 26 px, the pair is unmistakable
+against `skull.svg`. The swords are the ones that struggle there: an X of thin crossing blades is
+precisely what the 8× downsample does not survive, and it smudges to a dark blob at the size the map
+actually draws it.
+
+**Aspect is why this works where a single pistol did not.** `fit()` sizes the long axis, so a landscape
+glyph is left short on the other one. The pistol was 1.53:1 and collapsed to a bar; this pair is
+**1.30:1** and holds. It is also nothing but thick solid strokes — the property that carries the
+downsample, the same argument `home.svg` is built on.
+
+**`RETICLE_FIT_SCALE["taskbounty"]` stays at 1.15, and that is a ceiling rather than a spare knob.**
+The pair carries less ink than the swords at equal fit (1847 lit px against 2528, both against the
+skull's 3697), so 1.30 was tried to close it: the ink comes up to 2329, and the tips then break through
+the reticle's arcs in the ring style *and* through the frame in the s2 diamond. Both were rendered and
+looked at. The gap in ink is the price of a non-square glyph and it is not worth paying for.
+
+**The source is one path of six subpaths** — a casing and a tip per round, three rounds — and the
+second round's tip is a **relative** moveto. So subpaths may be trimmed from the end but not plucked
+from the middle: dropping an earlier one silently translates every relative subpath after it. The
+swords are kept at `svg/bounty-swords.alt`, beside the bust they themselves replaced.
+
 ### R2.58 — A borrowed marker, and the frame as a verb · **2026-08-17**
 
 **The hand-in marker was never ours.** Reported as *"the delivery icon shows green but the other

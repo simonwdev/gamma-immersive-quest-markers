@@ -78,10 +78,12 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SVGDIR = os.path.join(HERE, "svg")
-OUT_PNG = os.path.join(HERE, "iqm_map_icons.png")
-PREVIEW = os.path.join(HERE, "_preview.png")
+_S2 = "--style" in sys.argv and sys.argv[sys.argv.index("--style") + 1:][:1] == ["s2"]
+_SFX = "_s2" if _S2 else ""
+OUT_PNG = os.path.join(HERE, "iqm_map_icons%s.png" % _SFX)
+PREVIEW = os.path.join(HERE, "_preview%s.png" % _SFX)
 OUT_DDS = os.path.normpath(os.path.join(
-    HERE, "..", "..", "gamedata", "textures", "ui", "iqm_map_icons.dds"))
+    HERE, "..", "..", "gamedata", "textures", "ui", "iqm_map_icons%s.dds" % _SFX))
 
 # Cell order (row-major). MUST match the texture ids in
 # gamedata/configs/ui/textures_descr/iqm_textures.xml. The tint is preview-only,
@@ -202,6 +204,176 @@ W, H = CELL * COLS, CELL * ROWS
 # before the badge frame existed - kept because a bare glyph is the right call for
 # any spot type that vanilla itself draws without a ring).
 BADGE = True
+
+# --- STYLE: the optional STALKER 2 look ---------------------------------------
+#
+#   python build.py --style s2 --preview
+#
+# S.T.A.L.K.E.R. 2 draws every world marker the same way: a thin WHITE DIAMOND with a
+# plain white pictogram inside it, and no colour coding at all. This mode reproduces
+# that over the SAME glyph set - only the frame and the tint change, so there is one
+# atlas's worth of art and two ways of framing it.
+#
+# It is a second atlas, never a replacement: s2 writes iqm_map_icons_s2.png/.dds and
+# leaves the shipped ring atlas and its declarations alone, because the runtime feature
+# is a SWITCH (a second set of texture ids plus white tints in the SPOTS table), not an
+# edit to the default look.
+#
+# THE DIAMOND SURVIVES THE HANDHELD PDA, which is not a given - see NO_BADGE's no-circle
+# rule. A ring squashed to 0.75 is a visibly wrong oval; a diamond squashed to 0.75 is a
+# narrower diamond, and the eye has no expected width for it. Straight edges and corners
+# are exactly what that rule says tolerates the squash.
+#
+# WHAT IT COSTS, measured: the largest square that fits inside a diamond of half-diagonal
+# d has SIDE d, against the 2*(d - stroke) a circle of the same extent gives. So the frame
+# takes ~30% of the glyph's linear size at equal footprint, and DIA_GLYPH_FIT buys some of
+# it back by letting a glyph's corners into the diamond's clear corner space (which the
+# frame does not use). This is the trade to judge in _preview_s2.png at 26 px, not at 128.
+STYLE = (sys.argv[sys.argv.index("--style") + 1]
+         if "--style" in sys.argv and len(sys.argv) > sys.argv.index("--style") + 1
+         else "ring")
+S2 = STYLE == "s2"
+
+# Outer extent of the diamond's POINTS, as a fraction of the cell, keyline excluded:
+# 60/128 leaves the OUTLINE 4 px inside the 64 available. Larger than the ring's 0.4455
+# on purpose - a diamond of half-diagonal d has 2/pi = 64% of the area of a circle of
+# radius d, so matched at the extents it reads as the smaller mark. This puts the two
+# within a hair of each other by extent; the area difference that remains is answered on
+# the SPOT rather than here, because here there is no room - see S2_SPOT_SCALE, which is
+# set to close it exactly.
+DIA_R = 60.0 / 128
+# Stroke, PERPENDICULAR to the edge, in cell fractions, written over the 19-unit spot the
+# ring badge is measured on so the two are comparable at a glance.
+#
+# A DERIVED NUMBER, NOT A TUNED ONE, and that is the thing to hold on to. What has to stay
+# fixed is the stroke the PLAYER SEES; this is a cell fraction and the cell is drawn at
+# S2_SPOT_SCALE, so the two multiply and the fraction has to come down by whatever the spot
+# goes up. Matching the ring's NOMINAL weight is a different and wrong target - 1.8 was
+# that, and it came back as "the diamond is slightly too thick".
+#
+# 1.6 was this answer while S2_SPOT_SCALE was 1.12 (1.8/1.12 = 1.607). At 1.19 the spot is
+# 23 units rather than 21, so the same drawn line is 1.6 * 21/23 = 1.46, and 1.5 is that
+# rounded onto RING_W's own numerator: 2.55 px at 1080p against the 2.48 the 1.6/21 pairing
+# drew, i.e. the same stroke to within a fifteenth of a pixel.
+#
+# THE PAIR MOVES TOGETHER OR NOT AT ALL. Leaving 1.6 here while the spot grew would draw
+# the frame at the equivalent of 1.6 * 23/21 = 1.75/21 - most of the way back to the 1.8
+# that was reported too thick, and it would arrive as a side effect of a SIZE change that
+# nobody would think to re-check the stroke for.
+#
+# It is a floor as much as a value. The black keyline (OUTLINE) is a fixed dilation in
+# atlas px, so thinning the stroke raises the keyline's SHARE of the mark; below ~1.4 the
+# frame starts reading as a dark line with a white core at minimap size.
+DIA_W = 1.5 / 19
+# Clearance in FINAL px between a glyph's ink and the frame's inner line, measured the way
+# the frame constrains it (see l1_radius). 6 covers the glyph's own 3 px keyline plus air;
+# the ring badges are tuned to ~10 px of clearance, and a diamond can run tighter because
+# the gap it leaves is widest exactly where a glyph's own extremes are - on the axes.
+#
+# A glyph sized this way is LARGER than the ring style's, not smaller: 40 px of L1 radius
+# against the ring's 32 px box half-extent. The 30%-smaller-glyph arithmetic in the STYLE
+# note is what a bounding-box fit costs, and this is the fix for it.
+#
+# 4, down from 6: the diamond's frame leaves its widest gap exactly where a glyph's
+# extremes are (on the axes), and the glyph was the half of the mark that read small. 4 is
+# the glyph's own 3 px keyline plus a pixel of air; below that the two keylines touch and
+# the mark closes into a blob at 26 px, which is the same floor OUTLINE is set against.
+DIA_GLYPH_CLEAR = 4.0
+
+# What the GAME draws an s2 spot at, relative to the ring badge's rect - mirrored from
+# S2_SPOT_SCALE in modxml_n_iqm_map_icons.script, which is where it takes effect. Used
+# only by the preview and the compare sheet, so that judging a cell here means judging it
+# at the size it will actually be on the map: a diamond of the same extent as a ring reads
+# smaller, and the correction is on the SPOT rather than in the art (the art has no room -
+# the points are already at the cell edge). Keep the two numbers in step.
+#
+# 1.19 is silhouette parity - the measured case for it lives in the script's own note on
+# this constant. DIA_W above is DERIVED from this value; moving one means moving both.
+S2_SPOT_SCALE = 1.19
+# Per-cell overrides on that, mirrored from the same script. The hollow frame's whole job
+# is to RING a mark somebody else drew, and in this style it is the same closed diamond as
+# the badge underneath - so at equal size it lands exactly on that badge's frame and
+# disappears. The ring style got away with the same footprint because its reticle was a
+# thicker, broken ring; this one has to be bigger.
+#
+# TRACKS S2_SPOT_SCALE rather than standing on its own. What is tuned is the RING OF CLEAR
+# SPACE between the two diamonds (3.3 units), so when the badge grew 21 -> 23 this had to
+# grow with it or the frame would start landing on the outline it exists to clear.
+# 1.45 -> 1.58 takes it 28 -> 30 units and holds that gap at 3.28.
+S2_SPOT_SCALE_BY = {"taskopen": 1.58}
+# Gap cut at each of the four POINTS, as a fraction of the half-diagonal, for the frame
+# used as a task reticle - the statement the round reticle's cardinal gaps make ("go and
+# find this", as against the services' closed ring). The cut is perpendicular to the edge
+# for free: the removed region is itself a small diamond, whose edges are normal to the
+# frame's.
+#
+# ZERO: EVERY MARKER'S OWN FRAME IS A WHOLE DIAMOND. That is what S2 does - one frame for
+# every marker, the glyph carrying the difference - and it is what the mark is wanted to be:
+# a clean diamond, not four bars.
+#
+# TRIED AT 0.32 AND BACKED OUT, which is worth recording because the arithmetic looks
+# harmless and the result is not. The cut removes g/d of EVERY edge, so 0.32 leaves each
+# arm at 68% of its edge - and with the black keyline wrapping each arm's new ends, a
+# bounty reticle stopped reading as a diamond with nicks in it and started reading as four
+# separate bars around a glyph. The lesson for anything future here: judge a cut by what
+# fraction of the EDGE it eats, not by how far into the cell it reaches.
+#
+# The distinction it was reached for - a hollow frame has to be visible over a badge's own
+# frame - is carried by SIZE instead (S2_SPOT_SCALE_BY). Brackets were the other candidate
+# and are worse: they are what the tracked task's static_border draws, so a spot whose own
+# art is brackets claims to be selected wherever it appears. S2_BRACKET_FRAME stays empty.
+DIA_GAP = 0.0
+# Cells drawn as FOUR CORNER BRACKETS instead of a whole diamond: the frame cut at its edge
+# MIDPOINTS rather than at its points, which leaves a bracket sitting at each corner.
+#
+# EMPTY, AND IT HAS TO STAY EMPTY FOR EVERY SPOT CELL. The mechanism is kept because the
+# `select` cell is drawn this way (draw_select, S2_SEL_MIDGAP) and that is exactly the
+# point: BRACKETS ARE SPOKEN FOR. In this mod they have always meant one thing - the
+# static_border the engine shows on the task you are tracking (show_static_border, driven
+# from CMapLocation against ActiveTask) - so a spot whose own art is brackets claims to be
+# selected whenever it is drawn.
+#
+# The hollow frame was given brackets for one release, to make it visible over a badge's
+# own diamond, and it was reported straight back: a waypoint on a sleep icon and an
+# unrelated bounty both wearing brackets, reading as two active tasks at once. The
+# distinction it needed was never SHAPE - S2_SPOT_SCALE_BY gives it SIZE, and a diamond
+# ringing a diamond with 3.3 units of clear space between them is unambiguous without
+# borrowing a meaning that is already taken. (S2's own art nests diamonds like this.)
+#
+# So: a new frame shape here needs a meaning nothing else uses, not just a shape nothing
+# else uses.
+S2_BRACKET_FRAME = {}
+# Cell -> the svg/ glyph it draws IN S2 STYLE ONLY, overriding GLYPH_SRC. The frame is
+# not the only thing a style changes: a diamond sizes its glyph by L1 radius and gives it
+# ~25% more linear size than the ring's half-cell box, so a drawing the ring rejected for
+# closing up at 14 px can be the better one here. See svg/swap-bag.svg for the trader's
+# case, which is the reverse of the R2.46 decision that put the briefcase back to Tabler -
+# and does not disturb it, because the ring style still reads GLYPH_SRC.
+S2_GLYPH_SRC = {"trader": "swap-bag"}
+# Cells that stay exactly as they are in s2 style. The two squad disks carry fourteen
+# faction colours in their r/g/b and are the one mark whose colour IS the information
+# (see SRCS), the off-screen pointer is an arrowhead the engine rotates rather than a
+# framed glyph, the pulse is a soft blob drawn under another mark, and the level changer
+# is a fixture rather than a marker (eight headings, its own green - see S2_KEEP_COLOUR
+# in modxml_n_iqm_map_icons.script).
+#
+# THE BARE OFF-LEVEL ARROWS ARE NOT HERE, and were, wrongly. They are bare in ring style
+# because there the frame is the verb, and a hand-in that goes up a floor must not come
+# back claiming to be a badge (see SRCS). In s2 the frame says nothing, so a bare glyph
+# has nothing left to mean and only reads as a marker that lost its diamond - which is
+# exactly how it looked on the minimap. They take the diamond like everything else, which
+# makes them the same art as the ringed pair in THIS atlas; that collapse IS the style,
+# the same one that leaves a medic and a trader differing by glyph alone.
+S2_KEEP = {"squad", "squadmini", "pointer", "blink", "transition"}
+
+# Cells the GAME does not whiten in s2 style - mirrored from S2_KEEP_COLOUR in
+# modxml_n_iqm_map_icons.script, which is where it takes effect, and used here only so the
+# preview and the compare sheet show what the map will show. The style drops colour coding
+# as decoration; these five keep it because it answers a question asked before the glyph
+# is read - which faction, which way out, is anything finished, is anything hostile. The
+# script comment carries the argument.
+S2_KEEP_TINT = {"squad", "squadmini", "transition", "handin", "taskdelivery", "taskbounty",
+                "taskmutant", "skull"}
 
 # Cells that get NO ring: the glyph is drawn bare at BARE_FIT, for any spot type
 # vanilla itself draws without a frame, or whose glyph already supplies one.
@@ -372,19 +544,35 @@ GLYPH_FIT = 0.70
 # Per-cell scale on the fitted glyph box. Same principle as GLYPH_NUDGE above: fit() works
 # on the bounding BOX, and two glyphs with the same box are not the same apparent size.
 #
-# taskdelivery 0.79 makes the envelope match the hand-in diamond it now sits beside in the
-# grammar (both bare, both the same green, separated only by glyph). Measured: at equal fit
-# their lit bboxes are both 108 wide, but the envelope fills 82% of its box while the
-# diamond -- an outline, rotated, with a hole -- fills 41%. Twice the ink in the same box,
-# and the envelope read as the larger mark. sqrt(28.9/46.7) = 0.787 equalises the INK, which
-# is what the eye sizes a mark by; this is the same rule that mis-sized the fast-travel
-# house at 20 units by matching a badge's footprint instead of its ink.
+# THE RULE IS RIGHT AND THE PAIR WAS BROKEN BY APPLYING IT TWICE (fixed R2.65). Both halves
+# of the hand-in / delivery pair sat at 0.79, and TWO EQUAL SCALES EQUALISE NOTHING: the
+# correction cancels and all that is left is the pair drawn 21% smaller than the sheet.
+# Measured, as shipped: the tag's lit box was 97 px against the skull's 118 and 128 for every
+# badge and reticle -- the two smallest marks on an atlas where they are also the ones that
+# mean "this job is finished, walk it back". Reported as the hand-in being too small, and it
+# was, by 25% of its linear size.
 #
-# handin 0.79 for the same reason and by the same arithmetic: the tag is solid and inks 46.9%
-# of its cell, against the 29.1% of the envelope it sits beside in the same green. Two marks
-# that differ only by glyph must not also differ by weight, or the heavier one reads as the
-# more important. sqrt(29.1/46.9) = 0.788.
-FIT_SCALE = {"taskdelivery": 0.79, "handin": 0.79}
+# HOW IT HAPPENED, because the arithmetic in each step was correct on its own. taskdelivery
+# took 0.79 to match the hand-in DIAMOND (sqrt(28.9/46.7) = 0.787). Then R2.56 made the
+# hand-in a solid price TAG and derived its own 0.79 against "the 29.1% of the envelope it
+# sits beside" -- but the envelope was ALREADY at 0.79, so that second derivation measured
+# the envelope post-correction and re-applied the same shrink to its partner. A per-cell
+# scale is a RATIO BETWEEN TWO CELLS; deriving one against the other's already-scaled state
+# double-counts it. Derive both from their fit-1.0 measurements, then scale ONE.
+#
+# WHAT THE PAIR ACTUALLY MEASURES, at equal fit 1.0, on this atlas, alpha over the cell:
+#   handin (tag)        ink 8852   lit box 116x116
+#   taskdelivery (env)  ink 9525   lit box 116x94
+#   skull, a bare glyph at 1.0, for the sheet's sake:  ink 9468   box 120
+# So the tag is the LIGHTER of the two by 7%, not the heavier, and the envelope is the one
+# that needs correcting: sqrt(8852/9525) = 0.964. The hand-in needs no entry at all, and at
+# 1.0 it lands at 116 against the skull's 120 - in line with the sheet for the first time.
+#
+# The rule itself stands and is why this table exists: a glyph's apparent size is its INK,
+# not its bounding box, and two marks that differ only by glyph must not also differ by
+# weight or the heavier reads as the more important. Same rule that mis-sized the fast-travel
+# house at 20 units by matching a badge's footprint instead of its ink.
+FIT_SCALE = {"taskdelivery": 0.96}
 
 # Supersample factor for the vector work. The ring is a 1-unit stroke at final
 # size, so drawing it directly would alias badly; 8x down to 1x is indistinguishable
@@ -845,6 +1033,12 @@ def shade_bevel(cell, name):
     """
     if SHADE_RIM >= 255 or name not in SHADE_CELLS:
         return cell
+    # In s2 style the shaded cells are the BARE ones - a solid disk or a solid glyph, where
+    # an edge-distance ramp reads as a slight roundness. A framed cell is a thin outline
+    # around empty space, so the same ramp finds no depth to model and only dims the frame
+    # and greys the interior. Only the marks s2 leaves alone keep the bevel.
+    if S2 and name not in S2_KEEP:
+        return cell
     r, g, b, a = cell.split()
     ink = ImageChops.multiply(a.point(lambda v: 255 if v > 128 else 0),
                               r.point(lambda v: 255 if v > 128 else 0))
@@ -974,6 +1168,105 @@ def badge_frame():
     out.putalpha(layer)
     return (out.resize((CELL, CELL), Image.LANCZOS),
             hole.resize((CELL, CELL), Image.LANCZOS))
+
+
+ROOT2 = 1.4142135623730951
+
+
+def diamond_pts(d, c):
+    """The four points of |x| + |y| = d, centred on c."""
+    return [(c, c - d), (c + d, c), (c, c + d), (c - d, c)]
+
+
+def diamond_frame(gap=0.0, midgap=0.0, r=None):
+    """The s2 frame: a diamond outline, white on transparent, at final cell size,
+    plus the filled interior that the keyline pass uses to grow black outward only.
+
+    Stroke is PERPENDICULAR to the edge, which is why the inner diamond is inset by
+    w*sqrt(2) rather than by w: the edge x+y=d sits d/sqrt(2) from the centre, so moving
+    it in by w takes sqrt(2)*w off d.
+
+    `gap` cuts each of the four points, for the frame used as a task reticle. The cut is a
+    small diamond centred on the point, whose own edges run normal to the frame's - so the
+    arms end square to the line they are part of, the way the round reticle's arcs do.
+    """
+    n = CELL * SS
+    c = n / 2.0
+    d = (DIA_R if r is None else r) * n
+    d_in = d - DIA_W * n * ROOT2
+
+    layer = Image.new("L", (n, n), 0)
+    dr = ImageDraw.Draw(layer)
+    dr.polygon(diamond_pts(d, c), fill=255)
+    dr.polygon(diamond_pts(d_in, c), fill=0)
+
+    # A cut is a small diamond centred on the frame, punched out of the ring. Its edges
+    # run at 45 degrees to the axes, i.e. NORMAL to the frame's edges, so an arm ends
+    # square to its own line wherever the cut is placed.
+    def cut(cx, cy, g):
+        dr.polygon([(cx, cy - g), (cx + g, cy), (cx, cy + g), (cx - g, cy)], fill=0)
+
+    if gap > 0:
+        for px, py in diamond_pts(d, c):
+            cut(px, py, gap * d)
+    if midgap > 0:
+        # the four EDGE MIDPOINTS, the inverse placement of `gap` - the same trick SEL_ARC
+        # plays against the round reticle, so a frame inside a frame stays two marks
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                cut(c + sx * d / 2, c + sy * d / 2, midgap * d)
+
+    hole = Image.new("L", (n, n), 0)
+    ImageDraw.Draw(hole).polygon(diamond_pts(d_in, c), fill=255)
+
+    out = Image.new("RGBA", (n, n), (255, 255, 255, 0))
+    out.putalpha(layer)
+    return (out.resize((CELL, CELL), Image.LANCZOS),
+            hole.resize((CELL, CELL), Image.LANCZOS))
+
+
+def diamond_clear():
+    """Clear half-diagonal inside the frame, in final px."""
+    return (DIA_R - DIA_W * ROOT2) * CELL
+
+
+def diamond_glyph_target():
+    """The L1 radius a glyph inside the diamond is scaled to, in final px."""
+    return diamond_clear() - DIA_GLYPH_CLEAR
+
+
+def l1_radius(a):
+    """max(|dx| + |dy|) over a mask's lit pixels, from its centre.
+
+    THE MEASUREMENT A DIAMOND FRAME ACTUALLY CONSTRAINS. fit() sizes by bounding BOX,
+    which is the right constraint inside a ring (a circle cares about sqrt(dx^2+dy^2),
+    and a box's worst case is its corner either way) and the WRONG one inside a diamond:
+    the frame is the line |x| + |y| = d, so what has to clear it is a glyph's L1 extent.
+    Sized by box, a cross and an envelope of the same box are 32 and 53 out of a 46 px
+    clearance - one wastes a third of the room and the other goes through the frame.
+    Sizing by this puts every glyph the same distance off the line instead.
+
+    The 0.5% of lit pixels furthest out are dropped, so one stray antialiased pixel on a
+    corner cannot shrink a whole glyph.
+    """
+    w, h = a.size
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    px = a.load()
+    ds = [abs(x - cx) + abs(y - cy)
+          for y in range(h) for x in range(w) if px[x, y] > 128]
+    if not ds:
+        return 1.0
+    ds.sort()
+    return max(1.0, ds[max(0, int(len(ds) * 0.995) - 1)])
+
+
+def fit_diamond(im, target):
+    """Scale a trimmed glyph so its L1 radius is `target` px, preserving aspect."""
+    g = fit(im, round(2 * target))                   # rough, then measure and correct
+    s = target / l1_radius(g.split()[3])
+    return g if abs(s - 1.0) < 0.01 else \
+        g.resize((max(1, round(g.size[0] * s)), max(1, round(g.size[1] * s))),
+                 Image.LANCZOS)
 
 
 def draw_task(n):
@@ -1199,9 +1492,10 @@ PROC = {"task": draw_task, "select": draw_select, "blink": draw_blink,
 # than written down, which is why RETICLE_FIT survived the reticle stroke going back to
 # 2.0/23 in R2.49a: a thicker ring eats its own interior and the glyph follows it in.
 #
-# The two do not pay the same price for that. The BUST is already drawn at ~70 px inside
-# the badge ring for the VIP, so 74 px inside the reticle is still slightly MORE room than
-# the glyph is proven at and the bounty gives up nothing. The SKULL gives up 31% of its
+# The two do not pay the same price for that. The BOUNTY is drawn here rather than sourced
+# (svg/bounty.svg), so it is fitted to whatever room the frame leaves and gives up nothing
+# - it was a bust when this was written, sized off the VIP's ~70 px badge glyph, and that
+# is no longer what the cell holds. The SKULL gives up 31% of its
 # linear size and just over half its area against the bare cell it replaces, and at
 # 26 px its sockets start to close - the failure that made that cell bare in the first
 # place. Accepted because the grammar is worth it and the minimap is the smaller of the
@@ -1226,16 +1520,58 @@ RETICLE_FIT = 0.70      # glyph box as a fraction of the frame's clear inner dia
 # by 7.4, i.e. it looks small next to the other two for no reason but geometry. 1.12 brings
 # it to ~8 px, matching them.
 #
-# taskbounty 1.15 is a DIFFERENT correction from the diamond's, and the distinction is
-# the useful part. The diamond's 1.12 fixes a bounding-box artefact: it looked small
-# because its points sit at its box's edge midpoints. The swords are not sized wrongly,
-# they are simply THIN - an X is strokes where the skull opposite it is a solid mass, so
-# at equal box size the human mark carries 45% of the mutant mark's lit pixels and reads
-# dimmer for it (the mean-over-area rule, per skull.svg and the palette note in
-# modxml_n_iqm_map_icons). 1.15 takes that to 55%, measured, with the blade tips still
-# clear of the reticle arcs. 1.30 was tried and puts them through it - that is the
-# ceiling, and it is why this does not simply close the gap to 100%.
-RETICLE_FIT_SCALE = {"handin": 1.12, "taskbounty": 1.15}
+# taskbounty 1.40 is a DIFFERENT correction from the diamond's, and NOT COMPARABLE TO THE
+# NUMBER THAT STOOD HERE. The diamond's 1.12 fixes a bounding-box artefact: it looked small
+# because its points sit at its box's edge midpoints. The bounty's is set by WHICH WAY ITS
+# ARMS POINT, and that changed - so 1.40 against the old 0.95 is not a 47% size increase,
+# it is a 6.5% one (tip radius 47.4 -> 50.5 px). Read svg/bounty.svg before touching it.
+#
+# WHERE THE ROOM IS, and it is the same in both styles, which is not obvious. THE RING'S
+# GAPS ARE ON THE CARDINALS (TASK_GAP_DEG; see draw_task), so its arcs are centred on the
+# DIAGONALS. The s2 diamond is |x| + |y| = d, so its VERTICES are on the cardinals and its
+# edges come closest on the diagonals. Cardinals are the free direction either way.
+#
+# The bounty's four long arms therefore point at the cardinals, and its reach is the bbox
+# HALF-WIDTH rather than the half-diagonal a crossed glyph gets. What caps it now, in order:
+#   * the CELL EDGE - 1.70 leaves 2.4 px against the 3 a keyline needs, and a keyline at the
+#     cell boundary bleeds across an atlas seam. That is the hard stop.
+#   * the SHORT RAYS, which do point at the arcs, at 0.70 of an arm. Not binding until the
+#     arms pass ~71 px, which is past the cell stop.
+# 1.60 fits too (79% ink, still zero arc overlap, arms visibly through the gaps) and was not
+# taken - see the trade recorded in svg/bounty.svg.
+#
+# ANY CROSSED GLYPH THAT REPLACES IT IS BACK TO ~0.95, because a diagonal X spans its box
+# corner to corner and has to clear the stroke's inner edge at (TASK_OUT_R - TASK_OUT_W/2)
+# * CELL = 52.7 px. That is what the swords needed and did not get: they ran at 1.15 on the
+# claim their tips were "still clear of the reticle arcs", reached 59.0 px into a stroke
+# spanning 52.7-63.8, and were drawn touching the frame for three releases. The overlap is
+# invisible at 70 px, which is how it survived - so verify by measuring overlap against the
+# frame mask, not by looking at the big preview.
+#
+# Ink, for why any of this is worth tuning: the blast inks 60% of the skull here against the
+# swords' 42% and the rounds' 45% (the mean-over-area rule, per skull.svg and the palette
+# note in modxml_n_iqm_map_icons). More is not simply better - past ~60% the glyph starts
+# filling the cell the way the skull does and its measured separation from the skull gets
+# worse, which is the whole reason the mark exists. See svg/bounty.svg.
+# NOTE the handin entry that used to sit here (1.12) IS GONE, and do not put it back. This
+# table is read ONLY by build_reticle_cell and build_s2_reticle_cell, both of which run only
+# for `name in RETICLE` -- and the hand-in left the reticle family when the frame became the
+# verb (it is in NO_BADGE now; see svg/handin.svg). So that entry had been dead code since
+# R2.55, while reading exactly like the knob that sized the mark. It is not: a bare glyph is
+# sized by FIT_SCALE. Removed R2.65 after it sent a search for "why is the hand-in small"
+# to the wrong number.
+RETICLE_FIT_SCALE = {"taskbounty": 1.40}
+
+# Per-STYLE override of the above, same idea as S2_GLYPH_SRC and S2_SPOT_SCALE_BY: the s2
+# cell fits by L1 RADIUS against a CLOSED diamond, so a scale tuned to the ring's cardinal
+# gaps drives the glyph straight through that frame. Only cells whose fit depends on which
+# frame is around them belong here; everything else shares one number, which is the point.
+#
+# taskbounty is the first such cell because its arms point at the CARDINALS. In the ring
+# that is the gaps, so 1.40 fits with room; in the diamond the cardinals are its VERTICES,
+# and fit_diamond already measures |x| + |y| - a cardinal arm's L1 radius is just its
+# length - so the glyph is sized correctly at 1.00 and 1.40 would overrun the frame.
+S2_RETICLE_FIT_SCALE = {"taskbounty": 1.00}
 
 # Keyline width for a drawn cell, where PROC_OUTLINE is wrong for it. The squad marks
 # are the only cells whose keyline is set per VIEW rather than per mark - see SQUAD_R.
@@ -1292,6 +1628,9 @@ def build_reticle_cell(name):
     task have to read as the same mark wearing different content, and that is only
     guaranteed if the frame is literally the same code.
     """
+    if S2:
+        return build_s2_reticle_cell(name)
+
     global TASK_INNER, TASK_CROSSHAIR
     n = CELL * SS
     keep = (TASK_INNER, TASK_CROSSHAIR)
@@ -1328,17 +1667,93 @@ def build_reticle_cell(name):
     return compose(frame, layer.split()[3], hole, OUTLINE)
 
 
+# The two DRAWN cells that s2 style re-draws rather than re-frames. Everything else in
+# PROC is in S2_KEEP and comes through untouched.
+S2_PROC = {"task", "select"}
+# The selected-task border, as a fraction of ITS cell. Larger than DIA_R because the
+# border is drawn at 29 units against the spot's 19, and it has to sit visibly OUTSIDE
+# the diamond it frames rather than on it.
+S2_SEL_R = 62.0 / 128
+S2_SEL_MIDGAP = 0.30
+
+
+def build_s2_proc_cell(name):
+    """`task` and `select` in s2 style: the same diamond, gapped two different ways."""
+    if name == "select":
+        frame, hole = diamond_frame(midgap=S2_SEL_MIDGAP, r=S2_SEL_R)
+        return compose(frame.split()[3], Image.new("L", (CELL, CELL), 0), hole,
+                       PROC_OUTLINE)
+
+    # the plain task mark: the gapped frame with the centre crosshair the round reticle
+    # uses, drawn by the same code so the two styles cannot drift on that detail
+    global TASK_INNER, TASK_CROSSHAIR
+    keep = (TASK_INNER, TASK_CROSSHAIR)
+    try:
+        TASK_INNER, TASK_CROSSHAIR = False, True
+        cross = draw_task(CELL * SS)
+    finally:
+        TASK_INNER, TASK_CROSSHAIR = keep
+    # draw_task also lays down its outer arcs; mask them off by keeping only the middle
+    cross_only = Image.new("L", (CELL * SS, CELL * SS), 0)
+    n = CELL * SS
+    c, rr = n / 2.0, (TASK_TICK_R1 + TASK_TICK_W) * n
+    ImageDraw.Draw(cross_only).ellipse([c - rr, c - rr, c + rr, c + rr], fill=255)
+    cross = ImageChops.multiply(cross, cross_only).resize((CELL, CELL), Image.LANCZOS)
+
+    frame, hole = diamond_frame(gap=DIA_GAP)
+    return compose(frame.split()[3], cross, hole, OUTLINE)
+
+
+def build_s2_reticle_cell(name):
+    """A task-kind cell in s2 style: the family's diamond with the same glyph inside it.
+
+    S2_BRACKET_FRAME turns that diamond into four corner brackets for the cells that have
+    to be seen OVER another mark rather than beside one - see its note.
+    """
+    midgap = S2_BRACKET_FRAME.get(name, 0.0)
+    frame, hole = diamond_frame(gap=DIA_GAP, midgap=midgap)
+    glyph = RETICLE[name]
+    if glyph is None:
+        return compose(frame.split()[3], Image.new("L", (CELL, CELL), 0), hole, OUTLINE)
+
+    target = (S2_RETICLE_FIT_SCALE.get(name) or RETICLE_FIT_SCALE.get(name, 1.0)
+              ) * diamond_glyph_target()
+    png = render_svg(glyph, round(2 * target) * 4)
+    im = Image.open(png).convert("RGBA")
+    g = fit_diamond(im.crop(im.split()[3].getbbox()), target)
+    im.close()
+    os.remove(png)
+    layer = Image.new("RGBA", (CELL, CELL), (255, 255, 255, 0))
+    layer.alpha_composite(g, ((CELL - g.size[0]) // 2, (CELL - g.size[1]) // 2))
+    return compose(frame.split()[3], layer.split()[3], hole, OUTLINE)
+
+
 def build_cell(name):
-    """One finished cell: badge frame (optional) + inner glyph + black keyline."""
-    ringed = BADGE and name not in NO_BADGE
+    """One finished cell: badge frame (optional) + inner glyph + black keyline.
+
+    In s2 style the frame is a diamond and EVERY glyph gets one, including the cells
+    NO_BADGE leaves bare in ring style. That is the point of the mode rather than a
+    shortcut: S2's own map draws one frame for everything and lets the glyph carry the
+    whole difference, so the ring style's frame-is-the-verb grammar does not apply here
+    and there is nothing for a bare glyph to mean.
+    """
+    diamond = S2 and name not in S2_KEEP
+    ringed = (not S2) and BADGE and name not in NO_BADGE
     inner_d = 2 * (RING_R - RING_W / 2) * CELL
     fit_k = FIT_SCALE.get(name, 1.0)
-    box = round(fit_k * (GLYPH_FIT * inner_d if ringed else BARE_FIT * CELL))
+    if diamond:
+        # sized by L1 radius, not by box - the frame is a diamond; see l1_radius
+        target = fit_k * diamond_glyph_target()
+        box = round(2 * target)
+    else:
+        box = round(fit_k * (GLYPH_FIT * inner_d if ringed else BARE_FIT * CELL))
     # a pre-stretched glyph has to be sized down first or the stretch clips on the cell
     box = round(box / PRESTRETCH.get(name, 1.0))
-    png = render_svg(GLYPH_SRC.get(name, name), box * 4)
+    src = (S2_GLYPH_SRC.get(name) if diamond else None) or GLYPH_SRC.get(name, name)
+    png = render_svg(src, box * 4)
     im = Image.open(png).convert("RGBA")
-    g = fit(im.crop(im.split()[3].getbbox()), box)
+    trimmed = im.crop(im.split()[3].getbbox())
+    g = fit_diamond(trimmed, target) if diamond else fit(trimmed, box)
     if name in PRESTRETCH:
         g = g.resize((max(1, round(g.size[0] * PRESTRETCH[name])), g.size[1]),
                      Image.LANCZOS)
@@ -1346,7 +1761,9 @@ def build_cell(name):
     os.remove(png)
 
     blank = Image.new("RGBA", (CELL, CELL), (255, 255, 255, 0))
-    if ringed:
+    if diamond:
+        frame, hole = diamond_frame()
+    elif ringed:
         frame, hole = badge_frame()
     else:
         frame, hole = blank.copy(), Image.new("L", (CELL, CELL), 0)
@@ -1386,18 +1803,91 @@ def write_preview(cells):
     sheet = Image.new("RGBA", (pad * 2 + sum(sizes) + gap * len(sizes),
                                pad * 2 + row_h * len(cells)), (176, 172, 158, 255))
     for i, ((name, tint), cell) in enumerate(zip(SRCS, cells)):
+        # s2 style drops colour coding as decoration: the tint the SPOTS table would set
+        # is white, which is the half of the look the frame does not carry. S2_KEEP_TINT is
+        # the exceptions, and previewing them in their real colours is the point - a
+        # preview that whitened them would be arguing for a style the game does not draw.
+        if S2 and name not in S2_KEEP_TINT:
+            tint = (255, 255, 255)
         r, g, b, a = cell.split()
         t = Image.merge("RGB", [ch.point(lambda v, k=k: v * k // 255)
                                 for ch, k in zip((r, g, b), tint)])
         t.putalpha(a)
         x = pad
+        # at the size the MAP draws this cell, which in s2 style is not the same for every
+        # cell - the hollow frame is deliberately bigger than a badge
+        sc = S2_SPOT_SCALE_BY.get(name, S2_SPOT_SCALE) if S2 else 1.0
         for s in sizes:
-            sheet.alpha_composite(t.resize((s, s), Image.LANCZOS),
-                                  (x, pad + i * row_h + (max(sizes) - s) // 2))
+            d = max(1, round(s * sc))
+            sheet.alpha_composite(t.resize((d, d), Image.LANCZOS),
+                                  (x + (s - d) // 2,
+                                   pad + i * row_h + (max(sizes) - d) // 2))
             x += s + gap
     sheet.convert("RGB").resize((sheet.width * 3, sheet.height * 3),
                                 Image.LANCZOS).save(PREVIEW)
     print("wrote", PREVIEW)
+
+
+COMPARE = os.path.join(HERE, "_compare_s2.png")
+# The cells worth putting side by side: one per glyph family plus every mark whose FRAME
+# changes class between the styles (task, the two reticles, the two bare green pins).
+COMPARE_CELLS = ["medic", "trader", "bed", "vip", "mechanic", "barman", "home", "task",
+                 "taskbounty", "taskmutant", "handin", "taskdelivery", "question", "alert"]
+
+
+def write_compare(cells):
+    """s2 style, next to the SHIPPED ring atlas, at the sizes both are really drawn at.
+
+    Reads iqm_map_icons.png rather than rebuilding the ring cells, so the left column is
+    literally what the game draws today and the comparison cannot flatter the new style by
+    rendering its rival with the new style's own tuning.
+    """
+    ring_png = os.path.join(HERE, "iqm_map_icons.png")
+    if not os.path.exists(ring_png):
+        print("  ! no iqm_map_icons.png to compare against; run without --style first")
+        return
+    ring = Image.open(ring_png).convert("RGBA")
+    tints = dict(SRCS)
+    index = {n: i for i, (n, _) in enumerate(SRCS)}
+    sizes = (18, 26, 35, 70)
+    pad, gap, colgap = 14, 10, 34
+    # The s2 column draws every size at S2_SPOT_SCALE, so the row pitch and the column
+    # widths are measured on the LARGER of the two rather than on `sizes`. Derived rather
+    # than padded by hand because the scale is a tuned number: at 1.12 a 70 px cell drew at
+    # 78 and fitted inside the 10 px gap, at 1.19 it draws at 83 and the rows overlapped -
+    # so the sheet you judge size on was itself wrong about size.
+    drawn = [max(s, max(1, round(s * S2_SPOT_SCALE))) for s in sizes]
+    row_h, grp_w = max(drawn) + gap, sum(drawn) + gap * len(drawn)
+    sheet = Image.new("RGBA", (pad * 2 + grp_w * 2 + colgap,
+                               pad * 2 + row_h * len(COMPARE_CELLS)), (96, 96, 88, 255))
+
+    def tinted(cell, t):
+        r, g, b, a = cell.split()
+        out = Image.merge("RGB", [ch.point(lambda v, k=k: v * k // 255)
+                                  for ch, k in zip((r, g, b), t)])
+        out.putalpha(a)
+        return out
+
+    for row, name in enumerate(COMPARE_CELLS):
+        i = index[name]
+        x0, y0 = (i % COLS) * CELL, (i // COLS) * CELL
+        pair = ((ring.crop((x0, y0, x0 + CELL, y0 + CELL)), tints[name]),
+                (cells[i], (255, 255, 255)))
+        for col, (cell, t) in enumerate(pair):
+            t_cell = tinted(cell, t)
+            x = pad + col * (grp_w + colgap)
+            for k, s in enumerate(sizes):
+                # the s2 column is drawn at the size the GAME will draw it - its spot rect
+                # is scaled, so comparing the two cells at equal pixels would compare
+                # something nobody sees
+                d = s if col == 0 else max(1, round(s * S2_SPOT_SCALE))
+                sheet.alpha_composite(t_cell.resize((d, d), Image.LANCZOS),
+                                      (x + (drawn[k] - d) // 2,
+                                       pad + row * row_h + (max(drawn) - d) // 2))
+                x += drawn[k] + gap
+    sheet.convert("RGB").resize((sheet.width * 2, sheet.height * 2),
+                                Image.LANCZOS).save(COMPARE)
+    print("wrote", COMPARE, "(left: shipped ring style, right: s2)")
 
 
 TEXDESCR = os.path.normpath(os.path.join(
@@ -1426,18 +1916,25 @@ def verify_declarations():
                          r'\s+width="(\d+)"\s+height="(\d+)"', src):
         seen[m.group(1)] = tuple(int(v) for v in m.groups()[1:])
     bad = []
-    for i, (name, _tint) in enumerate(SRCS):
-        tid = "iqm_mapspot_" + name
-        want = ((i % COLS) * CELL, (i // COLS) * CELL, CELL, CELL)
-        got = seen.get(tid)
-        if got is None:
-            bad.append("%s is not declared in iqm_textures.xml" % tid)
-        elif got != want:
-            bad.append("%s declared at %s, atlas puts it at %s" % (tid, got, want))
-    extra = [k for k in seen if k[len("iqm_mapspot_"):]
-             not in {n for n, _ in SRCS}]
-    for k in sorted(extra):
-        bad.append("%s is declared but this build draws no such cell" % k)
+    names = {n for n, _ in SRCS}
+    # BOTH id sets, on every run, whichever style built the atlas: the two files share this
+    # cell layout exactly, so a cell appended to SRCS has to be appended to both blocks of
+    # iqm_textures.xml. Checking only the style being built would leave the other one
+    # undetectably wrong until a player turned the option on.
+    for prefix in ("iqm_mapspot_", "iqm_mapspot_s2_"):
+        for i, (name, _tint) in enumerate(SRCS):
+            tid = prefix + name
+            want = ((i % COLS) * CELL, (i // COLS) * CELL, CELL, CELL)
+            got = seen.get(tid)
+            if got is None:
+                bad.append("%s is not declared in iqm_textures.xml" % tid)
+            elif got != want:
+                bad.append("%s declared at %s, atlas puts it at %s" % (tid, got, want))
+    for k in sorted(seen):
+        stem = (k[len("iqm_mapspot_s2_"):] if k.startswith("iqm_mapspot_s2_")
+                else k[len("iqm_mapspot_"):])
+        if stem not in names:
+            bad.append("%s is declared but this build draws no such cell" % k)
     return bad
 
 
@@ -1445,7 +1942,8 @@ def main():
     atlas = Image.new("RGBA", (W, H), (255, 255, 255, 0))
     cells = []
     for i, (name, _tint) in enumerate(SRCS):
-        cell = (build_reticle_cell(name) if name in RETICLE else
+        cell = (build_s2_proc_cell(name) if S2 and name in S2_PROC else
+                build_reticle_cell(name) if name in RETICLE else
                 build_proc_cell(name) if name in PROC else build_cell(name))
         cell = prefilter(shade_bevel(cell, name))
         cells.append(cell)
@@ -1455,11 +1953,19 @@ def main():
     # large part of why the pack's better UI atlases read cleaner than vanilla's DXT ones.
     # Mipmapped now, unlike them - see the MIPMAPS note above for why they can afford not
     # to be and this one cannot.
-    n = write_dds(atlas, OUT_DDS)
-    print("wrote %s (%d mip level%s, prefilter %.1f)"
-          % (OUT_DDS, n, "" if n == 1 else "s", PREFILTER))
+    if S2 and "--dds" not in sys.argv:
+        # s2 is a PROPOSAL until the runtime switch exists, so it writes the atlas png and
+        # the preview and stops. --dds emits gamedata/textures/ui/iqm_map_icons_s2.dds,
+        # which is the second atlas the switch would point its texture ids at.
+        print("wrote", OUT_PNG, "(style s2; pass --dds to also write the .dds)")
+    else:
+        n = write_dds(atlas, OUT_DDS)
+        print("wrote %s (%d mip level%s, prefilter %.1f)"
+              % (OUT_DDS, n, "" if n == 1 else "s", PREFILTER))
     if "--preview" in sys.argv:
         write_preview(cells)
+    if S2 and "--compare" in sys.argv:
+        write_compare(cells)
 
     bad = verify_declarations()
     for b in bad:
@@ -1467,7 +1973,8 @@ def main():
     if bad:
         print("%d declaration mismatch(es) -- the game will draw the wrong cells" % len(bad))
         return 1
-    print("%d cells, all declared at the right origins" % len(SRCS))
+    print("%d cells, style %s, both id sets declared at the right origins"
+          % (len(SRCS), STYLE))
 
 
 if __name__ == "__main__":

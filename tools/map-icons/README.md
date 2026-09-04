@@ -6,9 +6,64 @@ Builds `gamedata/textures/ui/iqm_map_icons.dds` from `svg/`.
 python build.py              # build the atlas
 python build.py --preview    # also write _preview.png — every glyph at the sizes
                              # it is really drawn at (26 / 35 / 70 px), tinted
+
+python build.py --style s2 --dds            # the STALKER 2 style atlas (see below)
+python build.py --style s2 --preview --compare
 ```
 
 Needs Pillow and ImageMagick (`magick`) on PATH.
+
+## Two styles, one cell layout
+
+`--style s2` builds the same 26 cells in **S.T.A.L.K.E.R. 2's** clothes — a white glyph
+in a thin white diamond, no colour coding — into `iqm_map_icons_s2.dds` under
+`iqm_mapspot_s2_*` ids at the *same* origins. Nothing about the default (ring badge)
+atlas changes; the two files are interchangeable at every origin, which is what lets the
+runtime switch be a one-line id rename (`modxml_n_iqm_map_icons.restyle_s2`, chosen by
+MCM `iqm/general/map_icon_style`).
+
+| Flag | Effect |
+|---|---|
+| `--style s2` | build the diamond style; writes `iqm_map_icons_s2.png` and stops there |
+| `--dds` | with `--style s2`, also write `gamedata/textures/ui/iqm_map_icons_s2.dds` |
+| `--compare` | `_compare_s2.png`: the shipped ring atlas beside the s2 one, at 18/26/35/70 px |
+
+`verify_declarations` checks **both** id sets on every run, whichever style built the
+atlas — a cell appended to `SRCS` has to be appended to both `<file>` blocks in
+`iqm_textures.xml`, and checking only the style being built would leave the other one
+undetectably wrong until a player turned the option on.
+
+The following are decisions rather than mechanics, and the arguments are in
+`docs/decisions.md#map_icon_style`:
+
+- **Every marker's frame is a whole diamond.** Cutting the task class's points was tried
+  at `DIA_GAP = 0.32` and read as four bars; corner brackets were tried for the one cell
+  that has to show over another mark and are worse — brackets are the *selected task*
+  frame, so `S2_BRACKET_FRAME` must stay empty and that cell is told apart by SIZE. The
+  off-level arrows are framed too, though they are bare in the ring style: there the frame
+  is the verb, here it says nothing, so a bare glyph only reads as a marker that lost its
+  diamond.
+- **White is the default tint, not the rule.** `S2_KEEP_TINT` mirrors the script's
+  `S2_KEEP_COLOUR`, so `--preview` and `--compare` show the squad disks, the transition
+  arch and the three task-kind tints (hand-in green, bounty red, mutant olive) in the
+  colours the map really draws. A preview that whitened them would be arguing for a style
+  the game does not draw.
+- **The stroke is `1.5/19` against the ring's `1.8/19`** — the same *drawn* weight, once
+  the 21% spot growth and the diamond's 10% longer perimeter are counted. It is *derived*
+  from `S2_SPOT_SCALE`, not tuned beside it: the two multiply, so retuning the spot without
+  retuning this puts the frame back at the weight that was reported too thick.
+- **Glyphs are sized by their L1 radius**, not their bounding box, because a diamond is
+  the line `|x| + |y| = d`.
+- **Spots are drawn 19% larger** than the ring badges (`S2_SPOT_SCALE`, mirrored from the
+  script that applies it, and used by the preview so a cell is judged at the size the map
+  will really draw it). The number is silhouette parity — a diamond encloses `2d²` against
+  a circle's `πr²`, so it needs `√(π/2)` more extent to cover the same area. This shipped
+  at 1.12 first and read small: that number was measured on *ink*, and ink is not what the
+  eye sizes a mark by.
+
+The L1 sizing is why the diamond's glyphs come out *larger* than the ring's despite the
+tighter frame — see `l1_radius` in `build.py`, and `S2_GLYPH_SRC` for the one glyph (the
+trader's) that differs per style.
 
 These are **not** the card glyphs — those are `tools/role-icons`. These replace the
 icons the *engine* draws on the fullscreen PDA map and the HUD minimap. Three pieces
@@ -322,6 +377,14 @@ Renaming it breaks one of those **silently**, and only for players who have that
 that resolution. PAW was exactly this: at `modxml_iqm_…` we ran ahead of `map_…`, so
 `paw_task_default_spot` wasn't in the DOM yet, the query found nothing, and the
 player-placed waypoint kept the old fuzzy pulse.
+
+**...and it draws a BAG in the s2 style** (`svg/swap-bag.svg`, game-icons.net, CC BY 3.0,
+via `S2_GLYPH_SRC`). Not a reversal of R2.46 below: the diamond sizes its glyph by L1
+radius and hands it ~25% more linear size than the ring's half-cell box, which is enough
+room for a drawing the ring style genuinely could not carry. The ring badge still reads
+`GLYPH_SRC` and still draws the briefcase, so the two styles do not have to agree about a
+glyph — only about the cell it lands in. Watch the strap loop if it is ever changed: it is
+the one feature that says "bag" rather than "sack", and it is a thin arc.
 
 **`trader` is Tabler's filled `briefcase-2` as of R2.46.** The game-icons.net briefcase it
 replaced lost its latch, handle wrap and case seams to the inner glyph's budget — half the

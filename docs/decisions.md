@@ -25,6 +25,7 @@ waypoint marker were built out of) and `docs/minimap-route.md` (F3, the trail).
 - [`route_gap`](#route_gap) — metres between direction chevrons
 - [`route_flow`](#route_flow) — conveyor speed
 - [`map_icons`](#map_icons) — why it needs a restart and cannot not
+- [`map_icon_style`](#map_icon_style) — the STALKER 2 diamonds, and the two things they stop saying
 - [`map_task_kinds`](#map_task_kinds) — the skull and the red reticle, and what they cost
 - [`map_spot_names`](#map_spot_names) — the NPC's name in a map pin's tooltip
 - [`map_hide_companions`](#map_hide_companions) — the one map row that removes a mark instead of redrawing one
@@ -174,7 +175,245 @@ silently undo the mod for anyone without MCM.
 it patched while the map reverted would make it a key to marks that are no longer there,
 which is worse than either consistent state.
 
+### `map_icon_style`
+
+**The same marks in S.T.A.L.K.E.R. 2's clothes**: a white glyph in a thin white diamond,
+no colour coding. Off by default; `0` is the ring badges the mod has always drawn.
+
+**It is one atlas's worth of art, framed twice.** `ui\iqm_map_icons_s2` has the same 26
+cells at the same origins as the ring atlas, under `iqm_mapspot_s2_*` ids, so the runtime
+switch is a rename plus a white tint — `modxml_n_iqm_map_icons.restyle_s2`, one pass over
+the DOM it has just patched, keyed on the id *prefix* rather than on a list of spot names.
+That is what makes it cheap and what makes it complete: the pass also catches the mod's
+own spot types in `iqm_map_spots.xml`, which carry their ids and tints in XML and are in
+the same document by then. A per-entry branch in the `SPOTS` loop would have restyled the
+vanilla spots and left IQM's task-kind pins in the ring style — the two halves of one map
+disagreeing.
+
+**What the player gives up is colour — most of it.** A medic and a trader differ by glyph
+alone at the ~26 px the minimap draws these at, where the ring style separates every
+within-family pair by dE 28 in CIELAB (see the palette note in
+`modxml_n_iqm_map_icons`). That is the look rather than a bug, but it is not absolute:
+`S2_KEEP_COLOUR` is a list, white is only its default, and three task tints came back to
+it after a play-test.
+
+**The three that came back are the hand-in green, the bounty red and the mutant olive**,
+and the line they draw is worth having written down: colour stays where it answers a
+question the player asks *before* reading the glyph — "is anything finished?", "is
+anything going to shoot at me?" — and goes where it was only telling two nouns apart. A
+medic and a trader are both "a person who is here", and the glyph settles which; a
+finished job is a different *kind of thing* to look at the map for. At 26 px a pin is read
+as a colour first and a drawing second, so those three lost a filter in the all-white
+pass while everything else lost a decoration.
+
+The delivery envelope keeps the same green, because it already shares it deliberately —
+walking a package to a named NPC is the same act as walking a finished job back to its
+giver. Splitting the pair here would have made the style contradict the palette.
+
+**The selection frame stays white on every pin.** A selection is a state, not a kind, so
+the `static_border`'s tint is not the mark's; it also keeps a coloured mark and its frame
+from reading as one two-tone shape.
+
+**The off-level arrows cannot be decided by their own id, and that is a real constraint
+rather than a wrinkle.** `iqm_mapspot_above` is *one* cell shared by a gold storyline
+task, a white secondary, a red alert and the coloured task kinds, so "does this arrow keep
+its tint" is a question about the SPOT. `restyle_s2` walks `S2_TAGS` in tag order, so a
+spot's own `<texture>` is always settled before its swaps and they inherit its answer
+(`kept`, keyed by parent element, the same trick `grown` uses); a spot with no texture of
+its own gets the default. The harness asserts both directions on the same id, which is the
+only way to prove the decision is per-spot.
+
+**The frame also stops carrying the verb, and one attempt to give it back was wrong.** In
+the ring style the frame is a verb: a ring means someone is standing here, a reticle means
+go and find this, a bare glyph means hand this to a named person. Here every marker's own
+frame is a whole diamond (`DIA_GAP = 0`), as S2 draws it.
+
+*Every* marker's: the off-level arrows (`abovebare` / `belowbare`) were exempt from
+that in the first build of this style, and it was simply a miss. They are bare in the ring style because
+the frame is the verb there and a hand-in that goes up a floor must not come back
+claiming to be a badge — but with no verb to protect, a bare glyph on this map has
+nothing to mean and reads as a marker that lost its diamond, which is how it was
+spotted (minimap, one arrow with no frame among seven diamonds). Framing them makes
+them identical art to the ringed `above` / `below` pair in the s2 atlas. That is the
+same collapse as a medic and a trader differing by glyph alone, and the cells stay
+separate because the two atlases have to match origin for origin.
+
+Cutting the task class's diamonds at their points (0.32) was tried, to get that
+distinction back, and backed out. The arithmetic is what makes it look reasonable and what
+makes it fail: the cut removes `g/d` of *every* edge, so 0.32 leaves each arm at 68% of its
+edge — and with the keyline wrapping each arm's new ends, a bounty stopped reading as a
+diamond with nicks in it and started reading as four separate bars around a glyph. Judge a
+cut by the fraction of the *edge* it eats, not by how far into the cell it reaches.
+
+What that attempt was really after — a hollow frame has to be visible over a badge's own
+frame — is answered by SIZE instead, below (`S2_SPOT_SCALE_BY`). Brackets were the other
+candidate and are worse; the paragraph after next says why.
+
+**The squad dots keep their faction colours in both styles**, for the strongest version of
+the same rule. Fifty spot elements carry
+faction, relation and moving/static in their own `r`/`g`/`b` over one white disk; there the
+colour *is* the information, so white would delete it rather than restyle it. Their id is
+still renamed, which keeps the two atlases interchangeable.
+
+**So does the level changer, and for a different reason.** It is not a marker in the sense
+the rest of the table is — it is a fixture, the arch that says the map ends here — and it
+is the same eight-heading arch in *both* styles, because a diamond would have said "go
+here" about a thing that is simply there. Whitening a mark whose shape did not change would
+have made a fixture harder to find without making it look any more like S2. It keeps its
+green, its 19×19 rect and its art; only the atlas it reads from changes.
+
+**The spots are drawn 19% larger in this style, and the number is silhouette parity.** A
+diamond of half-diagonal `d` encloses `2d²` where a circle of radius `r` encloses `πr²`, so
+the two match at `d = r·√(π/2) = 1.2533·r`. At `DIA_R` 60/128 against the badge ring's outer
+0.4455 that is k = 1.19, and the mean distance from centre to outline — averaged over all
+angles rather than taken at the extremes — agrees to within 1% at the same number. The
+steps the file actually uses are 19 → 23 and 14 → 17 units, `grow_spot` writing integers,
+so the applied scale is 1.211.
+
+**This shipped at 1.12 first and read small, and the reason is worth keeping because the
+original reasoning was careful and measured the wrong quantity.** It counted *ink* — frame,
+keyline and glyph over both built atlases — found the diamond at 90% of the ring style's,
+put area parity at k = 1.05, and rounded up from there for the way a diamond's mass sits on
+its axes. But ink is not what the eye sizes a mark by; the outline it *encloses* is.
+Measured on the shipped pair, at 21 units against 19:
+
+| from centre to the outline | ring | s2 @ 1.12 | | s2 @ 1.19 | |
+|---|---|---|---|---|---|
+| at the four points | 8.46 | 9.84 | +16.3% | 10.78 | +27.4% |
+| at the diagonals | 8.46 | 6.96 | −17.8% | 7.62 | −9.9% |
+| mean over all angles | 8.46 | 7.81 | **−7.7%** | 8.56 | **+1.1%** |
+| enclosed area (units²) | 225.1 | 193.8 | **−13.9%** | 232.5 | **+3.3%** |
+
+Only the four tips reached further than the ring badge; everywhere else the diamond sat
+inside it. A mark that is wider than its neighbour at four angles and narrower at every
+other one reads as the smaller of the two, and it came back from play as exactly that.
+Integer rounding had quietly taken a slice off as well — `19 × 1.12 = 21.28 → 21`, an
+effective 1.105 rather than 1.12.
+
+The correction is on the **spot**, not in the art, because the art has nowhere to go — the
+diamond's points are already at the cell edge, and the keyline needs the last 4 px. Marks
+whose art did not change (`S2_SAME_ART`) do not grow: resizing the engine's own squad dot
+is not something a restyle should be doing, and it has no diamond problem to fix.
+
+**Growing a spot moves its selection frame, and that has to be recomputed rather than
+left.** `static_border` is a top-left child (`waNone`) of a centre-aligned spot, so
+centring it means `x = -(border - icon)/2` — which is exactly what the `-5` in the `SPOTS`
+entries *is*, for a 29-unit border on a 19-unit spot. Grow the icon to 23 and leave `-5`
+alone and the frame sits a unit up and left of the marker it is meant to be around, which
+is what it looks like on screen. `grow_spot` derives the offset from the geometry and grows
+the border by the same *number of units* the icon grew, so the gap between the two shapes
+is the one the ring style was tuned to. Scaling the border proportionally was tried first
+and opens that gap ~30%: not because 1.19 is wrong, but because this style's selection
+diamond sits at 0.484 of its cell where the ring style's arcs sit at 0.455, and multiplying
+an already-wider gap compounds the two.
+
+**The hollow frame is a whole diamond drawn bigger than a badge, and the distinction is
+SIZE — deliberately not shape.** Its job is to ring a mark somebody *else* drew — a task
+whose target already carries a spot (a stash, a service NPC, a level changer) and Personal
+Adjustable Waypoint's pin. The ring style got away with a reticle at the same 19-unit
+footprint because the two shapes differed: a thick broken ring at 8.64 units over a thin
+closed badge ring at 8.46. Here both are diamonds, so at equal size the frame lands on the
+badge's own outline and disappears. `S2_SPOT_SCALE_BY = 1.58` puts it at 14.1 units against
+the badge's 10.8 — 3.3 units of clear space, about the air the ring reticle had. Both spots
+are `alignment="c"` on the same object, so they are concentric for free, and S2's own art
+nests diamonds this way. The override **tracks** `S2_SPOT_SCALE`, because what is tuned is
+that 3.3 units of air and not the multiplier: when the badge went 21 → 23 this went 28 → 30
+with it, and left at 1.45 the gap would have closed to 2.3 and put the frame back on the
+outline it exists to clear.
+
+**Brackets were tried for it and are wrong, for a reason worth keeping written down: in
+this mod brackets already mean one thing.** They are the `static_border` the engine shows
+on the task you are tracking (`show_static_border`, driven from `CMapLocation` against
+`ActiveTask`), so a spot whose *own* art is brackets claims to be selected every time it
+is drawn. Reported on the first play-test of the style — a waypoint on a sleep icon
+and an unrelated bounty both wearing brackets, reading as two active tasks at once. The
+mechanism is still in `build.py` (`S2_BRACKET_FRAME`) and must stay empty for every spot
+cell; the `select` cell is the only thing entitled to that shape. **A new frame shape here
+needs a free *meaning*, not just a free shape.**
+
+The one thing to expect and not chase: the pin arrives with its **base** type and is
+re-classified within 750 ms (`SYNC_MS` in `iqm_taskspot`), so a waypoint dropped on a
+service icon shows the plain marker for up to three quarters of a second and then becomes
+the bracket frame. That is the sync pass doing what it is documented to do, not a flicker
+to fix — what made it look like a bug was the state it used to settle into.
+
+**A pin covers what it points at, and the rule that stopped it doing so is gone** (R2.62).
+Until then, `iqm_scan.task_kind` asked the engine what else was drawn on a task's target and
+answered `open` — or `waypoint`, for PAW's pin — when anything was, so the task swapped onto
+a hollow reticle and ringed that mark instead of covering it. Removed by request: vanilla
+behaviour is that a pin sits on top of what it marks, and the player dropping a waypoint on
+a bed already knows the bed is there.
+
+Removed with it: the two location types (`iqm_task_open`, `iqm_task_waypoint`), the
+`target_covered` query and its `NOT_COVER` exclusion list, the `wp_target` / `open_kind`
+caches and `KIND_RECHECK`, the `nta_stash_task_target_functor` entry in `TARGET_KIND`, and
+the two S2 rules that existed only to size those marks (`S2_SPOT_SCALE_BY` and
+`S2_NO_GROW`) — so every restyled spot now takes the one scale.
+
+**What it costs, on the record rather than rediscovered.** The DRX quest-item family — 21
+sections — points straight at a stash the player has already found, and its pin now sits on
+top of the stash icon. That was the case that justified generalising the rule beyond PAW's
+waypoint in the first place. The NTA stash family is the same, by a different route: its
+mark sits on a *sibling* object no positional query can reach, which is why it had to be
+named in `TARGET_KIND` rather than detected.
+
+**What survives, and why the removal is safe.** Every kind that is about the *job* —
+registry bounty, declared functor, mutant — answered before coverage ever ran. Dropping the
+last question in the chain therefore changes nothing about any of them; a bounty standing on
+a service badge was already a bounty. `iqm_beacon` also keeps `BEACON_ICON.waypoint`: that
+is `offer_waypoint`'s glyph, a separate feature with its own switch that was never reached
+through `task_kind`, so the through-wall mark for your own pin is unaffected.
+
+**The frame's stroke is 1.5 units where the ring badge's is 1.8, and matching the ring on
+paper was the mistake.** Reported as "the diamond is slightly too thick", and two things
+push that way at once: the spot is drawn larger in this style, which scales the stroke with
+it, and a diamond's perimeter is `4√2·r` against a circle's `2π·r` — 10% more line at the
+same extent. `DIA_W` is therefore **derived from `S2_SPOT_SCALE` rather than tuned beside
+it**: it is a fraction of the cell and the cell is drawn at that scale, so the two multiply
+and what has to stay fixed is the product. `1.8/1.12 = 1.607` gave 1.6 while the spot was
+21 units; at 23 the same drawn line is `1.6 × 21/23 = 1.46`, and 1.5 is that rounded onto
+`RING_W`'s own numerator — 2.55 px at 1080p against the 2.48 the old pairing drew. Move one
+without the other and the frame arrives back at the equivalent of 1.75/21, most of the way
+to the weight that was reported, as a side effect of a *size* change nobody would think to
+re-check the stroke for. It is also close to a floor — `OUTLINE`'s keyline is a fixed
+dilation in atlas px, so thinning the stroke raises the keyline's share of the mark, and
+below ~1.4 the frame reads as a dark line with a white core at minimap size.
+
+**Glyphs are sized by their diagonal extent, not their bounding box** — the one thing that
+had to be worked out rather than ported. A diamond is the line `|x| + |y| = d`, so at equal
+bounding box a cross clears the frame by 14 px while an envelope goes straight through it
+(`l1_radius` / `fit_diamond` in `tools/map-icons/build.py`). Sized that way the diamond's
+glyphs come out *larger* than the ring's: 40 px of L1 radius against 32 px of box
+half-extent.
+
+**The trader is the one glyph that differs between the styles.** The ring badge keeps
+Tabler's `briefcase-2`; the diamond draws game-icons.net's `swap-bag`. Not a
+reconsideration of R2.46, which sent the trader *back* to Tabler because the game-icons
+briefcase's latch and case seams closed up in half a cell — the diamond hands its glyph
+~25% more linear size, and a bag with a strap is a coarser silhouette than a briefcase with
+hardware. `S2_GLYPH_SRC` is where a style disagrees with `GLYPH_SRC`.
+
+**Needs a restart, for `map_icons`' reason exactly** — the value is read when the engine
+parses `map_spots.xml`, which happens once per process. Same read path, same
+default-to-off-at-every-failure, same label.
+
 ### `map_task_kinds`
+
+**In the S2 style, four things are held out of the whitening and the frame follows its
+mark.** The three task-kind tints and the squad disks are kept by icon id, but storyline
+gold cannot be: a storyline task and a secondary task are the same cell (`iqm_mapspot_task`)
+and differ only in `r`/`g`/`b`, so keying on the id would keep both or whiten both. It is
+keyed on the *tint* instead (`S2_KEEP_RGB`), which is also what carries it through the five
+places it has to survive — map pin, minimap pin, that pin's off-level arrows, the new-task
+pulse, and the legend swatch, which lives under `<image>` in another file and has no spot
+name to match on at all. The selection frame's colour reverses the first cut: it was white
+on every pin on the reasoning that a selection is a *state* rather than a kind, and on
+screen the frame is the largest and brightest shape in the mark, so a white diamond around a
+red bounty read as a white marker with something red inside it. Selection is carried by the
+frame's presence and its blink; it does not need the colour channel too. That decision is
+made in `restyle_s2` rather than in a keep-list, because a border's own id says nothing
+about it — `iqm_mapspot_select` is one cell under every kind of pin — so the pass walks from
+the border up to the spot and copies what the mark resolved to.
 
 **A skull on a mutant hunt, a red reticle on a bounty**, while the objective is still
 outstanding. The problem it solves is that every task pin on the PDA looks the same, so
@@ -206,7 +445,10 @@ would freeze a lair on the plain reticle for ever; not caching would flicker it.
 attribute on the spot's `<texture>`, read once at parse; every task sharing a type shares
 its appearance. So "this pin is red" can only be said by pointing the task at a different
 type -- hence `iqm_task_mutant` / `iqm_task_bounty` in `ui/iqm_map_spots.xml`. Only the
-mutant needed art; a bounty is the reticle it already had, in red.
+mutant needed art at first; a bounty was the reticle it already had, in red. Both carry
+their own glyph now (a skull and two rifle rounds), and for a reason worth keeping in view
+here rather than only in the art files: the two tints sit on the red-green axis, so colour
+alone was never telling those players the two kinds apart.
 
 **No monkey-patching.** `CGameTask::ChangeMapLocation` is remove-then-recreate and
 re-entrant (`GameTask.cpp:126-135`), and the three accessors are bound to Lua

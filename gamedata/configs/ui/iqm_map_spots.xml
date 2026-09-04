@@ -323,122 +323,21 @@
 	<texture_above r="40" g="172" b="66">iqm_mapspot_abovebare</texture_above>
 </iqm_task_handin_spot_mini>
 
-<!-- THE OPEN RETICLE. The reticle with NOTHING in it, in the secondary task's own bone
-     (240,244,248) - so it is the ordinary side-task marker minus its middle, which is
-     exactly what this is for: a pin that has landed on top of a mark the map was already
-     drawing, and should ring that mark rather than cover it.
+<!-- THE TWO HOLLOW TYPES ARE GONE (R2.62), and the note is here so the next person does
+     not reinvent them. iqm_task_open and iqm_task_waypoint were the reticle with its middle
+     removed: a pin that had landed on a mark the map was already drawing, ringing that mark
+     instead of covering it. iqm_scan.task_kind asked the engine what else was drawn on the
+     target and answered "open" (or "waypoint", for PAW's pin) when anything was.
 
-     WHY A WHOLE LOCATION TYPE FOR A HOLE. There is no way to say "this one reticle is
-     hollow" in XML, because a spot type is shared with every task in the game that carries
-     it - so this is the same answer R2.48 reached for mutant hunts and bounties: the thing
-     that needs saying becomes a location type, and iqm_taskspot moves the task onto it. The
-     difference is that this one is not about what the task IS. It is about what is already
-     underneath it, which is why it is the LAST question iqm_scan.task_kind asks and why
-     every answer about the job outranks it.
+     Removed by request, for vanilla behaviour: a task pin now covers what it points at, the
+     way every other task marker in the game does. The coverage query, its NOT_COVER
+     exclusion list and the two kinds went with it - see the tail of task_kind.
 
-     IT WAS CALLED iqm_task_waypoint UNTIL R2.52, and the rename is the interesting part of
-     the history. It arrived (R2.49e) for exactly one thing: Personal Adjustable Waypoint's
-     pin IS an Anomaly task (task_placeable_waypoint, storyline = false), so its spot is
-     plain secondary_task, and PAW puts BOTH marks on the same object - change_map_location
-     for the task and map_add_object_spot for its own pin
-     (tasks_placeable_waypoints.script:1547-1548). The player picks that pin from a library
-     of 85 and the reticle lands squarely on it; since R2.49b the crosshair is 2.0/23 and
-     solid through the middle, so it does not merely overlap the pin, it hides it.
-     That was never a fact about waypoints. The DRX quest-item tasks point straight at a
-     stash the player has already found (tasks_stash.script:159, 21 sections) and bury the
-     stash icon the same way, and so does anything else a mod aims at a marked object. The
-     type is named for the shape it draws, not for the first thing that needed it.
+     WHAT THIS COSTS, so the trade is on the record rather than rediscovered: the DRX
+     quest-item family (21 sections) points straight at a stash the player has already
+     found, and its pin now sits on top of the stash icon. That was the case that justified
+     generalising the rule from PAW's waypoint in the first place.
 
-     CONDITIONAL, and that is still the whole point of it. A task only wears this while its
-     target ALREADY carries some other map mark - a service badge, a stash, a level changer,
-     another task's pin. On bare ground it keeps the ordinary reticle, because an empty ring
-     over empty ground is just a marker with its middle missing. iqm_scan asks the ENGINE
-     what is drawn there (level.map_get_object_spots_by_id, level_script.cpp:485) rather
-     than guessing from a list of spot types it happens to know, so the rule covers whatever
-     any mod draws. The one case it cannot query - a mark on a DIFFERENT object at the same
-     position, which is how the nta_stash tasks are built - is named in TARGET_KIND instead,
-     and the reasoning for that exception is written there.
-
-     IT HAS static_border AGAIN AS OF R2.55, and dropping it was a real bug rather than a
-     debatable trade. The paragraph that used to sit here argued that a task wearing this
-     type should give up its selection ring, because a ring around a mark that has its own
-     ring is one ring too many. That reasoning was sound for the waypoint case it was
-     written for and false for every other case, and the difference is not cosmetic:
-
-     static_border IS the active-task indicator. CMapLocation::UpdateSpot compares the
-     location against GameTaskManager().ActiveTask() and calls show_static_border on the
-     result (map_location.cpp:371-391) - and show_static_border is a SILENT NO-OP when the
-     element was never declared (map_spot.cpp:140-146). The engine's other cue, the
-     GetSpotBorder overlay (map_location.cpp:661-700), is dead in this pack: Sota UI
-     declares level_map_spot_border with <texture a="0">, fully transparent. So a type with
-     no static_border has no way to say "this is the one you are tracking", and the reported
-     symptom - "capture encrypted documents doesn't seem to be clickable" - was that with
-     one word wrong. The click lands (CMapSpot::OnMouseAction, map_spot.cpp:97-118) and the
-     task DOES become active (UIMapWnd.cpp:1161-1181); nothing on screen changes, so the
-     player correctly concludes the pin is dead.
-
-     THE FIX IS A TYPE SPLIT, not a border added to one shared type, because the original
-     argument still holds for the case it was made about. See iqm_task_waypoint below.
-
-     Same save rule as the other four: the type name never reaches a save, because
-     iqm_taskspot reverts every flagged task in the pre-save callback. -->
-<iqm_task_open>
-	<level_map spot="iqm_task_open_spot" pointer="quest_pointer"/>
-	<mini_map spot="iqm_task_open_spot_mini" pointer="quest_pointer"/>
-</iqm_task_open>
-<iqm_task_open_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
-	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
-	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
-		<texture r="240" g="244" b="248">iqm_mapspot_select</texture>
-	</static_border>
-</iqm_task_open_spot>
-<iqm_task_open_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
-	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
-	<static_border x="-5" y="-5" width="29" height="29" stretch="1" light_anim="ui_slow_blinking_alpha" la_cyclic="1" la_texture="1" la_text="0" la_alpha="1">
-		<texture r="240" g="244" b="248">iqm_mapspot_select</texture>
-	</static_border>
-	<texture_below r="240" g="244" b="248">iqm_mapspot_below</texture_below>
-	<texture_above r="240" g="244" b="248">iqm_mapspot_above</texture_above>
-</iqm_task_open_spot_mini>
-
-<!-- THE WAYPOINT RETICLE. Byte-for-byte iqm_task_open except that it declares NO
-     static_border - and it exists ONLY to carry that difference.
-
-     This is the name and the shape the open reticle shipped under until R2.52, brought back
-     as a type of its own in R2.55 rather than reverted to. The R2.52 rename was right about
-     the SHAPE: a hollow reticle is for any pin that has landed on a mark the map already
-     draws, and Personal Adjustable Waypoint was just the first thing that needed one. What
-     the rename flattened was that PAW is still special in a way the shape does not capture.
-
-     PAW SUPPLIES ITS OWN ANIMATED RING. Its pin is a real Anomaly task
-     (task_placeable_waypoint, storyline = false), and it puts BOTH marks on the same object
-     - change_map_location for the task, then map_add_object_spot for its own highlight
-     (tasks_placeable_waypoints.script:1547-1548). That highlight is paw_task_default at 39
-     units, which modxml_n_iqm_map_icons re-textures to iqm_mapspot_blink. Give this type a
-     static_border and a selected waypoint wears TWO concentric pulsing rings on different
-     periods, which is worse than the missing one it replaced.
-
-     EVERY OTHER TASK THAT WEARS A HOLLOW RETICLE SUPPLIES NOTHING. A stash mark, a service
-     badge, a level changer - none of them animate, so the selection ring is the only moving
-     thing on the pin and it has no competition. That asymmetry is the whole reason there are
-     two types here instead of one: the trade the old comment described is a good trade
-     exactly once, and a bad one everywhere else.
-
-     WHAT DECIDES WHICH. iqm_scan.task_kind returns "waypoint" only from its first branch,
-     which tests the task id against task_placeable_waypoint directly, and returns "open"
-     from its last, which asks the engine what else is drawn on the target. So this type is
-     reachable by exactly one mod's tasks and the split cannot leak.
-
-     Same save rule as every type in this file. -->
-<iqm_task_waypoint>
-	<level_map spot="iqm_task_waypoint_spot" pointer="quest_pointer"/>
-	<mini_map spot="iqm_task_waypoint_spot_mini" pointer="quest_pointer"/>
-</iqm_task_waypoint>
-<iqm_task_waypoint_spot x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
-	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
-</iqm_task_waypoint_spot>
-<iqm_task_waypoint_spot_mini x="0" y="0" width="19" height="19" stretch="1" alignment="c" location_level="5">
-	<texture r="240" g="244" b="248">iqm_mapspot_taskopen</texture>
-	<texture_below r="240" g="244" b="248">iqm_mapspot_below</texture_below>
-	<texture_above r="240" g="244" b="248">iqm_mapspot_above</texture_above>
-</iqm_task_waypoint_spot_mini>
+     iqm_mapspot_taskopen is still built and still declared in iqm_textures.xml, like
+     iqm_mapspot_skull - drawn by nothing now, and cheap to leave in place if either mark
+     is ever wanted back. -->

@@ -266,10 +266,39 @@ OPTIONS = {
 -- read at that parse, by modxml_n_iqm_map_icons.icons_on.
 -- rationale: docs/decisions.md#map_icons
 { key = "map_icons", page = "general", def = true, type = "check" },
+-- WHICH LOOK those icons have: 0 the ring badges this mod has always drawn, 1 the
+-- S.T.A.L.K.E.R. 2 one - a white glyph in a thin white diamond, with no colour coding at
+-- all. Same glyph set and the same atlas layout either way; the second style is a second
+-- texture file (ui\iqm_map_icons_s2) plus a white tint, applied by
+-- modxml_n_iqm_map_icons.restyle_s2 over the DOM it has just patched.
+--
+-- WHAT THE PLAYER GIVES UP AT 1 is worth stating because it is not a wash: colour stops
+-- carrying role, so a medic and a trader differ by glyph alone at the ~26 px the minimap
+-- draws these at, and the FRAME stops carrying the verb (this mod's ring style says
+-- someone-is-here / go-find-this / hand-this-over with three different frames, and S2 uses
+-- one frame for everything). The squad dots keep their faction colours in both styles -
+-- there the colour is the information, not the decoration.
+--
+-- NEEDS A RESTART, exactly like the row above and for the same reason: the value is read
+-- when the engine parses map_spots.xml, which is once per process.
+-- rationale: docs/decisions.md#map_icon_style
+-- No precondition, like every other row in this section: an inert row costs a line of
+-- reading, and MCM evaluates a precondition when it BUILDS a page, so a row a gate
+-- reveals does not appear until the menu is closed and reopened. See the note at the
+-- head of iqm_mcm.script.
+{ key = "map_icon_style", page = "general", def = 0, type = "list",
+  content = {
+	{ 0, "iqm_mapstyle_badge" },
+	{ 1, "iqm_mapstyle_s2" },
+}},
 -- Skull on a mutant hunt, red reticle on a bounty, while the job is still outstanding.
 -- Live, unlike the row above -- iqm_taskspot re-reads this on its next pass and moves
 -- the pins either way, which is also how switching it off puts the vanilla marker back.
--- Hidden when the row above is off: a green skull among vanilla icons is neither look.
+-- Shown unconditionally, like every row in this section. iqm_taskspot re-tests
+-- map_icons before it will place a spot, so the gate is already in code; a
+-- precondition here would only hide the row until the menu had been closed and
+-- reopened, which is what MCM's build-time evaluation costs. The label states the
+-- dependency in words instead.
 { key = "map_task_kinds", page = "general", def = true, type = "check" },
 -- The NPC's name in the tooltip of every PDA pin the game puts on a person: the four
 -- trade services, the fast-travel guide, and both important-character spots.

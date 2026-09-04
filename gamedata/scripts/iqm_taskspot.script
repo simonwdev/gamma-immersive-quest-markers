@@ -71,27 +71,11 @@ local SPOT = {
 	-- is the same shape of mark as the two above and reads as the same reticle without a
 	-- glyph to separate them. See iqm_task_delivery in ui/iqm_map_spots.xml.
 	delivery = "iqm_task_delivery",
-	-- THE LAST TWO ARE THE SAME MARK ON TWO TYPES, and neither is a kind of JOB like the
-	-- three above. Both mean "this pin is landing on top of something the map already
-	-- draws", so both wear the reticle with its middle removed and ring that thing instead
-	-- of covering it.
-	--
-	-- THEY POINTED AT ONE TYPE UNTIL R2.55 AND THAT WAS A BUG. The shared type had no
-	-- static_border, which is not a styling choice -- it is the engine's entire active-task
-	-- indicator, and show_static_border is a silent no-op when the element is absent
-	-- (map_spot.cpp:140-146). Selecting a stash task did nothing visible, so it read as an
-	-- unclickable pin. The border is right for every case except PAW's, which brings its own
-	-- animated ring to the same object; so the two keys now name two types that differ in
-	-- exactly that one element. Full argument on both types in ui/iqm_map_spots.xml.
-	--
-	-- The keys were already separate, for an unrelated reason that still holds: iqm_beacon
-	-- dresses a marker by kind, and BEACON_ICON.waypoint is a real glyph -- the player's own
-	-- pin, which their own placed waypoint should keep drawing through a wall. `open` has no
-	-- entry there and falls through to the ordinary task glyph, which is right for a stash
-	-- task and would be wrong if it borrowed the waypoint's. That the split was already
-	-- expressed here is why fixing the bug cost one string.
-	waypoint = "iqm_task_waypoint",
-	open     = "iqm_task_open",
+	-- THERE WERE TWO HOLLOW TYPES HERE UNTIL R2.62 -- `waypoint` and `open`, the pin that
+	-- lands on a mark the map already draws. Both are gone with the coverage rule that fed
+	-- them (see iqm_scan.task_kind): a task now covers what it points at, which is vanilla.
+	-- iqm_beacon keeps BEACON_ICON.waypoint -- that is offer_waypoint's glyph, a separate
+	-- feature with its own switch, and was never reached through this table.
 
 	-- HAND-IN: objective done, the marker has moved onto the task giver, go and collect.
 	--

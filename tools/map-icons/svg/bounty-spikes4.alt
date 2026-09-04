@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="currentColor">
+<!-- CROSSED SPIKES, the mark for a HUMAN COMBAT (bounty / assault) task, drawn inside the
+     task reticle rather than in a badge ring. Drawn here rather than sourced: two rhombi,
+     four points each, straight edges only.
+
+     IT REPLACED TWO RIFLE ROUNDS, kept at svg/bounty-rounds.alt, which had replaced
+     CROSSED SWORDS (svg/bounty-swords.alt), which had replaced a bust
+     (svg/bounty-bust.alt). Read bounty-swords.alt first: the constraint it states is
+     still the one that governs this cell.
+
+     THE CONSTRAINT, restated because it is the only thing that matters here. This mark's
+     red (172,60,66) and the mutant hunt's lime (176,216,72) sit on the red-green axis,
+     which is the axis red-green colour deficiency collapses. For those players SHAPE IS
+     THE ONLY CHANNEL separating "a firefight" from "a mutant hunt". Any candidate has to
+     be told apart from svg/skull.svg AT 26 PX WITH THE COLOUR REMOVED. Do not reason
+     about the tints; render both cells to luminance and look.
+
+     THIS IS THE SWORDS' ANSWER WITH THE SWORDS' DEFECT REMOVED. The X was never the
+     problem - it is still the only silhouette class that is hollow in the middle with four
+     limbs to the corners, against the skull's solid centred mass. The problem was that
+     BLADES ARE THIN, so the mark carried too little ink and smudged at the size the map
+     actually draws it. A spike is the same X with a fat middle: at the fit below it inks
+     51% of the skull against the swords' 42% and the rounds' 45%, measured over the cell,
+     and it is the crispest of the family at 18 px (the minimap's real size) because every
+     edge is straight and there is no detail to lose.
+
+     ASPECT IS THE OTHER HALF OF WHY IT WORKS. fit() sizes the LONG axis, so a landscape
+     glyph gets a haircut on the short one: the rounds were 1.31:1 and the single pistol
+     before them 1.53:1. This is 1.00:1 - it fills the reticle's inner box.
+
+     RETICLE_FIT_SCALE IS 0.95 AND THAT IS A CEILING SET BY THE ARCS, not a spare knob.
+     CORRECTING THE SWORDS NOTE, which claimed its tips at 1.15 were "still clear of the
+     reticle arcs": THEY WERE NOT. THE GAPS ARE ON THE CARDINALS (TASK_GAP_DEG, and see the
+     comment in draw_task), so the four arcs are CENTRED ON THE DIAGONALS - exactly where
+     any crossed glyph points. There is no gap for a tip to pass through. The ring stroke
+     spans 52.7 to 63.8 px from centre, and the swords reached 59.0: they were drawn
+     touching the frame for three releases. An X spans its box corner to corner, so its
+     reach is the half-diagonal, and clearing 52.7 with the 3 px a keyline needs caps the
+     box at ~70 px. That is 0.95. Anything above it draws into the arcs; verify by
+     measuring reach against clear_r, not by eye at 70 px, where the overlap hides.
+
+     THE ONE THING IT DOES NOT SAY IS "HUMAN". It reads as crossed weapons - hostile
+     combat - not as people, and that is a real cost against the bust that started this
+     chain. It is accepted because the bust is unusable: a skull and a bust are the same
+     silhouette at 26 px, which is the finding in bounty-swords.alt and the reason none of
+     this can be solved by picking a better figure. Crossed rifles were built and measured
+     as the alternative that does say "human" (1.03:1, 62% ink, an 8 deg splay to square
+     the pair); they lose to this on the 18 px read and on having any detail at all to
+     lose. If the mark must carry "human" some day, that is where to start.
+
+     Filled rather than outline, per the measurement in skull.svg: at this size an outline
+     glyph is mostly keyline, and a mark's apparent colour is the mean over its own area. -->
+<path d="M131.5 380.5 L284.3 284.3 L380.5 131.5 L227.7 227.7Z
+         M131.5 131.5 L227.7 284.3 L380.5 380.5 L284.3 227.7Z" />
+</svg>

@@ -528,6 +528,56 @@
 		<texture id="iqm_mapspot_belowbare" x="128" y="768" width="128" height="128" />
 	</file>
 
+	<!-- THE SAME ATLAS IN S.T.A.L.K.E.R. 2 STYLE: a white glyph in a thin white DIAMOND,
+	     with no colour coding at all. Optional, off by default, chosen by MCM
+	     iqm/general/map_icon_style and applied by modxml_n_iqm_map_icons - which rewrites
+	     every iqm_mapspot_* id it has just set to the iqm_mapspot_s2_ one below and tints
+	     it white. Built by `python build.py --style s2 --dds`.
+
+	     A SECOND ATLAS RATHER THAN A SECOND SET OF CELLS, and that is what keeps the ids
+	     below mechanical: cell order, origins and count are the ring atlas's, so the two
+	     files are interchangeable at any origin and build.py verifies BOTH id sets against
+	     the one SRCS table it builds from. Add a cell and it must be appended to both
+	     blocks, in the same place, or the check fails and says so.
+
+	     The squad disks, the off-screen pointer, the pulse and the level-changer arch are
+	     the same art in both files (S2_KEEP in build.py) - a mark whose shape does not
+	     change here does not change size either (S2_SAME_ART in the script).
+	
+	     White is this style's DEFAULT tint, not its rule: S2_KEEP_COLOUR in
+	     modxml_n_iqm_map_icons.script lists what keeps its own r/g/b - the faction disks,
+	     the transition arch, and the hand-in green, bounty red and mutant olive, i.e. the
+	     tints that answer a question before the glyph is read. Nothing in THIS file cares:
+	     the tint lives on the spot element, and both atlases are drawn white. -->
+	<file name="ui\iqm_map_icons_s2">
+		<texture id="iqm_mapspot_s2_medic"         x="0"   y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_s2_trader"        x="128" y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_s2_bed"           x="256" y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_s2_vip"           x="384" y="0"   width="128" height="128" />
+		<texture id="iqm_mapspot_s2_mechanic"      x="0"   y="128" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_task"          x="128" y="128" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_select"        x="256" y="128" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_handin"        x="384" y="128" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_barman"        x="0"   y="256" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_blink"         x="128" y="256" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_above"         x="256" y="256" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_below"         x="384" y="256" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_home"          x="0"   y="384" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_question"      x="128" y="384" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_alert"         x="256" y="384" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_transition"    x="384" y="384" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_squad"         x="0"   y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_squadmini"     x="128" y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_skull"         x="256" y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_taskmutant"    x="384" y="512" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_taskbounty"    x="0"   y="640" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_taskopen"      x="128" y="640" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_pointer"       x="256" y="640" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_taskdelivery"  x="384" y="640" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_abovebare"     x="0"   y="768" width="128" height="128" />
+		<texture id="iqm_mapspot_s2_belowbare"     x="128" y="768" width="128" height="128" />
+	</file>
+
 	<!-- The TAPERED DART: the alternative direction cue to the chevron (iqm_dart.script).
 	     A chevron says "that way" with an APEX ANGLE, and projection does not preserve
 	     angles — the projected apex swings x16 over the normal viewing range and reads

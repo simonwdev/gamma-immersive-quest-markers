@@ -131,13 +131,18 @@
 	<string id="ui_mcm_iqm_route_flow"><text>Flow speed (0.1 m/s)</text></string>
 	<string id="ui_mcm_iqm_route_flow_desc"><text>Slides the route marks toward your objective instead of holding them on fixed ground. 0 is off. 15 is a walking pace; past 40 the run reads as a flicker. Default 0.</text></string>
 
-	<string id="ui_mcm_iqm_map_icons"><text>This mod's map icons (needs restart)</text></string>
+	<string id="ui_mcm_iqm_map_icons"><text>Enable icons (restart required)</text></string>
 	<string id="ui_mcm_iqm_map_icons_desc"><text>Replace the PDA map and minimap spot icons, and the PDA symbols legend, with this mod's own. Off keeps whatever the rest of your setup draws. The game reads icon definitions once at startup, so a change applies at the next launch, not on loading a save.</text></string>
-	<string id="ui_mcm_iqm_map_task_kinds"><text>Mutant hunts and bounties</text></string>
-	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>A skull on a mutant hunt, a red reticle on a bounty. Both return to the plain task marker once the objective is done and the job only needs handing in. Applies immediately, and turning it off puts every marker back. Needs "This mod's map icons".</text></string>
-	<string id="ui_mcm_iqm_map_spot_names"><text>Name the NPCs on the map</text></string>
+	<string id="ui_mcm_iqm_map_icon_style"><text>Icon style (restart required)</text></string>
+	<string id="ui_mcm_iqm_map_icon_style_desc"><text>How this mod's map icons are drawn. Colourised circles are the ring-and-glyph marks, one colour per role. STALKER 2 style is a white glyph in a white diamond, so a service is told apart by its glyph alone and the frame no longer says whether a marker is a person, a place to search or a job to hand in. Most colour coding goes: squad dots keep their faction colours either way, and so do a finished job's green, a bounty's red and a mutant hunt's olive. Read once at startup, like the option above, so a change applies at the next launch.</text></string>
+	<string id="ui_mcm_lst_iqm_mapstyle_badge"><text>Colourised circles</text></string>
+	<string id="ui_mcm_lst_iqm_mapstyle_s2"><text>STALKER 2 diamonds</text></string>
+
+	<string id="ui_mcm_iqm_map_task_kinds"><text>Mark hunts and bounties</text></string>
+	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>A skull on a mutant hunt, a red reticle on a bounty. Both return to the plain task marker once the objective is done and the job only needs handing in. Applies immediately, and turning it off puts every marker back. Needs "Enable icons".</text></string>
+	<string id="ui_mcm_iqm_map_spot_names"><text>Show NPC names</text></string>
 	<string id="ui_mcm_iqm_map_spot_names_desc"><text>Put an NPC's own name in the tooltip you get by hovering their pin on the PDA map, alongside what they do: traders, technicians, bartenders, medics, guides and important characters. Applies immediately, and turning it off puts the plain wording back.</text></string>
-	<string id="ui_mcm_iqm_map_hide_companions"><text>No squad dot on your companions</text></string>
+	<string id="ui_mcm_iqm_map_hide_companions"><text>Hide companion squad dots</text></string>
 	<string id="ui_mcm_iqm_map_hide_companions_desc"><text>Your own companions keep drawing the ordinary faction squad dot on the PDA map and the minimap, a step behind your own arrow, telling you where somebody you are walking with is. This takes it off. Every other squad in the Zone is untouched. Applies immediately, and turning it off puts the dots straight back.</text></string>
 	<!-- The composed map tooltip. %s1 is the NPC's name, %s2 the role word the game
 	     already uses for that pin ("Trader", "Technician", "Bartender", "Medic").
