@@ -1,0 +1,98 @@
+// ======================================================================
+//  IQM depth-RT spike -- pixel shader  (DEBUG SCAFFOLDING, not shipped)
+// ======================================================================
+//  Four modes, selected per draw by the quad's own vertex colour, so the
+//  spike needs no shader_param_* slot -- and it must not want one, because
+//  in GAMMA all eight are already spoken for (docs/shader-spike.md #3).
+//
+//    colour.r * 255 -> mode
+//    colour.g * 255 -> range, in metres, meaning whatever the mode says
+//
+//  mode 0  passthrough, tinted magenta.  Proves only that the custom blender
+//          resolved at all: if the name lookup missed, the engine silently
+//          falls back to stub_default and you get the stock look with no log
+//          line, so "it looks normal" is the FAILURE signal here, not success.
+//  mode 1  scene depth as greyscale over `range` metres.  Proves $user$position
+//          is bound and non-empty during the UI pass.
+//  mode 2  tint every pixel nearer than `range` red, over the live scene.
+//          Proves REGISTRATION (the depth sample lines up with the pixel it is
+//          drawn on) and LATENCY (spin the camera hard: if the red mask trails
+//          the geometry it is describing, the RT is a frame stale and the whole
+//          approach needs a frame of lag budgeted for).
+//  mode 3  read back the integer part of Tex0.x as green over `range`.  Proves
+//          the per-quad data channel the real renderer needs: with all eight
+//          shader_param slots taken, per-mark depth has to ride in the texture
+//          rect's integer part (UIStaticItem.cpp:95 divides the rect by the
+//          texture size with no clamp), and it has to survive the UI clipper's
+//          uv interpolation at the screen edge.
+
+#include "common.h"
+#include "hdr10.h"
+
+// View-space depth in metres at a screen uv. Mirrors SSFX_get_depth from
+// Screen Space Shaders verbatim, including the MSAA split -- that is the form
+// known to compile on this engine's shader compiler for both settings.
+float iqm_scene_depth(float2 tc)
+{
+	#ifndef USE_MSAA
+		return s_position.Sample(smp_nofilter, tc).z;
+	#else
+		return s_position.Load(int3(tc * screen_res.xy, 0), 0).z;
+	#endif
+}
+
+// v2p_TL, not the p_TL the stock UI shaders take: they are the same struct
+// except that p_TL has SV_Position COMMENTED OUT (common_iostructs.h:60), and
+// the screen position is how we find our own pixel in the depth target. The
+// vertex shader (stub_notransform_t) emits v2p_TL either way, so consuming the
+// fuller struct costs nothing.
+float4 main(v2p_TL I) : SV_Target
+{
+	float2 stc = I.HPos.xy * screen_res.zw;      // pixel -> [0..1] screen uv
+	float  z   = iqm_scene_depth(stc);
+
+	int   mode  = (int) round(I.Color.r * 255.0f);
+	float range = max(I.Color.g * 255.0f, 1.0f);
+
+	float4 col;
+
+	if (mode == 1)
+	{
+		col = float4(saturate(z / range).xxx, 1.0f);
+	}
+	else if (mode == 2)
+	{
+		col = (z < range) ? float4(1.0f, 0.0f, 0.0f, 0.55f) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	else if (mode == 3)
+	{
+		// frac() for the sample, floor() for the payload -- the two halves of
+		// the same interpolated coordinate.
+		float carried = floor(I.Tex0.x);
+		float a = s_base.Sample(smp_base, frac(I.Tex0)).a;
+		col = float4(0.0f, saturate(carried / range), 0.0f, a);
+	}
+	else
+	{
+		col = s_base.Sample(smp_base, frac(I.Tex0)) * float4(1.0f, 0.0f, 1.0f, 1.0f);
+	}
+
+	// Mirrors hud_default.ps so the spike reads the same as the stock UI on an
+	// HDR10 display, and so this file stays a usable template for the real one.
+	if (!HDR10_IS_ENABLED)
+		return col;
+
+	if (HDR10_IS_RENDERING_PDA)
+	{
+		col.rgb = HDR10_sRGBToLinear(col.rgb);
+		col.rgb *= HDR10_UI_NITS_SCALAR;
+		col.rgb *= HDR10_PDA_INTENSITY;
+		col.rgb = HDR10_LinearTosRGB(col.rgb);
+	}
+	else
+	{
+		col.rgb = HDR10_ToDisplay_UI(col.rgb, HDR10_UI_NITS_SCALAR, col.a);
+	}
+
+	return col;
+}

@@ -1,0 +1,142 @@
+-- ======================================================================
+--  Immersive Quest Markers: depth-RT spike driver (DEBUG ONLY, not shipped)
+-- ======================================================================
+-- Puts one full-screen quad on the HUD, drawn through gamedata/shaders/r3/
+-- iqm_depthspike.s instead of the stock UI blender, and cycles it through the
+-- four diagnostic modes that file documents.
+--
+-- WHAT THIS IS FOR. The route renderer would like to replace its occlusion
+-- raycasts (iqm_nav.script:507-530, the round-robin budget, and the eased
+-- per-point alpha at :1397) with a per-pixel test against the scene depth the
+-- engine has already computed. Everything that idea needs was confirmed by
+-- reading the engine EXCEPT the one thing reading cannot settle: whether the
+-- deferred position target is still bound, and still holds this frame, at the
+-- moment the UI pass runs. That is what modes 1 and 2 answer. Mode 3 answers
+-- the follow-on question of how per-mark data reaches the shader at all.
+--
+-- HOW TO RUN IT. F7 debugger -> Execute tab -> the "IQM Spike:" entries, or
+-- from the Lua box: iqm_shaderspike.set_mode(2, 10).
+--
+-- READING THE RESULT -- the failure mode that looks like success. A shader
+-- name that does not resolve does not raise: the engine substitutes
+-- stub_default and logs nothing (ResourceManager.cpp:340). So a spike that
+-- draws a normal-looking white box has FAILED, and mode 0 exists to catch
+-- exactly that -- it must come up magenta. Check every other mode only after
+-- mode 0 is magenta.
+--
+-- LOAD ORDER AND COUPLING: none. This file talks to iqm_util (for the F7
+-- injection and the log helper) and to nothing else in the mod; nothing in the
+-- mod reads it back. Deleting it is the whole uninstall.
+
+local SPIKE   = nil    -- the CUIScriptWnd, once the HUD exists to hang it on
+local mode    = 0
+local range   = 60     -- metres; means whatever the current mode says it means
+local carry   = 0      -- mode 3 only: the integer to smuggle through Tex0.x
+
+-- The atlas iqm_white_box lives in, and its cell. The engine builds Tex0 as
+-- rect / texture-resolution with no clamp of any kind (UIStaticItem.cpp:95),
+-- so offsetting the rect by whole multiples of the atlas width moves the
+-- integer part of u without touching where the sample lands -- provided the
+-- cell itself does not straddle an integer boundary, which at 174..348 of 2048
+-- it does not.
+local ATLAS_W = 2048
+local CELL_X, CELL_Y, CELL_W, CELL_H = 174, 0, 174, 60
+
+-- --------------------------------------------------------------------------
+-- The dialog
+-- --------------------------------------------------------------------------
+class "IqmSpike" (CUIScriptWnd)
+
+function IqmSpike:__init() super()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+	self:SetAutoDelete(true)
+
+	local q = CUIStatic()
+	q:SetAutoDelete(true)
+	q:SetWndRect(Frect():set(0, 0, 1024, 768))
+	-- InitTextureEx, not InitTexture: the second argument is the shader name,
+	-- and it is the entire hook. Bound to Lua at ui/UIStatic_script.cpp:31.
+	q:InitTextureEx("iqm_white_box", "iqm_depthspike")
+	q:SetStretchTexture(true)
+	q:Show(false)
+	self:AttachChild(q)
+	self.quad = q
+end
+
+local function ensure()
+	if SPIKE then return SPIKE end
+	local hud = get_hud()
+	if not hud then return nil end
+	SPIKE = IqmSpike()
+	hud:AddDialogToRender(SPIKE)
+	return SPIKE
+end
+
+-- --------------------------------------------------------------------------
+-- Driving it
+-- --------------------------------------------------------------------------
+-- Mode and range ride in the vertex colour rather than in a shader constant,
+-- because GAMMA has no free shader_param slot: Enhanced Shaders holds 1-4 for
+-- ACES grading, BAS/GAMMA Watch hold 5, Laser Settings 6, Beef's NVG 7 and 8.
+-- Writing any of them from here would visibly break one of those mods.
+local function apply()
+	local s = ensure()
+	if not s then
+		iqm_util.dbg_out("!IQM-SPIKE: no HUD yet -- load a save first")
+		return
+	end
+	local q = s.quad
+
+	local n = (mode == 3) and carry or 0
+	q:SetTextureRect(Frect():set(
+		CELL_X + n * ATLAS_W, CELL_Y,
+		CELL_X + CELL_W + n * ATLAS_W, CELL_Y + CELL_H))
+
+	q:SetTextureColor(GetARGB(255, mode, range, 0))
+	q:Show(true)
+end
+
+--- Set the diagnostic mode. r is the mode's range in metres (1-255).
+function set_mode(m, r)
+	mode = m or 0
+	if r then range = math.max(1, math.min(255, math.floor(r))) end
+	apply()
+	iqm_util.dbg_out("-IQM-SPIKE: mode=%s range=%sm carry=%s", mode, range, carry)
+end
+
+function off()
+	mode = 0
+	if SPIKE and SPIKE.quad then SPIKE.quad:Show(false) end
+	iqm_util.dbg_out("-IQM-SPIKE: off")
+end
+
+--- Mode 3 only. Sets the integer the quad smuggles through Tex0.x; the shader
+--  renders floor(u)/range as green.
+--
+--  ALWAYS PASS r. `range` is sticky across modes, and the first run of this
+--  spike read a saturated 255 and briefly looked like a transport failure
+--  purely because mode 2 had left range at 10 and 30/10 clips. Pass r = 255 and
+--  the green byte IS the carried integer, which is a number you can read out of
+--  the screenshot rather than a brightness you have to judge.
+function set_carry(n, r)
+	carry = n or 0
+	set_mode(3, r or range)
+end
+
+function on_game_start()
+	iqm_util.inject_actions("iqm_shaderspike", {
+		{ name = "IQM Spike: 0 Bound? (must be MAGENTA)", hide_ui = 2,
+		  functor = { function() set_mode(0, 60) end } },
+		{ name = "IQM Spike: 1 Depth as greyscale (60m)", hide_ui = 2,
+		  functor = { function() set_mode(1, 60) end } },
+		{ name = "IQM Spike: 2 Near-tint overlay (10m)",  hide_ui = 2,
+		  functor = { function() set_mode(2, 10) end } },
+		{ name = "IQM Spike: 2 Near-tint overlay (40m)",  hide_ui = 2,
+		  functor = { function() set_mode(2, 40) end } },
+		-- range 255 so the green byte reads back as the carried integer itself
+		{ name = "IQM Spike: 3 Tex0 carry readback (=10)", hide_ui = 2,
+		  functor = { function() set_carry(10, 255) end } },
+		{ name = "IQM Spike: Off",                        hide_ui = 2,
+		  functor = { off } },
+	})
+end
