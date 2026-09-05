@@ -863,6 +863,46 @@ local function squad_shape(actor, obj)
 	return nil
 end
 
+--- The free recruit's strength gate, for the variant this NPC would actually be offered.
+--
+--  BOTH free variants carry it, which is the correction (R2.63). The solo variant's
+--  precondition is IRC's get_is_actor_stronger_if_script_is_available, and it was once
+--  believed to be the only one -- that the base whole-squad dialogue had no such check,
+--  because in stock Anomaly it does not. In GAMMA it does: the winning dialogs.xml is
+--  G.A.M.M.A. Quests Rebalance's, and its `friendly_companion_dialog` lists
+--  `grok_get_companions.is_actor_stronger` alongside is_squad_commander. So an NPC in a
+--  multi-member squad that we can only offer through the base dialogue was carded LOOKING
+--  FOR WORK with no recruit line behind it -- the R2.60 failure again, one rung further
+--  down: the dialogue is attached AND every gate we mirrored passes, and it is still not
+--  offered, because a precondition we did not mirror is false.
+--
+--  The two functions are the same test. IRC's wrapper is `grok_get_companions and
+--  grok_get_companions.is_actor_stronger(...) or true` (individually_recruitable_
+--  companions.script:95-100), so with grok present both branches compare the same ranks.
+--  They are still called by their own names, because which name appears in the dialogue is
+--  what decides the answer when a mod is absent: without grok the base dialogue's
+--  precondition line is not there either (it ships in the same mod that ships the
+--  function), and the solo variant's wrapper returns true on its own. Either way "no
+--  function to call" means "no gate", which is why a missing one passes rather than blocks.
+--
+--  NOT memoized, unlike the other recruit facts: this is the one free gate that moves
+--  during a session -- the actor's rank climbs, and grok compares it against the NPC's --
+--  so the card must appear the moment you outrank him, the same way the paid card follows
+--  your wallet. Two character_rank() reads per candidate is a cheaper answer than a cache
+--  that would have to be invalidated on rank change.
+local function actor_strong_enough(actor, obj, shape)
+	local fn
+	if shape == "solo" then
+		local irc = individually_recruitable_companions
+		fn = irc and irc.get_is_actor_stronger_if_script_is_available
+	else
+		local grok = grok_get_companions
+		fn = grok and grok.is_actor_stronger
+	end
+	if not fn then return true end
+	return fn(actor, obj) and true or false
+end
+
 local paid_ok = false   -- set per pass by companions_available()
 
 --- Does this NPC's character profile actually CARRY the recruit dialogue?
@@ -1070,16 +1110,10 @@ local function npc_recruitable_impl(obj, rel, ctx)
 	local shape = squad_shape(actor, obj)
 	if not shape then return nil end
 
-	-- FREE: friendly recruit. The actor-strength check belongs to the solo variant
-	-- only (the base dialog has no such precondition).
-	if free then
-		local irc = individually_recruitable_companions
-		if shape ~= "solo"
-		   or not (irc and irc.get_is_actor_stronger_if_script_is_available)
-		   or irc.get_is_actor_stronger_if_script_is_available(actor, obj) then
-			return "companion"
-		end
-	end
+	-- FREE: friendly recruit. Both variants gate on actor strength, each naming its own
+	-- function -- see actor_strong_enough, and note that it is the whole-squad variant
+	-- (shape ~= "solo") that used to skip the check and card a phantom offer.
+	if free and actor_strong_enough(actor, obj, shape) then return "companion" end
 	if paid and paid_competent(actor, obj, f) then
 		-- affordability is the one paid gate that isn't static: re-checked every pass,
 		-- so the card appears the moment you can cover it and goes away when you can't

@@ -74,9 +74,21 @@ local function profile_offers(dialogs)
 	return free, paid
 end
 
+-- actor_strong_enough, transcribed. BOTH free variants gate on actor strength (R2.63) --
+-- the solo one on IRC's get_is_actor_stronger_if_script_is_available, the whole-squad one
+-- on grok_get_companions.is_actor_stronger, which GAMMA's winning dialogs.xml (Quests
+-- Rebalance) lists and stock Anomaly's does not. The two functions compute the same rank
+-- comparison, so one `stronger` field per fixture drives either shape; what differs is
+-- which mod's absence removes the gate, and `gate_absent` is how a row says that.
+local function actor_strong_enough(f)
+	if f.gate_absent then return true end
+	return f.stronger ~= false            -- fixtures that predate the gate are strong
+end
+
 -- npc_recruitable_impl's branch selection, reduced to the part under test: the two
 -- feature switches and relation gates decide which branches are eligible, the profile
--- decides which ones can exist at all, and free beats paid when both survive.
+-- decides which ones can exist at all, free beats paid when both survive, and the free
+-- branch must still clear the strength gate for the variant it would be offered through.
 -- `squad_ok` folds together every gate this harness is not about (story, room, shape,
 -- tier, affordability) so a row can say "everything else passed" in one field.
 local function recruit_role(f)
@@ -88,8 +100,9 @@ local function recruit_role(f)
 	if paid and not dlg_paid then paid = false end
 	if not (free or paid) then return nil end
 	if not f.squad_ok then return nil end
-	if free then return "companion" end
-	return "hire"
+	if free and actor_strong_enough(f) then return "companion" end
+	if paid then return "hire" end
+	return nil
 end
 
 -- ------------------------------------------------------------- the fixtures
@@ -154,6 +167,41 @@ local NPCS = {
 	{ who = "generic stalker, feature off", dialogs = GENERIC,
 	  mark_companions = false, mark_hires = false, rel = "friend", squad_ok = true,
 	  want = nil },
+
+	-- ---------------------------------------------------------------- R2.63
+	-- Yury Ryazansky, read out of the running game (id 28815, l07_military): a merc in a
+	-- multi-member squad, friendly, non-story, room for him, every mirrored gate green --
+	-- and actor rank 6314 against his 9905 * 1.5, so grok_get_companions.is_actor_stronger
+	-- is false and neither free variant is offered. He was carded LOOKING FOR WORK, and
+	-- talking to him had no recruit line, because the strength gate was applied to the
+	-- solo variant only.
+	{ who = "whole-squad recruit, actor weaker", dialogs = GENERIC, shape = "squad",
+	  mark_companions = true, mark_hires = false, rel = "friend", squad_ok = true,
+	  stronger = false, want = nil },
+
+	{ who = "whole-squad recruit, actor stronger", dialogs = GENERIC, shape = "squad",
+	  mark_companions = true, mark_hires = false, rel = "friend", squad_ok = true,
+	  stronger = true,
+	  -- The control: fixing the gate must not cost the card everyone else gets.
+	  want = "companion" },
+
+	{ who = "solo recruit, actor weaker", dialogs = GENERIC, shape = "solo",
+	  mark_companions = true, mark_hires = false, rel = "friend", squad_ok = true,
+	  -- Never broken; here so a fix that moved the gate rather than widening it fails.
+	  stronger = false, want = nil },
+
+	{ who = "whole-squad recruit, grok absent (no such precondition)", dialogs = GENERIC,
+	  shape = "squad", mark_companions = true, mark_hires = false, rel = "friend",
+	  squad_ok = true,
+	  -- Without Quests Rebalance the dialogue has no strength line and the function that
+	  -- would answer it is gone with it. A missing gate passes; it must not block.
+	  stronger = false, gate_absent = true, want = "companion" },
+
+	{ who = "paid escort is not strength-gated", dialogs = GENERIC, shape = "squad",
+	  mark_companions = true, mark_hires = true, rel = "neutral", squad_ok = true,
+	  -- paid_companion_dialog lists no is_actor_stronger, in either variant. A gate
+	  -- applied to the whole recruit predicate rather than its free branch fails here.
+	  stronger = false, want = "hire" },
 }
 
 for _, f in ipairs(NPCS) do
@@ -197,6 +245,18 @@ do
 	-- 3 seconds would build a throwaway Lua table per candidate for an unchanging answer.
 	check("the answer is memoized with the other static facts",
 	      scan_src:find("dlg_free%s*=%s*dlg_free") ~= nil)
+
+	-- R2.63: the strength gate. Its whole failure mode was being reachable on one shape
+	-- only, so "the function is called" is not the assertion -- the old code called it too.
+	check("the whole-squad variant's precondition is named",
+	      scan_src:find("grok_get_companions", 1, true) ~= nil,
+	      "the base friendly_companion_dialog gates on grok_get_companions.is_actor_stronger")
+	check("the free branch is gated unconditionally on strength",
+	      scan_src:find("if free and actor_strong_enough%(actor, obj, shape%) then") ~= nil,
+	      "the gate must not sit behind a shape test at the call site")
+	-- The gate reads the actor's rank, which climbs, so caching it would strand the card.
+	check("the strength answer is NOT memoized with the static facts",
+	      scan_src:find("stronger%s*=") == nil)
 end
 
 -- ------------------------------------------------------------------- summary

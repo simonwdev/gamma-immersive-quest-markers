@@ -2,6 +2,34 @@
 
 All notable changes to Immersive Quest Markers are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`LOOKING FOR WORK` on a stalker with no recruit line**, when that stalker is
+  in a multi-member squad. Both free-recruit dialogues gate on the actor
+  out-ranking the NPC, and the card only checked it for the *solo* variant —
+  G_FLAT's Individually Recruitable Companions, which pulls one member out of a
+  squad. The other variant hires the whole squad through its commander, and the
+  belief was that it carries no such precondition. In stock Anomaly it does not;
+  in GAMMA it does. The winning `gameplay\dialogs.xml` is *G.A.M.M.A. Quests
+  Rebalance*'s, and its `friendly_companion_dialog` lists
+  `grok_get_companions.is_actor_stronger` next to `is_squad_commander`. So an NPC
+  we could only offer through the base dialogue was carded for an offer he did
+  not have — and, since the card outranks a service role, that phantom could also
+  evict a real `GUIDE` or `TRADER` badge.
+  - The gate now runs on both shapes, each calling the function *its own*
+    dialogue names, because which name is in the dialogue is what decides the
+    answer when a mod is absent: with Quests Rebalance gone, the base
+    precondition line goes with it, and IRC's wrapper returns true on its own.
+  - It is deliberately **not** memoised alongside the other recruit facts. Your
+    rank climbs, so the card has to appear the moment you outrank him — the same
+    way the `FOR HIRE` card follows your wallet.
+  - The paid escort is untouched: neither paid variant is strength-gated.
+  - This is the *R2.60* failure one rung further down — there the dialogue was
+    not attached at all, here it is attached and a precondition we had not
+    mirrored is false. `tools/recruit-harness` covers both now.
+
 ## [0.12.0] - 2026-09-04
 
 ### Added
