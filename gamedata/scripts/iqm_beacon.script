@@ -254,6 +254,132 @@ local BEACON_RGB = {
 }
 beacon_rgb = BEACON_RGB
 
+-- ==========================================================================
+-- THE TASK-KIND PALETTE (R2.64): the two kind colours, and the four ways to say them
+-- ==========================================================================
+-- The two DRESSING colours above -- the mutant hunt's lime and the bounty's red -- are the
+-- only tints in this mod a player can retune, and they are retunable because of a report
+-- rather than for symmetry: "I like the new style, but I've a bit of a hard time seeing
+-- them on the map (thanks deuteranopia)". Measuring that turned up a defect underneath the
+-- request, so the shipped default is worth stating the numbers for before the alternatives
+-- to it:
+--
+--   THE BOUNTY RED IS A VISIBILITY PROBLEM BEFORE IT IS A COLOUR-VISION ONE. At L* 41.8 it
+--   is 20 points darker than anything else in the task family, and against the terrain the
+--   modxml sampled (mean 119,111,100) it carries a luminance contrast of 1.22:1. That is
+--   not a colour that is hard to TELL APART, it is a colour that is hard to SEE, and it is
+--   hard to see for everybody. Normal vision compensates with hue; red-green deficiency
+--   removes the hue and leaves what is actually there. The mutant lime is fine by the same
+--   measure and always was -- 3.01:1 on mean terrain, 8.47:1 in shadow, and it simulates
+--   almost unchanged.
+--
+--   THE OBVIOUS FIX IS A TRAP, and it is written down because it is the first thing anyone
+--   will try. Brightening the red in place -- 232,72,72, say -- lands it dE 3.2 from the
+--   turn-in green under deuteranopia, i.e. the same colour. Today's dark red is dE 20.3
+--   from that green. A brighter red makes this WORSE for the player who reported it while
+--   looking like an improvement to whoever made the change.
+--
+-- SO THE PRESETS MOVE OFF THE RED-GREEN AXIS ENTIRELY, which is the only move available. A
+-- dichromat's colour space is roughly {dark..light} x {blue..yellow}, and the task family
+-- already crowds the yellow half: the storyline gold, the timed-task orange, the turn-in
+-- green and today's lime all simulate to yellows within dE 22 of each other. The blue half
+-- is EMPTY. So the two marks that most need finding fast go there, separated from each
+-- other by lightness -- the hunt lighter, the fight heavier, which is also the right way
+-- round for what the two mean.
+--
+-- EVERY VALUE BELOW IS MEASURED, not chosen by eye, against the same floors the rest of
+-- the palette works to (see THE PALETTE in modxml_n_iqm_map_icons):
+--
+--   * dE >= 28 from every other TASK-family colour -- the storyline gold, the secondary
+--     white, the turn-in and ATUE greens, the timed orange, the question red -- in NORMAL
+--     vision AND under the simulation the preset is named for. Both, not either: a preset
+--     that only worked for the eye it is for would make the map worse for anyone else
+--     looking at the same screen.
+--   * dE >= 28 between the two kinds themselves, under both. This is the one that killed
+--     the first four candidate sets, and it is the least obvious of the floors: two
+--     colours can each be well separated from the family and collapse onto EACH OTHER
+--     under the simulation, which is precisely the distinction this option exists to
+--     protect. A cyan/periwinkle pair scored dE 68 and dE 70 against the family and dE
+--     20.0 against each other.
+--   * dE >= 25 from the engine's own relation dots (friend 0,255,0, enemy 237,28,36,
+--     neutral 255,240,0), which are transient and tactical and outrank anything here.
+--   * luminance contrast >= 1.65:1 against mean terrain and >= 4.6:1 in shadow, computed
+--     on the SIMULATED colour rather than the authored one -- protanopia darkens reds
+--     outright, so a candidate's contrast is not a property of its bytes alone.
+--
+-- WHAT IS STILL COLLIDED, so nothing here reads as a claim it does not make. These presets
+-- move the two KINDS and nothing else, because that is the option's scope. The rest of the
+-- task family keeps its own deficiency collisions -- the storyline gold against the timed
+-- orange (dE 18 deutan), the turn-in green against the question red (dE 17) -- and those
+-- are not this option's to fix: the storyline gold in particular is the oldest colour
+-- convention on this map and moving it is a separate argument with a separate blast
+-- radius. Shape carries those pairs, as it carries these.
+--
+-- MODE 0 IS NOT RESTATED HERE, IT IS THE TABLE ABOVE. Reading the two entries out of
+-- BEACON_RGB captures the tables themselves, so Default cannot drift from the literals the
+-- map spots are authored with -- the mirror rule (see the note above BEACON_RGB) applied to
+-- the palette that overrides it. That only works because apply_config REBINDS THE FIELD,
+-- BEACON_RGB.mutant = ..., and never writes through the table: the captured reference below
+-- goes on pointing at the shipped literal, which is what makes returning to Default a
+-- restore rather than a second set of numbers somebody has to keep in step.
+local KIND_PALETTE = {
+	-- 0 DEFAULT -- the shipped lime and red, as authored in ui/iqm_map_spots.xml.
+	[0] = { mutant = BEACON_RGB.mutant, bounty = BEACON_RGB.bounty },
+	-- 1 DEUTERANOPIA. The hunt takes a bright cyan and the fight a cornflower blue. Both
+	--  simulate to blues 11 points of L* apart, in the half of the space nothing else on
+	--  this map occupies: family dE 39.5 and 70.6 under simulation, dE 32.0 between them.
+	--  The bounty's contrast against mean terrain goes 1.22 -> 1.71 and, in shadow, 2.31 ->
+	--  4.82 -- which is the half of the report that was never about hue at all.
+	[1] = { mutant = { 64, 198, 234}, bounty = { 96, 150, 252} },
+	-- 2 PROTANOPIA. The same cyan for the hunt -- it holds at family dE 28.7 here, the
+	--  tightest number in this table and still at the floor -- and a deeper violet for the
+	--  fight, which protanopia's heavier red attenuation pushes further from the cornflower
+	--  above than deuteranopia does (dE 43.5 between the kinds, against 32.0). Sharing the
+	--  hunt colour with mode 1 is measured rather than lazy: a separate search for it
+	--  returned magentas that scored no better and read worse.
+	[2] = { mutant = { 64, 198, 234}, bounty = {168, 132, 252} },
+	-- 3 TRITANOPIA is the other way round and the presets follow it. Blue-yellow collapses
+	--  and red-green survives, so the hunt can stay in the yellow family it already lives
+	--  in -- a pale straw, lifted clear of the storyline gold on lightness (L* 87) -- and
+	--  the fight takes a mauve. The fight canNOT stay red here: the question-mark spot's
+	--  red simulates to dE 9.4 from today's bounty, the tightest collision anywhere in this
+	--  file. Family dE 39.1 and 37.0, dE 38.0 between the kinds.
+	[3] = { mutant = {222, 222, 150}, bounty = {168, 132, 222} },
+	-- 4 is CUSTOM and deliberately has no row: it is the player's six sliders, resolved in
+	--  kind_rgb below. A table entry for it would be a fifth palette the sliders contradict.
+}
+
+--- What colour a task KIND draws in, for both the map pin and the world marker.
+--
+--  `kind` is "mutant" or "bounty"; `mode` is the map_palette option; r/g/b are that kind's
+--  three custom channels, read only in mode 4 and allowed to be nil anywhere.
+--
+--  IT IS PURE, and takes the mode and the channels as ARGUMENTS rather than reading them,
+--  because its two callers cannot read them the same way. This file has `C` and pulls in
+--  apply_config like everything else here; modxml_n_iqm_map_icons has no apply_config and
+--  no on_game_start, and runs on whatever frame the engine first parses map_spots.xml, so
+--  it asks MCM directly with the pcall discipline icons_on uses over there. Handing the
+--  rule to both and letting each supply its own inputs is the shape iqm_core.tint() takes
+--  across the other seam in this mod: the FUNCTION crosses, not its answer, so neither
+--  side can be holding a stale copy of the palette.
+--
+--  A MISSING CHANNEL FALLS BACK TO THE WHOLE DEFAULT rather than to zero, and that matters
+--  more than it looks: nil for one channel is what a settings file predating this option
+--  reads, and { nil, 196, 122 } indexed as col[1] draws a BLACK marker -- the one tint that
+--  vanishes completely on a keylined badge (see the NEVER BLACK check in the colour
+--  harness). All three or none.
+function kind_rgb(kind, mode, r, g, b)
+	if mode == 4 then
+		if r and g and b then return { r, g, b } end
+		mode = 0
+	end
+	local p = KIND_PALETTE[mode] or KIND_PALETTE[0]
+	return p[kind] or KIND_PALETTE[0][kind]
+end
+-- Published for the colour harness, which checks mode 0 against the XML literals and every
+-- other mode against the separation floors stated above. Not read at runtime.
+kind_palette = KIND_PALETTE
+
 -- The RING a marker can wear around its glyph, and the marker's answer to "whose mark is
 -- this" (R2.63). A THIRD axis, deliberately independent of the other two: the GLYPH says
 -- what the mark is, the TINT says the same thing in colour (see BEACON_RGB), and the ring
@@ -996,6 +1122,31 @@ function apply_config()
 	-- mod that keeps the party list -- a soft dependency, guarded here AND at the call site
 	-- so an install without it simply never offers one.
 	party_on = (bok and C.beacon_party and axr_companions) and true or false
+
+	-- THE TASK-KIND PALETTE (R2.64). The two DRESSING colours are the only entries in
+	-- BEACON_RGB the player can move, and they are resolved here, once per config read,
+	-- for the same reason every other mirror on this page is: the alternative is a table
+	-- lookup and a mode test per marker per frame, for an answer that changes when the
+	-- menu closes.
+	--
+	-- THE FIELD IS REBOUND, THE TABLE IS NOT. iqm_core binds BEACON_RGB itself once at
+	-- on_game_start and reads it forever (see the seam note there), so replacing the table
+	-- would leave that side on the shipped palette with nothing to say so -- the same
+	-- contract `C` has, and the same failure if it is broken. Assigning the two FIELDS is
+	-- what both sides can see. It is also what lets KIND_PALETTE[0] hold the originals:
+	-- it captured those two tables at parse, and nothing here writes through them.
+	--
+	-- THE MAP DOES NOT FOLLOW UNTIL A RESTART and this does, which is a real seam and not
+	-- an oversight -- g_uiSpotXml is parsed once per process, so the pins keep the colour
+	-- they were parsed with while the world marker changes on the spot. That is the state
+	-- the mirror rule forbids, held deliberately for as long as the session lasts, and the
+	-- option's label is where it is declared (see map_palette in iqm_core' OPTIONS).
+	-- Withholding the marker's half until the restart would not fix it, it would just make
+	-- BOTH views wrong instead of one, and leave the player with no feedback that the
+	-- setting did anything at all.
+	local pal = C.map_palette or 0
+	BEACON_RGB.mutant = kind_rgb("mutant", pal, C.mutant_r, C.mutant_g, C.mutant_b)
+	BEACON_RGB.bounty = kind_rgb("bounty", pal, C.bounty_r, C.bounty_g, C.bounty_b)
 
 	beacon_edge  = C.beacon_edge
 	beacon_size  = C.beacon_size

@@ -140,6 +140,27 @@
 
 	<string id="ui_mcm_iqm_map_task_kinds"><text>Mark hunts and bounties</text></string>
 	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>A skull on a mutant hunt, a red reticle on a bounty. Both return to the plain task marker once the objective is done and the job only needs handing in. Applies immediately, and turning it off puts every marker back. Needs "Enable icons".</text></string>
+	<string id="ui_mcm_iqm_map_palette"><text>Hunt and bounty colours (restart for pins)</text></string>
+	<string id="ui_mcm_iqm_map_palette_desc"><text>Colour of the mutant hunt and bounty marks. The default bounty red is dark - 1.2:1 contrast against the map background - which is the usual reason to change it. Each preset moves both marks off the axis that deficiency collapses, keeping them apart from each other and from the other task marks. Custom uses the six sliders below, which start on the default colours. The world marker updates immediately; map and minimap pins are parsed at startup and change at the next launch.</text></string>
+	<string id="ui_mcm_lst_iqm_palette_default"><text>Default</text></string>
+	<string id="ui_mcm_lst_iqm_palette_deutan"><text>Deuteranopia</text></string>
+	<string id="ui_mcm_lst_iqm_palette_protan"><text>Protanopia</text></string>
+	<string id="ui_mcm_lst_iqm_palette_tritan"><text>Tritanopia</text></string>
+	<string id="ui_mcm_lst_iqm_palette_custom"><text>Custom</text></string>
+
+	<string id="ui_mcm_iqm_mutant_r"><text>Mutant hunt: red</text></string>
+	<string id="ui_mcm_iqm_mutant_r_desc"><text>Red channel of the mutant hunt colour (0-255). Used only when the setting above is Custom. Default 176, the shipped lime's own red.</text></string>
+	<string id="ui_mcm_iqm_mutant_g"><text>Mutant hunt: green</text></string>
+	<string id="ui_mcm_iqm_mutant_g_desc"><text>Green channel of the mutant hunt colour (0-255). Used only when the setting above is Custom. Default 216.</text></string>
+	<string id="ui_mcm_iqm_mutant_b"><text>Mutant hunt: blue</text></string>
+	<string id="ui_mcm_iqm_mutant_b_desc"><text>Blue channel of the mutant hunt colour (0-255). Used only when the setting above is Custom. Default 72.</text></string>
+	<string id="ui_mcm_iqm_bounty_r"><text>Bounty: red</text></string>
+	<string id="ui_mcm_iqm_bounty_r_desc"><text>Red channel of the bounty colour (0-255). Used only when the setting above is Custom. Default 172. If you are changing it because the default is hard to see, raise lightness rather than saturation: a brighter red at the same lightness collides with the finished-job green under red-green deficiency.</text></string>
+	<string id="ui_mcm_iqm_bounty_g"><text>Bounty: green</text></string>
+	<string id="ui_mcm_iqm_bounty_g_desc"><text>Green channel of the bounty colour (0-255). Used only when the setting above is Custom. Default 60.</text></string>
+	<string id="ui_mcm_iqm_bounty_b"><text>Bounty: blue</text></string>
+	<string id="ui_mcm_iqm_bounty_b_desc"><text>Blue channel of the bounty colour (0-255). Used only when the setting above is Custom. Default 66.</text></string>
+
 	<string id="ui_mcm_iqm_map_spot_names"><text>Show NPC names</text></string>
 	<string id="ui_mcm_iqm_map_spot_names_desc"><text>Put an NPC's own name in the tooltip you get by hovering their pin on the PDA map, alongside what they do: traders, technicians, bartenders, medics, guides and important characters. Applies immediately, and turning it off puts the plain wording back.</text></string>
 	<string id="ui_mcm_iqm_map_hide_companions"><text>Hide companion squad dots</text></string>

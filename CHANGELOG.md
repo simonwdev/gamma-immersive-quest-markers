@@ -4,6 +4,43 @@ All notable changes to Immersive Quest Markers are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Colour options for the mutant hunt and bounty marks** — three presets tuned
+  for a colour-vision deficiency, plus six sliders of your own. *MCM → General →
+  Hunt and bounty colours*. From a report: *"I like the new style, but I've a bit
+  of a hard time seeing them on the map (thanks deuteranopia)."*
+  - Measuring that turned up a defect underneath the request. **The bounty red is
+    a visibility problem before it is a colour-vision one:** at L\* 41.8 it is 20
+    points darker than anything else in the task family, and it carries a
+    luminance contrast of **1.22:1** against the terrain the palette was sampled
+    off. That is hard to see for *everybody* — normal vision compensates with
+    hue, and colour-vision deficiency removes the hue and leaves what is actually
+    there. The mutant lime measures fine and always did.
+  - **The obvious fix is a trap**, so it is worth naming: brightening the red in
+    place (232,72,72) lands it **dE 3.2** from the finished-job green under
+    deuteranopia — the same colour — where today's dark red is dE 20.3 from it.
+    The intuitive repair makes the map *worse* for the player who reported it.
+    `tools/color-harness` now fails on exactly that edit.
+  - The three presets move both marks off the axis the deficiency collapses:
+    away from red-green for **deuteranopia** and **protanopia**, and off red
+    entirely for **tritanopia**, where the question-mark pin's red is the
+    collision. Every value is measured against the floors the rest of the palette
+    already works to — dE 28 from every other task mark and from each other, in
+    normal vision *and* under simulation, dE 25 from the engine's relation dots,
+    and a real contrast against ground and shadow. The reasoning per deficiency
+    is in `KIND_PALETTE` in `iqm_beacon.script`.
+  - **Custom** hands over `mutant_r/g/b` and `bounty_r/g/b`, starting on the
+    shipped colours so picking it changes nothing until you move a channel.
+  - **The world marker follows immediately; the PDA and minimap pins need a
+    restart**, because the game parses spot definitions once per process — the
+    same constraint *Enable icons* and *Icon style* already carry. The label says
+    so, and until the restart the pin and the marker will disagree.
+  - Scope is the two task kinds. The rest of the map palette keeps its own
+    deficiency collisions (the storyline gold against the timed-task orange, the
+    turn-in green against the question red); moving the storyline gold is a
+    separate argument and shape carries those pairs.
+
 ### Fixed
 
 - **`LOOKING FOR WORK` on a stalker with no recruit line**, when that stalker is

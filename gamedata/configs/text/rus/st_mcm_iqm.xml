@@ -388,6 +388,27 @@
 	<string id="ui_mcm_lst_iqm_mapstyle_s2"><text>Ромбы STALKER 2</text></string>
 	<string id="ui_mcm_iqm_map_task_kinds"><text>Охота на мутантов и заказы</text></string>
 	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>Череп на охоте за мутантами, красный прицел на заказе. Обе возвращаются к обычной метке задания, как только цель выполнена и задание осталось только сдать. Действует сразу, при выключении все метки возвращаются. Требует "Значки карты этого мода".</text></string>
+	<string id="ui_mcm_iqm_map_palette"><text>Цвета охоты и заказа (значкам нужен перезапуск)</text></string>
+	<string id="ui_mcm_iqm_map_palette_desc"><text>Цвет меток охоты на мутантов и заказа. Стандартный красный заказа тёмный — контраст 1,2:1 к фону карты, и обычно меняют именно из-за этого. Каждый набор уводит обе метки с той оси, которую схлопывает нарушение, сохраняя различимость между ними и с остальными метками заданий. «Свои цвета» берут шесть ползунков ниже, которые начинаются со стандартных значений. Метка в мире меняется сразу; значки на КПК и миникарте читаются при запуске и изменятся при следующем запуске.</text></string>
+	<string id="ui_mcm_lst_iqm_palette_default"><text>Стандартные</text></string>
+	<string id="ui_mcm_lst_iqm_palette_deutan"><text>Дейтеранопия</text></string>
+	<string id="ui_mcm_lst_iqm_palette_protan"><text>Протанопия</text></string>
+	<string id="ui_mcm_lst_iqm_palette_tritan"><text>Тританопия</text></string>
+	<string id="ui_mcm_lst_iqm_palette_custom"><text>Свои цвета</text></string>
+
+	<string id="ui_mcm_iqm_mutant_r"><text>Охота: красный</text></string>
+	<string id="ui_mcm_iqm_mutant_r_desc"><text>Красная составляющая цвета охоты (0-255). Работает только при «Свои цвета» выше. По умолчанию 176 — красный самого лаймового.</text></string>
+	<string id="ui_mcm_iqm_mutant_g"><text>Охота: зелёный</text></string>
+	<string id="ui_mcm_iqm_mutant_g_desc"><text>Зелёная составляющая цвета охоты (0-255). Работает только при «Свои цвета» выше. По умолчанию 216.</text></string>
+	<string id="ui_mcm_iqm_mutant_b"><text>Охота: синий</text></string>
+	<string id="ui_mcm_iqm_mutant_b_desc"><text>Синяя составляющая цвета охоты (0-255). Работает только при «Свои цвета» выше. По умолчанию 72.</text></string>
+	<string id="ui_mcm_iqm_bounty_r"><text>Заказ: красный</text></string>
+	<string id="ui_mcm_iqm_bounty_r_desc"><text>Красная составляющая цвета заказа (0-255). Работает только при «Свои цвета» выше. По умолчанию 172. Если меняете из-за того, что стандартный плохо видно, повышайте светлоту, а не насыщенность: более яркий красный той же светлоты сливается с зелёным сданного задания при красно-зелёном нарушении.</text></string>
+	<string id="ui_mcm_iqm_bounty_g"><text>Заказ: зелёный</text></string>
+	<string id="ui_mcm_iqm_bounty_g_desc"><text>Зелёная составляющая цвета заказа (0-255). Работает только при «Свои цвета» выше. По умолчанию 60.</text></string>
+	<string id="ui_mcm_iqm_bounty_b"><text>Заказ: синий</text></string>
+	<string id="ui_mcm_iqm_bounty_b_desc"><text>Синяя составляющая цвета заказа (0-255). Работает только при «Свои цвета» выше. По умолчанию 66.</text></string>
+
 	<string id="ui_mcm_iqm_map_spot_names"><text>Имена NPC на карте</text></string>
 	<string id="ui_mcm_iqm_map_spot_names_desc"><text>Добавлять имя NPC в подсказку, которая появляется при наведении на его отметку на карте ПДА, рядом с родом занятий: торговцы, техники, бармены, медики, проводники и важные персонажи. Применяется сразу, выключение возвращает прежний текст.</text></string>
 	<string id="ui_mcm_iqm_map_hide_companions"><text>Без метки отряда у спутников</text></string>

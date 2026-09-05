@@ -1180,6 +1180,108 @@ local function patch_legend(xml_obj, xml_file_name)
 	printf("%s: DXML patched %s legend rows in %s", addon_name, n, xml_file_name)
 end
 
+-- --------------------------------------------------------------------------
+-- THE TASK-KIND PALETTE (R2.64): repainting the two pins this file did not author
+-- --------------------------------------------------------------------------
+-- The mutant hunt's and the bounty's spot types are IQM's OWN, declared whole in
+-- ui/iqm_map_spots.xml and spliced into this DOM by the include below rather than patched
+-- onto anything the game ships -- so their tints arrive as XML attributes and the SPOTS
+-- loop never sees them. When map_palette is anything but Default those attributes are
+-- wrong, and this is the pass that corrects them.
+--
+-- Everything about WHY the alternative palettes are what they are lives in KIND_PALETTE in
+-- iqm_beacon, and the four sets of numbers with it. This file holds no colours: the whole
+-- point of the resolver being over there is that the map and the world marker cannot end
+-- up quoting two different palettes at each other, which is the mirror rule this mod's
+-- colour harness exists to enforce.
+--
+-- WHICH ELEMENTS. Each kind is two spot types -- the fullscreen map's and the minimap's --
+-- and each of those hand-writes the kind's tint on up to four children: its own <texture>,
+-- the <texture> inside its <static_border> (the frame shown while that task is selected),
+-- and on the mini spot the two off-level swaps. Twelve elements for two colours, and the
+-- colour harness already asserts that every one of them agrees in the shipped XML, so
+-- missing one here would be caught by eye before it was caught by anything else: a bounty
+-- whose off-level arrow is still red two floors up.
+local KIND_SPOTS = {
+	mutant = { "iqm_task_mutant_spot", "iqm_task_mutant_spot_mini" },
+	bounty = { "iqm_task_bounty_spot", "iqm_task_bounty_spot_mini" },
+}
+-- ...and the child selectors, appended to each spot id above. The chained
+-- "> static_border > texture" is the same three-level form the SPOTS table already uses
+-- for the storyline and secondary selection frames, so the syntax is well-trodden. A
+-- selector that matches nothing (texture_above/_below exist only on the mini spots)
+-- returns an empty query and costs a loop that does not run.
+local KIND_TINTED = { "> texture", "> static_border > texture",
+                      "> texture_below", "> texture_above" }
+
+--- Which task-kind palette the player asked for, and their own channels if they built one.
+--
+--  Read straight from MCM and not from iqm_core.C, for the reason icons_on below states
+--  and with the same failure discipline: this is a modxml with no apply_config and no
+--  on_game_start, running on whatever frame the engine first parses map_spots.xml, so
+--  going through iqm_core would make the answer depend on two modules' relative readiness
+--  at that instant -- a race whose losing side is invisible.
+--
+--  DEFAULTS TO 0 at every failure, which is the only safe direction: 0 means "leave the
+--  XML alone", so no MCM, no registered menu, a key never written and a key renamed all
+--  land on the palette the file is authored with rather than on a colour nobody chose.
+local function palette_mode()
+	if not (ui_mcm and ui_mcm.get) then return 0 end
+	local ok, v = pcall(ui_mcm.get, "iqm/general/map_palette")
+	if not ok or type(v) ~= "number" then return 0 end
+	return v
+end
+--- One custom channel, or nil. `nil` is a real answer and not an error: kind_rgb treats a
+--  missing channel as "fall back to the shipped palette entirely", which is what stops a
+--  half-written settings file painting a pin black. Same pcall for the same reason.
+local function kind_channel(kind, ch)
+	if not (ui_mcm and ui_mcm.get) then return nil end
+	local ok, v = pcall(ui_mcm.get, "iqm/general/" .. kind .. "_" .. ch)
+	if not ok or type(v) ~= "number" then return nil end
+	return v
+end
+
+--- Repaint the two task-kind spot types to the chosen palette. No-op on Default.
+--
+--  RUNS BEFORE THE map_icons ESCAPE HATCH, deliberately. That switch is about IQM
+--  REPLACING the game's art; these two types are IQM ADDING its own, and iqm_taskspot puts
+--  tasks on them whether or not the vanilla spots were left alone. A player on vanilla
+--  icons who has asked for the deuteranopia palette still gets it on the only two pins
+--  this mod declares for itself.
+--
+--  ...AND BEFORE restyle_s2, which reads each element's current r/g/b back to decide what
+--  colour its selection frame takes (see the `tint` table there). Running after it would
+--  leave the frame quoting the palette this pass has just replaced -- a blue bounty in a
+--  red diamond. The S2 pass keeps these two tints either way: S2_KEEP_COLOUR is keyed on
+--  the TEXTURE ID (iqm_mapspot_taskbounty / _taskmutant) and not on the colour, so nothing
+--  here has to be mirrored into S2_KEEP_RGB.
+local function retint_kinds(xml_obj, xml_file_name)
+	local mode = palette_mode()
+	if mode == 0 then return end
+	-- Soft, like every other cross-module reach in this file: without iqm_beacon there is
+	-- no resolver and no palette, and the shipped tints in the XML are the right answer.
+	local resolve = iqm_beacon and iqm_beacon.kind_rgb
+	if not resolve then return end
+	local n = 0
+	for kind, spots in pairs(KIND_SPOTS) do
+		local c = resolve(kind, mode, kind_channel(kind, "r"),
+		                              kind_channel(kind, "g"),
+		                              kind_channel(kind, "b"))
+		if c then
+			for _, spot in ipairs(spots) do
+				for _, tail in ipairs(KIND_TINTED) do
+					for _, el in ipairs(xml_obj:query(spot .. " " .. tail) or {}) do
+						xml_obj:setElementAttr(el, { r = c[1], g = c[2], b = c[3] })
+						n = n + 1
+					end
+				end
+			end
+		end
+	end
+	printf("%s: DXML retinted %s task-kind elements (map_palette %s) in %s",
+	       addon_name, n, mode, xml_file_name)
+end
+
 --- Is the mod's own map art wanted, or should the game keep vanilla's?
 --
 --  Reads iqm/general/map_icons straight from MCM rather than from iqm_core.C, and that
@@ -1290,6 +1392,15 @@ function on_xml_read()
 		elseif iqm_task_spots_declared ~= false then
 			iqm_task_spots_declared = true
 		end
+
+		-- ...and repaint those two types if the player asked for another palette (R2.64).
+		-- Placed here rather than in the SPOTS loop below because these are the types the
+		-- splice above just added, not elements of the game's that this file patches -- see
+		-- retint_kinds for why that also puts it ahead of the map_icons escape hatch and
+		-- ahead of the S2 restyle. Unguarded by `missing`: a stale XML that is short a type
+		-- simply has nothing for the query to find, and the flag above has already stood the
+		-- feature down.
+		retint_kinds(xml_obj, xml_file_name)
 
 		-- THE VANILLA-ICONS ESCAPE HATCH (R2.48). Everything above is IQM ADDING its own
 		-- spot types, which no vanilla marker depends on and which the flags gate; below

@@ -27,6 +27,8 @@ waypoint marker were built out of) and `docs/minimap-route.md` (F3, the trail).
 - [`map_icons`](#map_icons) — why it needs a restart and cannot not
 - [`map_icon_style`](#map_icon_style) — the STALKER 2 diamonds, and the two things they stop saying
 - [`map_task_kinds`](#map_task_kinds) — the skull and the red reticle, and what they cost
+- [`map_palette`](#map_palette) — the hunt and bounty colours, and the defect the request uncovered
+- [`mutant_r` / `bounty_r` / …](#mutant_r--mutant_g--mutant_b--bounty_r--bounty_g--bounty_b) — the six custom channels
 - [`map_spot_names`](#map_spot_names) — the NPC's name in a map pin's tooltip
 - [`map_hide_companions`](#map_hide_companions) — the one map row that removes a mark instead of redrawing one
 - [`noise`](#noise) — interference: why it is on by default, and why the tiers are not options
@@ -494,6 +496,96 @@ goes nil once the objective is done, and the marker's [`beacon_handin`](#beacon_
 gate hides the marker *until* it is. So at default settings these glyphs are a PDA-map
 feature; with the hand-in gate off they also dress the world marker, which is exactly when
 knowing whether the objective is a mutant or a man is worth something.
+
+---
+
+### `map_palette`
+
+**It came from a report, and the report was righter than it knew.** *"Different color
+options or a color slider would be nice. I like the new style, but I've a bit of a hard
+time seeing them on the map (thanks deuteranopia)."* The obvious reading is a colour-vision
+request. Measuring it turned up a defect that is not about colour vision at all:
+
+| | RGB | L\* | contrast vs mean terrain |
+|---|---|---|---|
+| mutant lime | 176,216,72 | 81.2 | 3.01:1 |
+| bounty red | 172,60,66 | **41.8** | **1.22:1** |
+
+**The bounty red is a visibility problem before it is a colour-vision one.** It is 20
+points of L\* darker than anything else in the task family, and 1.22:1 against the terrain
+the palette was sampled off (mean 119,111,100) is invisible to everybody. Normal vision
+compensates with hue. Red-green deficiency removes the hue and leaves what is actually
+there. The mutant lime, by the same measure, is fine and always was — it simulates almost
+unchanged.
+
+**The obvious fix is a trap**, and it is worth stating because it is the first thing anyone
+tries. Brightening the red in place — 232,72,72 — lands it dE 3.2 from the turn-in green
+under deuteranopia. They become the same colour. Today's dark red is dE 20.3 from that
+green. So the intuitive repair makes the map *worse* for the player who reported it while
+looking like an improvement to whoever shipped it. The colour harness now fails on exactly
+that edit, with exactly that number.
+
+**Why presets rather than only sliders.** Both, in the end — the report asked for both —
+but the presets are the part that carries knowledge. A dichromat's colour space is roughly
+{dark…light} × {blue…yellow}, and the task family already crowds the yellow half: the
+storyline gold, the timed-task orange, the turn-in green and the shipped lime all simulate
+to yellows within dE 22 of one another. The blue half is empty. Finding that out is not
+something a player should have to do with six sliders and no measuring instrument, so the
+three deficiency sets do it for them and the sliders stay for anyone who wants their own.
+
+**Every preset value is measured**, against the floors the rest of the palette already
+works to, in normal vision *and* under simulation — both, because the screen is shared even
+when the setting is not. The one that killed four candidate sets was not separation from
+the palette; it was separation from *each other*. Two colours can each clear the family
+comfortably and collapse onto one another once simulated, which is precisely the
+distinction the option exists to protect. A cyan/periwinkle pair scored dE 68 and dE 70
+against the family and dE 20.0 against itself.
+
+The numbers, the four sets and the reasoning per deficiency live in `KIND_PALETTE` in
+`iqm_beacon.script`; the floors are asserted in `tools/color-harness`, which simulates
+rather than trusts.
+
+**Scope: the two kinds, and nothing else.** These presets move the mutant hunt and the
+bounty. The rest of the task family keeps its own deficiency collisions — the storyline
+gold against the timed orange (dE 18 deutan), the turn-in green against the question red
+(dE 17) — and those are deliberately out of scope. The storyline gold is the oldest colour
+convention on this map; moving it is a separate argument with a separate blast radius, and
+shape carries those pairs as it carries these.
+
+**It is half-live, and the label has to say so.** The world marker follows immediately;
+the PDA and minimap pins cannot, for the same reason [`map_icons`](#map_icons) and
+[`map_icon_style`](#map_icon_style) cannot — `g_uiSpotXml` is parsed once per process. So
+between changing the setting and restarting, the pin and the marker disagree, which is the
+state the mirror rule exists to prevent, held on purpose for the length of a session.
+Withholding the marker's half until the restart would not fix that; it would make *both*
+views wrong instead of one, and leave the player with no evidence the setting did anything.
+
+---
+
+### `mutant_r` / `mutant_g` / `mutant_b` / `bounty_r` / `bounty_g` / `bounty_b`
+
+**Six channels, read only when [`map_palette`](#map_palette) is Custom**, and shown
+regardless like every other inert row ([Preconditions](#preconditions)). Channels are
+step 1, as everywhere else ([Colour channel step](#colour-channel-step)).
+
+**They default to the shipped palette's own values**, which is the rule
+[`beacon_r`](#beacon_r--beacon_g--beacon_b) already follows: picking Custom must change
+nothing on screen until a channel is moved, so the mode is a starting position rather than
+a jump to some other colour. A player who came to lift the bounty a couple of stops does
+not have to rebuild it first.
+
+**They are restated as literals in the registry**, which is the one place in this mod a
+colour is deliberately written twice. The registry is a plain table built at file scope,
+before `iqm_beacon` exists to be read, so deriving them the way `beacon_r` derives from the
+accent's rows would be the load-order trap `on_game_start` exists to sit after. The colour
+harness closes the gap instead — it asserts all six against the XML literals, so a retune
+of the shipped palette that forgot these rows fails the gate rather than shipping a Custom
+mode that starts somewhere the map has never been.
+
+**A missing channel falls back to the whole default, not to zero.** `nil` for one channel
+is what a settings file predating this option reads, and `{ nil, 196, 122 }` indexed as
+`col[1]` draws a black marker — the one tint that vanishes completely on a keylined badge.
+All three or none.
 
 ---
 

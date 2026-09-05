@@ -300,6 +300,62 @@ OPTIONS = {
 -- reopened, which is what MCM's build-time evaluation costs. The label states the
 -- dependency in words instead.
 { key = "map_task_kinds", page = "general", def = true, type = "check" },
+-- WHAT COLOUR those two marks are (R2.64), and the only palette entry in this mod the
+-- player can move. It exists because of a report -- "I like the new style, but I've a bit
+-- of a hard time seeing them on the map (thanks deuteranopia)" -- and the measurements
+-- that came out of chasing it are in KIND_PALETTE in iqm_beacon, which is also where the
+-- four sets of numbers live. Read that note before touching any of this: the shipped
+-- bounty red is a VISIBILITY defect and not only a colour-vision one, and the obvious
+-- repair for it (a brighter red) is measurably worse for the eye that reported it.
+--
+-- FOUR PRESETS AND A CUSTOM, one list rather than a checkbox beside a colour picker, for
+-- the reason beacon_color is one list: what is being chosen is ONE thing -- what colour
+-- these two marks are -- and a flag crossed with the presets would let the player ask for
+-- the deuteranopia set and their own at the same time.
+--
+-- IT IS HALF-LIVE, AND THAT IS THE ONE THING THE LABEL HAS TO SAY. The world marker
+-- follows immediately (iqm_beacon.apply_config re-resolves both entries on the next config
+-- read); the PDA and minimap PINS cannot, because the engine parses map_spots.xml once per
+-- process -- g_uiSpotXml is a static built on the first map location and freed only at DLL
+-- detach (map_location.cpp:92-99, xrgame_dll_detach.cpp:132) -- exactly as map_icons and
+-- map_icon_style above are stuck for the same reason. So between changing this and
+-- restarting, the pin and the marker disagree, which is the state the mirror rule exists
+-- to prevent, and the label declares it rather than the code hiding it.
+-- rationale: docs/decisions.md#map_palette
+{ key = "map_palette", page = "general", def = 0, type = "list",
+  content = {
+	{ 0, "iqm_palette_default" },
+	{ 1, "iqm_palette_deutan"  },
+	{ 2, "iqm_palette_protan"  },
+	{ 3, "iqm_palette_tritan"  },
+	{ 4, "iqm_palette_custom"  },
+}},
+-- The two kinds' OWN colours, read only in map_palette mode 4 and idle in the other four
+-- -- shown regardless, like every other inert row (docs/decisions.md#preconditions).
+--
+-- DEFAULTS ARE THE SHIPPED PALETTE'S OWN VALUES, which is the rule beacon_r/g/b already
+-- follows and it is worth restating why: picking Custom must change nothing on screen
+-- until a channel is moved. The mode is then a STARTING POSITION rather than a jump to
+-- some other colour, so a player who came to lift the bounty a couple of stops does not
+-- have to rebuild it first -- and the pins cannot appear to change at the moment the mode
+-- is picked, which would read as the option doing something else entirely.
+--
+-- They are restated as literals here rather than read out of KIND_PALETTE, and that is a
+-- deliberate exception to how beacon_r/g/b takes its defaults from the accent's own rows.
+-- This registry is a plain table read at file scope, and iqm_beacon is not loaded yet when
+-- it is built -- a cross-module read here is the load-order trap on_game_start exists to
+-- sit after. The colour harness closes the gap instead: it asserts these six against the
+-- XML literals, so a retune of the shipped palette that forgot these rows fails the gate
+-- rather than shipping a Custom mode that starts somewhere the map never was.
+--
+-- EVERY COLOUR CHANNEL IS step 1, as on the accent, the marker and both route pages.
+-- rationale: docs/decisions.md#mutant_r--mutant_g--mutant_b--bounty_r--bounty_g--bounty_b
+{ key = "mutant_r", page = "general", def = 176, type = "track", min = 0, max = 255, step = 1 },
+{ key = "mutant_g", page = "general", def = 216, type = "track", min = 0, max = 255, step = 1 },
+{ key = "mutant_b", page = "general", def =  72, type = "track", min = 0, max = 255, step = 1 },
+{ key = "bounty_r", page = "general", def = 172, type = "track", min = 0, max = 255, step = 1 },
+{ key = "bounty_g", page = "general", def =  60, type = "track", min = 0, max = 255, step = 1 },
+{ key = "bounty_b", page = "general", def =  66, type = "track", min = 0, max = 255, step = 1 },
 -- The NPC's name in the tooltip of every PDA pin the game puts on a person: the four
 -- trade services, the fast-travel guide, and both important-character spots.
 -- INDEPENDENT OF map_icons, unlike the row above -- which iqm_taskspot re-tests in code

@@ -741,6 +741,296 @@ do
 	end
 end
 
+-- ==========================================================================
+-- 6. THE TASK-KIND PALETTE (R2.64), and the floors its numbers claim to meet
+-- ==========================================================================
+-- map_palette lets a player swap the mutant hunt's and the bounty's colours for one of
+-- three sets tuned for a colour-vision deficiency, or for six sliders of their own. The
+-- four sets live in KIND_PALETTE in iqm_beacon and the reasoning is all in the note above
+-- it; this is the part that has to be MEASURED rather than believed.
+--
+-- WHY IT NEEDS A HARNESS AT ALL, given nothing here mirrors anything. Every other colour
+-- in this file is checked by comparing two literals, and these have no twin: a preset is
+-- one set of numbers in one place. What they do have is a CONTRACT -- each set claims a
+-- minimum separation from the rest of the task family, from each other, and from the
+-- engine's relation dots, under the deficiency it is named for -- and that contract is
+-- the entire reason the sets are worth shipping. A preset that quietly stopped meeting it
+-- would look exactly like one that did: three plausible colours in a table, and the person
+-- they are for is the last person able to check.
+--
+-- It also guards the direction that actually goes wrong, which is not these values being
+-- edited. It is the REST OF THE PALETTE moving underneath them. Retune the storyline gold
+-- or the timed orange a couple of stops and a preset that cleared it by dE 29 no longer
+-- does, in a file nobody thought they were touching.
+--
+-- WHAT IS SIMULATED, and its limits stated rather than implied. Vienot-Brettel-Mollon
+-- (1999) dichromat projection in linear sRGB, which is the standard construction and the
+-- one every CVD simulator in general use is a variant of. It models DICHROMACY -- the
+-- complete absence of a cone class -- and so is the strong case; the far commoner
+-- anomalous trichromacies (deuteranomaly and the rest) sit somewhere between it and normal
+-- vision, so a palette that clears these floors clears theirs. It is not a model of any
+-- individual's vision and nothing here should be read as one: it is a consistent yardstick
+-- that catches a colour pair collapsing, which is what a harness can honestly do.
+local function lin(v)
+	v = v / 255
+	if v <= 0.04045 then return v / 12.92 end
+	return ((v + 0.055) / 1.055) ^ 2.4
+end
+
+--- CIE L*a*b*, D65. Used only for dE76 below, which is why there is no inverse.
+local function lab(c)
+	local r, g, b = lin(c[1]), lin(c[2]), lin(c[3])
+	local X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+	local Y = (0.2126 * r + 0.7152 * g + 0.0722 * b)
+	local Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+	local function f(t)
+		if t > 216 / 24389 then return t ^ (1 / 3) end
+		return (841 / 108) * t + 4 / 29
+	end
+	local fx, fy, fz = f(X), f(Y), f(Z)
+	return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+end
+
+--- CIE76. Plain euclidean in Lab, and deliberately not CIEDE2000: the whole palette is
+--- specified in dE76 (see THE PALETTE in modxml_n_iqm_map_icons, which states its dE 28
+--- floor in these units), and two metrics disagreeing about whether a colour passes is
+--- worse than one metric being coarse. The coarseness is also the safe direction here --
+--- dE76 overstates differences in the blues, which is exactly where the presets go.
+local function dE(a, b)
+	local l1, a1, b1 = lab(a)
+	local l2, a2, b2 = lab(b)
+	return math.sqrt((l1 - l2) ^ 2 + (a1 - a2) ^ 2 + (b1 - b2) ^ 2)
+end
+
+--- WCAG relative luminance and contrast ratio, for the half of the report that was never
+--- about hue: the shipped bounty red is DARK, and a preset that fixed its hue and left it
+--- at 1.2:1 against the ground would have missed the complaint.
+local function lum(c)
+	return 0.2126 * lin(c[1]) + 0.7152 * lin(c[2]) + 0.0722 * lin(c[3])
+end
+local function contrast(a, b)
+	local x, y = lum(a), lum(b)
+	if x < y then x, y = y, x end
+	return (x + 0.05) / (y + 0.05)
+end
+
+local function clamp255(v)
+	if v < 0 then return 0 elseif v > 255 then return 255 end
+	return v
+end
+local function unlin(v)
+	if v <= 0.0031308 then v = 12.92 * v else v = 1.055 * v ^ (1 / 2.4) - 0.055 end
+	return math.floor(clamp255(v * 255) + 0.5)
+end
+
+--- Vienot 1999 dichromat projection. sRGB -> LMS, collapse the missing cone onto the plane
+--- the other two span, and back. The three branches are the three cone classes.
+local function simulate(c, kind)
+	local r, g, b = lin(c[1]), lin(c[2]), lin(c[3])
+	local L = 17.8824 * r + 43.5161 * g + 4.11935 * b
+	local M = 3.45565 * r + 27.1554 * g + 3.86714 * b
+	local S = 0.0299566 * r + 0.184309 * g + 1.46709 * b
+	if kind == "deutan" then
+		M = 0.494207 * L + 1.24827 * S
+	elseif kind == "protan" then
+		L = 2.02344 * M - 2.52581 * S
+	elseif kind == "tritan" then
+		S = -0.395913 * L + 0.801109 * M
+	end
+	return { unlin(0.080944 * L - 0.130504 * M + 0.116721 * S),
+	         unlin(-0.0102485 * L + 0.0540194 * M - 0.113615 * S),
+	         unlin(-0.000365294 * L - 0.00412163 * M + 0.693513 * S) }
+end
+
+-- The KIND_PALETTE table, read from iqm_beacon's source text like every other table here.
+-- Mode 0's two entries are NOT literals -- they are `BEACON_RGB.mutant` / `.bounty`, so
+-- Default cannot drift from the shipped tints -- which is asserted separately below and is
+-- why this pattern only picks up the numeric rows.
+local KP = {}
+do
+	local blk = markers_src:match("local KIND_PALETTE%s*=%s*{(.-)\n}")
+	assert(blk, "KIND_PALETTE block not found in iqm_beacon.script")
+	for mode, body in blk:gmatch("%[(%d+)%]%s*=%s*{(.-)}%s*,?%s*\n") do
+		local e = {}
+		for k, r, g, b in body:gmatch("([%w_]+)%s*=%s*{%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*}") do
+			e[k] = { tonumber(r), tonumber(g), tonumber(b) }
+		end
+		if next(e) then KP[tonumber(mode)] = e end
+	end
+	-- Mode 0 is the derived row and so parses to nothing above; assert the DERIVATION
+	-- instead. A literal here would still pass every floor below while quietly becoming a
+	-- second copy of the shipped palette for somebody to forget.
+	check("map_palette mode 0 derives from BEACON_RGB, not restated",
+	      blk:match("%[0%]%s*=%s*{%s*mutant%s*=%s*BEACON_RGB%.mutant%s*,%s*bounty%s*=%s*BEACON_RGB%.bounty%s*}") ~= nil,
+	      "KIND_PALETTE[0] must read the two entries out of BEACON_RGB")
+	KP[0] = { mutant = BRGB.mutant, bounty = BRGB.bounty }
+end
+
+-- The TASK-MARK FAMILY: everything one of these two pins can stand beside. Read out of
+-- SPOT rather than restated, so a retune anywhere in the family is measured against the
+-- presets on the next run -- which is the drift this section is really here to catch.
+local FAMILY_SEL = {
+	["storyline gold"]  = "storyline_task_spot",
+	["secondary pale"]  = "secondary_task_spot",
+	["turn-in green"]   = "storyline_task_on_guider_spot",
+	["ATUE border"]     = "atue_return_task_spot > static_border",
+	["timed orange"]    = "secondary_task_complex_spot_mini_timer",
+	["question red"]    = "red_spot",
+}
+-- The engine's own relation dots, which are transient, tactical, and outrank every mark
+-- in this mod. Literals because they are the ENGINE's (map_spots_relations) and this mod
+-- neither writes nor patches them -- there is no copy of ours for these to mirror.
+local DOTS = { friend = {0, 255, 0}, enemy = {237, 28, 36}, neutral = {255, 240, 0} }
+-- The terrain a PDA pin sits on, sampled from a screenshot with the markers dropped: mean
+-- and shadow. Stated in modxml_n_iqm_map_icons' palette note (measurement 1), restated
+-- here because it is a measurement of the GAME and not a value this mod declares anywhere
+-- a harness could read.
+local TERRAIN, SHADOW = { 119, 111, 100 }, { 46, 44, 40 }
+
+-- The floors. Every one of them is a number the KIND_PALETTE note claims in prose, and
+-- pinning them here is the point: prose that has drifted from the table reads exactly like
+-- prose that has not.
+local KIND_FLOOR, PAIR_FLOOR, DOT_FLOOR = 28, 28, 25
+local TERRAIN_FLOOR, SHADOW_FLOOR = 1.65, 4.6
+
+local PRESETS = { [1] = "deutan", [2] = "protan", [3] = "tritan" }
+for mode, kind in pairs(PRESETS) do
+	local set = KP[mode]
+	check("map_palette mode " .. mode .. " (" .. kind .. ") is declared", set ~= nil)
+	if set then
+		local m, b = set.mutant, set.bounty
+		check(kind .. ": both kinds have a colour", m ~= nil and b ~= nil)
+		if m and b then
+			-- Both eyes, every time. A preset is opt-in but the screen is not: whoever
+			-- else looks at that PDA has ordinary colour vision, and a set that only
+			-- worked under its own simulation would trade one player's problem for
+			-- everyone else's.
+			for _, view in ipairs{ { "normal", nil }, { kind, kind } } do
+				local label, sk = view[1], view[2]
+				local function seen(c) return sk and simulate(c, sk) or c end
+				for name, sel in pairs(FAMILY_SEL) do
+					local other = SPOT[sel]
+					check(string.format("%s/%s: mutant clears %s", kind, label, name),
+					      other ~= nil and dE(seen(m), seen(other)) >= KIND_FLOOR,
+					      other and string.format("dE %.1f, floor %d", dE(seen(m), seen(other)), KIND_FLOOR)
+					              or ("no spot " .. sel))
+					check(string.format("%s/%s: bounty clears %s", kind, label, name),
+					      other ~= nil and dE(seen(b), seen(other)) >= KIND_FLOOR,
+					      other and string.format("dE %.1f, floor %d", dE(seen(b), seen(other)), KIND_FLOOR)
+					              or ("no spot " .. sel))
+				end
+				-- THE ONE THAT KILLED FOUR CANDIDATE SETS. Two colours can each be well
+				-- clear of the family and land on EACH OTHER once simulated, which is
+				-- precisely the distinction the option exists to protect -- and it is
+				-- invisible in any view that checks a colour against the palette one at
+				-- a time.
+				check(string.format("%s/%s: the two kinds stay apart", kind, label),
+				      dE(seen(m), seen(b)) >= PAIR_FLOOR,
+				      string.format("dE %.1f, floor %d", dE(seen(m), seen(b)), PAIR_FLOOR))
+			end
+			for who, c in pairs{ mutant = m, bounty = b } do
+				for dot, dc in pairs(DOTS) do
+					check(string.format("%s: %s clears the %s dot", kind, who, dot),
+					      dE(c, dc) >= DOT_FLOOR,
+					      string.format("dE %.1f, floor %d", dE(c, dc), DOT_FLOOR))
+				end
+				-- ...and the visibility half of the report, measured on what the eye the
+				-- preset is FOR actually receives. Protanopia attenuates red outright, so
+				-- a candidate's contrast is not a property of its bytes.
+				local s = simulate(c, kind)
+				check(string.format("%s: %s reads against mean terrain", kind, who),
+				      contrast(s, TERRAIN) >= TERRAIN_FLOOR,
+				      string.format("%.2f:1, floor %.2f", contrast(s, TERRAIN), TERRAIN_FLOOR))
+				check(string.format("%s: %s reads against shadow", kind, who),
+				      contrast(s, SHADOW) >= SHADOW_FLOOR,
+				      string.format("%.2f:1, floor %.1f", contrast(s, SHADOW), SHADOW_FLOOR))
+				for i = 1, 3 do
+					check(string.format("%s: %s channel %d is a byte", kind, who, i),
+					      c[i] and c[i] >= 0 and c[i] <= 255)
+				end
+			end
+		end
+	end
+end
+
+-- CUSTOM HAS NO ROW, and that is a rule rather than an omission: mode 4 is the six
+-- sliders, and a fifth palette sitting behind them is a set of numbers that disagrees with
+-- what the player set.
+check("map_palette mode 4 (custom) has no preset row", KP[4] == nil)
+
+-- THE MENU. Same shape as beacon_color's block above: the list values the registry offers
+-- must be the modes the palette answers for, and the six channels must start where the map
+-- already is.
+do
+	local row = opt_row("map_palette")
+	check("map_palette has a registry record", row ~= nil)
+	check("map_palette is mapped to the general page",
+	      row and row:match('page = "general"') ~= nil)
+	check("map_palette defaults to 0 (the shipped palette)",
+	      row and row:match("def = 0,") ~= nil)
+	local vals, strs = {}, {}
+	if row then
+		for v, s in row:gmatch("{%s*(%d+)%s*,%s*\"([%w_]+)\"%s*}") do
+			vals[tonumber(v)] = true
+			strs[#strs + 1] = s
+		end
+	end
+	for mode = 0, 4 do
+		check("map_palette offers mode " .. mode, vals[mode] == true)
+	end
+	check("map_palette offers no mode the palette cannot answer",
+	      (function()
+	      	for v in pairs(vals) do
+	      		if v ~= 4 and KP[v] == nil then return false end
+	      	end
+	      	return true
+	      end)())
+
+	-- The six channels. THE DEFAULTS ARE THE CHECK THAT MATTERS: the registry restates the
+	-- shipped lime and red as literals -- it has to, since it is built at file scope before
+	-- iqm_beacon exists to be read -- and this is what stops those six numbers becoming a
+	-- third copy of the palette that drifts. Retune a kind's tint in the XML without moving
+	-- these and Custom starts somewhere the map has never been.
+	for _, k in ipairs{ "mutant", "bounty" } do
+		local shipped = SPOT["iqm_task_" .. k .. "_spot"]
+		for i, ch in ipairs{ "r", "g", "b" } do
+			local key = k .. "_" .. ch
+			local r = opt_row(key)
+			check(key .. " has a registry record", r ~= nil)
+			check(key .. " is mapped to the general page",
+			      r and r:match('page = "general"') ~= nil)
+			check(key .. " defaults to the shipped " .. k .. " tint",
+			      r and shipped and tonumber(r:match("def =%s*(%d+)")) == shipped[i],
+			      string.format("map has %s, slider has %s", tostring(shipped and shipped[i]),
+			                    tostring(r and r:match("def =%s*(%d+)"))))
+			-- step 1, the rule every colour channel in this mod follows
+			-- (docs/decisions.md#colour-channel-step)
+			check(key .. " steps by 1", r and r:match("step = 1%s*}") ~= nil)
+			check(key .. " covers the full byte",
+			      r and r:match("min = 0,") ~= nil and r:match("max = 255,") ~= nil)
+		end
+	end
+
+	for _, loc in ipairs{ "eng", "rus" } do
+		local xml = slurp("gamedata/configs/text/" .. loc .. "/st_mcm_iqm.xml")
+		check(loc .. ": map_palette caption", xml:find('"ui_mcm_iqm_map_palette"', 1, true) ~= nil)
+		check(loc .. ": map_palette description",
+		      xml:find('"ui_mcm_iqm_map_palette_desc"', 1, true) ~= nil)
+		for _, s in ipairs(strs) do
+			check(loc .. ": palette list string " .. s,
+			      xml:find('"ui_mcm_lst_' .. s .. '"', 1, true) ~= nil)
+		end
+		for _, k in ipairs{ "mutant", "bounty" } do
+			for _, ch in ipairs{ "r", "g", "b" } do
+				check(loc .. ": " .. k .. "_" .. ch .. " caption",
+				      xml:find('"ui_mcm_iqm_' .. k .. "_" .. ch .. '"', 1, true) ~= nil)
+				check(loc .. ": " .. k .. "_" .. ch .. " description",
+				      xml:find('"ui_mcm_iqm_' .. k .. "_" .. ch .. '_desc"', 1, true) ~= nil)
+			end
+		end
+	end
+end
+
 -- ------------------------------------------------------------------ verdict
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then os.exit(1) end
