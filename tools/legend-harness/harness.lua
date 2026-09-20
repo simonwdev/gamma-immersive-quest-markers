@@ -1,6 +1,7 @@
 -- Harness: run the REAL DXML pipeline over the REAL PDA files and check that
 -- modxml_n_iqm_map_icons rewrites them the way it claims to - the symbols panel in
--- pda_tasks_16.xml, and the squad markers in map_spots_16.xml.
+-- pda_tasks_16.xml, and the squad markers, the S2 restyle and the task-marker size
+-- slider in map_spots_16.xml.
 --
 -- WHY THIS ONE EXISTS. A DXML patch has no failure mode that says anything. A query that
 -- matches nothing, a callback registered too early, a file name spelled with the wrong
@@ -15,13 +16,16 @@
 -- (dxml_core.script:977, "Called from ScriptXMLInit.cpp"). No mocking of the parser, the
 -- query engine or the serializer -- those are the parts most likely to be misunderstood.
 --
--- Paths into the install are unavoidable here and are checked first: on a machine
--- without GAMMA at D:\gamma0.9.5 this SKIPS rather than fails, so check-lua.py stays
--- green anywhere while still proving the patch on the machine that has the game.
+-- Paths into the install are unavoidable here and are checked first: on a machine with
+-- no GAMMA this SKIPS rather than fails, so check-lua.py stays green anywhere while still
+-- proving the patch on a machine that has the game. The roots are DISCOVERED (env var,
+-- then the layouts the installers produce) rather than typed, which they were until R2.65
+-- -- see the note on first_file for why a hardcoded root is worse than no harness.
 --
 -- Usage:
 --   luajit tools/legend-harness/harness.lua
 --   VERBOSE=1 luajit tools/legend-harness/harness.lua
+--   IQM_ANOMALY=<...>/anomaly IQM_MODS=<...>/mods luajit tools/legend-harness/harness.lua
 
 local passed, failed = 0, 0
 local function check(label, cond, detail)
@@ -37,9 +41,6 @@ end
 local here = arg and arg[0] and arg[0]:gsub("[^/\\]+$", "") or ""
 local ROOT = here .. "../../"
 
-local GAME = "D:/gamma0.9.5/Anomaly/"
-local AL   = "D:/gamma0.9.5/GAMMA/mods/AlphaLion's Reworked Stash Quest and Map Markers/"
-
 local function slurp(path)
 	local f = io.open(path, "rb")
 	if not f then return nil end
@@ -48,14 +49,56 @@ local function slurp(path)
 	return s
 end
 
+--- The first of these paths that is actually readable, or nil.
+--
+--  VARARGS, not a table, and that is not a style choice: an unset env var makes the first
+--  candidate nil, and ipairs over a table stops dead at the first hole -- so every
+--  fallback after it would be skipped on exactly the machines the fallbacks are for.
+--  select("#", ...) counts the nil.
+local function first_file(...)
+	for i = 1, select("#", ...) do
+		local p = select(i, ...)
+		if p and slurp(p) then return p end
+	end
+end
+
+-- WHERE THE INSTALL IS. Two roots, both discovered rather than typed, and the reason is
+-- worth recording because it is a failure this harness had rather than one it caught: the
+-- paths were hardcoded to one machine's D:\gamma0.9.5 until R2.65, so everywhere else --
+-- including the machine the mod moved to -- this skipped. A skip prints "0 passed, 0
+-- failed" and check-lua.py reports it as ok, which means the ONE harness that runs the
+-- real DXML pipeline over the real files spent that time green by not running. Env var
+-- first, then the layouts the GAMMA installers produce.
+local AL_PROBE = "AlphaLion's Reworked Stash Quest and Map Markers/gamedata/configs/ui/pda_tasks_16.xml"
+
+local GAME = first_file(os.getenv("IQM_ANOMALY") and
+                          os.getenv("IQM_ANOMALY") .. "/gamedata/scripts/dxml_core.script",
+                        "D:/gamma0.9.5/Anomaly/gamedata/scripts/dxml_core.script",
+                        "C:/games/gamma0.9.5/anomaly/gamedata/scripts/dxml_core.script")
+GAME = GAME and GAME:gsub("gamedata/scripts/dxml_core%.script$", "") or ""
+
+local MODS = first_file(os.getenv("IQM_MODS") and os.getenv("IQM_MODS") .. "/" .. AL_PROBE,
+                        "D:/gamma0.9.5/GAMMA/mods/" .. AL_PROBE,
+                        "C:/games/gamma0.9.5/gamma/mods/" .. AL_PROBE)
+MODS = MODS and MODS:gsub("AlphaLion's.*$", "") or ""
+
+local AL = MODS .. "AlphaLion's Reworked Stash Quest and Map Markers/"
+
 local SRC = {
 	slaxml  = GAME .. "gamedata/scripts/slaxml.script",
 	dxml    = GAME .. "gamedata/scripts/dxml_core.script",
 	al      = AL   .. "gamedata/configs/ui/pda_tasks_16.xml",
 	vanilla = GAME .. "tools/_unpacked/configs/ui/pda_tasks_16.xml",
-	-- The winning copy of the spot file in this pack, per the VFS manifest. Sota UI
-	-- beats Display Campfires on Map for it; both ship one.
-	spots   = "D:/gamma0.9.5/GAMMA/mods/Sota UI EGUI Style HUD/gamedata/configs/ui/map_spots_16.xml",
+	-- The winning copy of the spot file, and WHICH MOD WINS IT DEPENDS ON THE MODLIST --
+	-- Sota UI on one install, Display Campfires on Map on another; both ship one, and a
+	-- list with neither falls back to the base game's. That is not a compromise here:
+	-- what is asserted below is what OUR callback does to whatever file it is handed, and
+	-- every candidate carries the same 28/20/2 squad elements, which the input check
+	-- further down asserts rather than assumes.
+	spots   = first_file(MODS .. "Sota UI EGUI Style HUD/gamedata/configs/ui/map_spots_16.xml",
+	                     MODS .. "226- Display Campfires on Map - Maid/gamedata/configs/ui/map_spots_16.xml",
+	                     GAME .. "tools/_unpacked/configs/ui/map_spots_16.xml")
+	           or (GAME .. "tools/_unpacked/configs/ui/map_spots_16.xml"),
 }
 for _, p in pairs(SRC) do
 	if not slurp(p) then
@@ -157,7 +200,7 @@ ENV.FS = { FS_ListFiles = 1, FS_RootOnly = 2 }
 -- so the harness reads the copy that actually wins rather than the first one on disk -
 -- map_spots_milpda.xml is shipped by Milspec PDA and won by Personal Adjustable
 -- Waypoint, and a naive search would read the loser.
-local MANIFEST = "D:/gamma0.9.5/manifest/vfs_manifest.tsv"
+local MANIFEST = os.getenv("IQM_VFS_MANIFEST") or (GAME .. "../manifest/vfs_manifest.tsv")
 local UNPACKED = GAME .. "tools/_unpacked/configs/"
 
 local winner = {}
@@ -170,6 +213,32 @@ do
 		end
 		fh:close()
 	end
+end
+
+-- THE ENGINE EXPANDS #include BEFORE OUR CALLBACK EVER SEES THE DOCUMENT, and a fixture
+-- that does not do the same is testing a different string than the game hands us.
+-- CXml::Load writes the fully expanded document into its own buffer and only then calls
+-- XMLLuaCallback (xray-monolith xrXMLParser.cpp:130-143), so on_xml_read always receives
+-- one flat file. DXML's parse of that string does NOT re-expand it - the r_open above
+-- serves slaxml's own include handling, which is a different path - so feeding the raw
+-- file here silently dropped every element living in an include. That included
+-- secondary_task_complex_spot_mini_timer, the one id in TASK_SIZED that does, which meant
+-- the size pass had a hole in its coverage that every assertion still passed through.
+--
+-- Resolved through the same manifest as r_open, so an included file is read from the copy
+-- that actually WINS rather than the first one on disk. The prolog of an included file is
+-- stripped: it is spliced mid-document, where a second <?xml?> is not legal.
+local function expand(text, depth)
+	depth = depth or 0
+	if depth > 8 or not text then return text end
+	return (text:gsub('#include%s*"([^"]+)"', function(path)
+		local key = ("gamedata\\configs\\" .. path):gsub("/", "\\"):lower()
+		local body = winner[key] and slurp(winner[key])
+		           or slurp(UNPACKED .. path:gsub("\\", "/"))
+		           or slurp(ROOT .. "gamedata/configs/" .. path:gsub("\\", "/"))
+		if not body then return "" end
+		return expand((body:gsub("<%?xml.-%?>", "")), depth + 1)
+	end))
 end
 
 local function reader(text)
@@ -401,7 +470,7 @@ print("\n-- squad markers in the real spot file --------------------------------
 -- These entries also set NO r/g/b, which is load-bearing rather than an omission: the
 -- faction and relation colours already on those elements are the whole information the
 -- marker carries. So the tint surviving the patch is asserted too.
-local spots_in = slurp(SRC.spots)
+local spots_in = expand(slurp(SRC.spots))
 local spots_out = ENV.COnXmlRead([[ui\map_spots_16.xml]], spots_in)
 
 check("the spot file came back changed at all", spots_out ~= spots_in)
@@ -735,6 +804,170 @@ local back = ENV.COnXmlRead([[ui\map_spots_16.xml]], spots_in)
 check("style 0 draws the ring badges again", count(back, "iqm_mapspot_s2_") == 0
 	and back:find("iqm_mapspot_medic", 1, true) ~= nil)
 ENV.ui_mcm = nil
+
+print("\n-- the task marker size slider ----------------------------------------")
+
+-- The slider is a percentage of WHAT IS ON SCREEN, which is the whole reason it is
+-- asserted at both styles rather than once: 67% of the ring badge's 19 units is 13, and
+-- 67% of the S2 diamond's 23 is 15. Run the size pass before the S2 grow instead of after
+-- it and both come out 13 -- a plausible number, the wrong one, and one nobody would
+-- catch by looking at a minimap.
+local function sized(style, pct, badge, exit)
+	ENV.ui_mcm = { get = function(path)
+		if path == "iqm/general/map_icon_style" then return style end
+		if path == "iqm/general/map_task_size"  then return pct end
+		if path == "iqm/general/map_badge_size" then return badge end
+		if path == "iqm/general/map_exit_size"  then return exit end
+		if path == "iqm/general/map_icons"      then return true end
+		return nil
+	end }
+	local out = ENV.COnXmlRead([[ui\map_spots_16.xml]], spots_in)
+	ENV.ui_mcm = nil
+	return out
+end
+
+local small = sized(0, 67)
+check("a task spot takes 67% of the ring badge's 19 units",
+	attr(block(small, "storyline_task_spot"), "width") == 13,
+	(block(small, "storyline_task_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...on the minimap as well as the map",
+	attr(block(small, "storyline_task_spot_mini"), "width") == 13)
+check("...and the other tier with it",
+	attr(block(small, "secondary_task_spot"), "width") == 13)
+
+-- The same pin under the other style. This is the ordering assertion.
+local small_s2 = sized(1, 67)
+check("...and 67% of the S2 diamond's 23 units is 15, not 13",
+	attr(block(small_s2, "storyline_task_spot"), "width") == 15,
+	(block(small_s2, "storyline_task_spot") or ""):gsub("%s+", " "):sub(1, 140))
+
+-- THE SELECTION FRAME SHRINKS WITH THE PIN, which is the one place this pass deliberately
+-- differs from the S2 grow above. That one holds the frame's air constant because the
+-- mark changed SHAPE inside a frame tuned for the old one; this is the same picture at
+-- another size, and a 13-unit mark left inside a 29-unit ring is not that picture -- the
+-- frame stops reading as the mark's own and starts reading as a second mark around it.
+local small_border = (block(small, "storyline_task_spot") or ""):match("<static_border[ >].-</static_border>")
+check("the selection frame shrank too", attr(small_border, "width") == 19,
+	small_border and small_border:gsub("%s+", " "):sub(1, 140))
+do
+	local ok, why = centred(block(small, "storyline_task_spot"), small_border)
+	check("...and is still centred on the smaller icon", ok, why)
+end
+check("...with air left between the two", attr(small_border, "width") > 13)
+
+-- AND UNDER THE S2 STYLE, where the icon is 23 before this pass and its frame 33. This is
+-- the pair that forced the arithmetic: scaling the two rects independently gives 15 inside
+-- 22, an odd difference, and no integer offset centres that. scale_spot scales the AIR
+-- instead, so the border is icon + 2*air and the offset is exactly -air at any percentage.
+do
+	local s2b = (block(small_s2, "storyline_task_spot") or ""):match("<static_border[ >].-</static_border>")
+	check("the S2 frame comes out an even difference from its icon",
+		attr(s2b, "width") == 21, s2b and s2b:gsub("%s+", " "):sub(1, 140))
+	local ok, why = centred(block(small_s2, "storyline_task_spot"), s2b)
+	check("...so it is exactly centred, not a rounding away from it", ok, why)
+end
+
+-- THE REST OF THE TASK FAMILY. Each of these is here because it is a different SHAPE of
+-- entry in TASK_SIZED, not for coverage's sake: a spot with no static_border, a pin that
+-- is a halo rather than a mark, and one of the four types this mod declares itself and
+-- splices into the DOM a few lines before the pass runs.
+check("the turn-in pin scales (21 -> 14), and it has no frame to carry",
+	attr(block(small, "storyline_task_on_guider_spot"), "width") == 14,
+	(block(small, "storyline_task_on_guider_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("the new-task pulse scales with the mark it rings (39 -> 26)",
+	attr(block(small, "ui_storyline_task_blink_spot"), "width") == 26,
+	(block(small, "ui_storyline_task_blink_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...and keeps the 0,0 its SPOTS entry gave it",
+	attr(block(small, "ui_storyline_task_blink_spot"), "x") == 0)
+check("this mod's own bounty type scales too",
+	attr(block(small, "iqm_task_bounty_spot"), "width") == 13,
+	(block(small, "iqm_task_bounty_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...including its minimap twin",
+	attr(block(small, "iqm_task_bounty_spot_mini"), "width") == 13)
+
+-- THE ONE TASK_SIZED ID THAT LIVES IN AN #include rather than in the top-level file
+-- (map_spots_complex.xml). It is asserted separately because a fixture that quietly
+-- stopped expanding includes would pass every other check in this section: the timer pin
+-- would simply not be in the document, and a typo in its id would look exactly like a
+-- pass. slaxml resolves the include itself through the r_open above, so this also guards
+-- the VFS manifest lookup that picks WHICH copy of the included file gets read.
+check("the timed-task pin is in the document at all, includes and all",
+	block(small, "secondary_task_complex_spot_mini_timer") ~= nil)
+check("...and takes 67% of the 19 units its SPOTS entry gave it",
+	attr(block(small, "secondary_task_complex_spot_mini_timer"), "width") == 13,
+	(block(small, "secondary_task_complex_spot_mini_timer") or "<absent>"):gsub("%s+", " "):sub(1, 140))
+
+-- WHAT THE TASK SLIDER MUST NOT MOVE. Two of these three now have sliders of their own
+-- (R2.66), so for the badge and the level changer this is an INDEPENDENCE assertion: the
+-- three families are disjoint id lists, and one slider may never drag another's marks
+-- along with it. For the squad dot it remains what it always was, a promise rather than a
+-- behaviour -- no slider reaches it, because its size is not this mod's to pick (see the
+-- squad note in SPOTS).
+check("a service badge is left at 19", attr(block(small, "ui_pda2_medic_location_spot"), "width") == 19,
+	(block(small, "ui_pda2_medic_location_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("the level changer is left at 19", attr(block(small, "level_changer_up_spot"), "width") == 19)
+check("a squad dot is left at 13", attr(block(small, "warfare_duty_tex"), "width") == 13,
+	(block(small, "warfare_duty_tex") or ""):gsub("%s+", " "):sub(1, 140))
+
+-- 100 IS A NO-OP, byte for byte, and not merely "close". The pass returns before it
+-- queries anything at k == 1, so this also proves the default costs nothing on a load.
+check("100% changes nothing at all", sized(0, 100) == sized(0, nil))
+check("...and the same holds for the two sliders added after it",
+	sized(0, nil, 100, 100) == sized(0, nil))
+
+-- THE CLAMP. The value comes out of a settings file a player can edit by hand, and a
+-- stale key can outlive a rename. 0 would be a marker with no rect, which the engine
+-- draws as nothing and which looks exactly like this mod having broken.
+check("0 is clamped to the registry's floor of 50, not taken literally",
+	attr(block(sized(0, 0), "storyline_task_spot"), "width") == 10,
+	(block(sized(0, 0), "storyline_task_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...and an absurd high value to 150",
+	attr(block(sized(0, 9000), "storyline_task_spot"), "width") == 29)
+
+print("")
+print("-- the service badge and level transition sliders ----------------------")
+
+-- SAME PASS, TWO MORE LISTS (R2.66). These cover the two things a second and third family
+-- can get wrong that the first could not: that each slider moves its OWN marks, and that
+-- it moves NOBODY ELSE'S. The arithmetic itself is already covered above -- one scale_spot
+-- serves all three families, so there is nothing new to assert about the rects.
+local badges = sized(0, nil, 67, nil)
+check("a service badge takes 67% of its 19 units",
+	attr(block(badges, "ui_pda2_medic_location_spot"), "width") == 13,
+	(block(badges, "ui_pda2_medic_location_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...and its minimap twin 67% of 14, which is 9 and not 13",
+	attr(block(badges, "ui_pda2_medic_location_mini_spot"), "width") == 9,
+	(block(badges, "ui_pda2_medic_location_mini_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...across the whole family, not just the id under test",
+	attr(block(badges, "ui_pda2_quest_npc_location_spot"), "width") == 13)
+check("...while the task pins stay where they were",
+	attr(block(badges, "storyline_task_spot"), "width") == 19)
+check("...and the level changer with them",
+	attr(block(badges, "level_changer_up_spot"), "width") == 19)
+
+-- The level changer arrives at 19x21 in the shipped file and is squared to 19x19 by its
+-- own SPOTS entry, so 67% of it is 13 on BOTH axes. That squaring happens upstream of this
+-- pass, which is what the ordering note at the call site is about.
+local exits = sized(0, nil, nil, 67)
+check("the level changer takes 67% of the 19 units SPOTS squared it to",
+	attr(block(exits, "level_changer_up_spot"), "width") == 13,
+	(block(exits, "level_changer_up_spot") or ""):gsub("%s+", " "):sub(1, 140))
+check("...on both axes, because it was square before the scale",
+	attr(block(exits, "level_changer_up_spot"), "height") == 13)
+check("...and the minimap mark with it",
+	attr(block(exits, "level_changer_spot_mini"), "width") == 13)
+check("...while the badges stay where they were",
+	attr(block(exits, "ui_pda2_medic_location_spot"), "width") == 19)
+
+-- All three at once, which is the combination a player actually runs.
+local all3 = sized(0, 67, 67, 67)
+check("three sliders at 67 move three families and collide nowhere",
+	attr(block(all3, "storyline_task_spot"), "width") == 13
+	and attr(block(all3, "ui_pda2_medic_location_spot"), "width") == 13
+	and attr(block(all3, "level_changer_up_spot"), "width") == 13)
+check("...and the squad dot is still 13, which no slider reaches",
+	attr(block(all3, "warfare_duty_tex"), "width") == 13,
+	(block(all3, "warfare_duty_tex") or ""):gsub("%s+", " "):sub(1, 140))
 
 print(string.format("\n%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

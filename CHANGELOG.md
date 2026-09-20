@@ -2,6 +2,65 @@
 
 All notable changes to Immersive Quest Markers are documented here.
 
+## [0.14.0] - 2026-09-20
+
+### Added
+
+- **A size slider for task markers** — *MCM → General → Task marker size*, 50–150% of
+  the size this mod ships them at, 100 unchanged. From a report: *"size of quest
+  markers on minimap (and pda map too probably) — I would like them to be a bit
+  smaller, like 67% of current size."*
+  - **It is a percentage of what you are looking at**, not of some fixed number: the
+    ring badges draw a task pin at 19 units and the STALKER 2 diamonds at 23, so 67%
+    is 13 units in one style and 15 in the other. The pass runs after everything else
+    that writes spot geometry, which is the only way that can be true.
+  - **Scope is the task family**: both story tiers on the map and the minimap, the two
+    turn-in pins, the timed-task pin, the new-task pulse, the hunt, bounty, delivery
+    and hand-in marks, and *gamma-active-task-ui-enhancements*' return marker. The
+    squad dots keep their size — the same rule the squad dot has always followed,
+    which is that this mod does not choose sizes for marks it did not draw. The
+    service badges and the level transitions have sliders of their own, below.
+  - **The selection ring shrinks with the marker it frames**, and stays exactly centred
+    on it at every percentage and under either icon style.
+  - **Needs a restart**, like *Enable icons* and *Icon style*: the game reads spot
+    definitions once per process.
+
+- **Size sliders for the service badges and the level transitions** — *MCM → General
+  → Service badge size* and *Level transition size*, both 50–150% with 100 unchanged,
+  and both independent of the task slider.
+  - **Three sliders rather than one**, because the three families crowd different
+    things. Task pins crowd the route you are walking; the eight service badges crowd
+    the hub you are standing in, where they can all sit inside one building; and the
+    transition arch is the mark whose size is doing navigation rather than
+    identification — the one you go looking for on a level you do not know. One number
+    for all three would make a quieter map cost you a trader icon you can still read.
+  - **Service badge size** moves all eight badges — medic, trader, bed, mechanic,
+    barman, companion, important character and quest NPC — on the map and the minimap.
+    The map copies are 19 units and the minimap copies 14, so the same percentage gives
+    13 and 9 rather than one number written to both.
+  - **Level transition size** moves all nine elements at once: the eight compass
+    variants the PDA map picks between and the single minimap mark.
+  - **The squad dots keep their size under all three**, and that one stays a promise
+    rather than a setting: their size was fixed in the art precisely so this mod would
+    not be choosing a squad-dot size for Sota UI, AlphaLion and Milspec PDA.
+  - **Needs a restart**, for the same reason as the slider above it.
+
+### Fixed
+
+- `tools/legend-harness` — the one harness that runs the real DXML pipeline over the
+  real files — had its install paths hardcoded to one machine, so everywhere else it
+  skipped, printed *0 passed, 0 failed*, and was reported as green by `check-lua.py`.
+  The roots are discovered now (`IQM_ANOMALY` / `IQM_MODS`, then the usual layouts),
+  and the spot-file fixture falls back through Sota UI, Display Campfires and the base
+  game rather than naming one mod. It runs 139 assertions where it ran none.
+- `tools/legend-harness` was handing the DXML callback the **raw** spot file, where
+  the engine hands it a fully `#include`-expanded one (`CXml::Load` expands before it
+  calls `XMLLuaCallback`). Every element living in an include was therefore absent
+  from the document under test - including `secondary_task_complex_spot_mini_timer`,
+  the one id in `TASK_SIZED` that does, whose coverage silently went nowhere. The
+  fixture expands includes through the same VFS manifest the rest of the harness uses,
+  and two assertions now fail if that element ever goes missing again.
+
 ## [0.13.0] - 2026-09-05
 
 ### Added
@@ -308,6 +367,7 @@ switch.
 
 - Reveal hotkey: gate the cards behind a bindable key.
 
+[0.14.0]: https://github.com/simonwdev/gamma-immersive-quest-markers/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/simonwdev/gamma-immersive-quest-markers/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/simonwdev/gamma-immersive-quest-markers/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/simonwdev/gamma-immersive-quest-markers/compare/v0.10.0...v0.11.0

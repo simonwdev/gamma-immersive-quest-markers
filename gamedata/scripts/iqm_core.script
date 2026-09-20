@@ -291,6 +291,52 @@ OPTIONS = {
 	{ 0, "iqm_mapstyle_badge" },
 	{ 1, "iqm_mapstyle_s2" },
 }},
+-- HOW BIG the task pins are, as a percentage of the size this mod draws them at. 100 is
+-- no change, and is the whole range's only guaranteed-correct value: what 67% means
+-- depends on the style, since the ring badges are 19 units and the S2 diamonds 23. The
+-- pass that applies it (modxml_n_iqm_map_icons.resize_family) therefore runs last, over
+-- the sizes actually written.
+--
+-- SCOPE IS THE TASK FAMILY, both views: the two vanilla tiers, the turn-in and timed
+-- pins, the new-task pulse, ATUE's return marker and this mod's own four kinds. Not the
+-- service badges, the squad dots or the level changers -- see TASK_SIZED for why a mark
+-- this mod did not resize is a mark it should not resize now.
+--
+-- 50..150 rather than something wider. Below 50 a 19-unit pin is 9 units, which is the
+-- squad dot's own size and under the point where the glyph inside it survives the
+-- minimap; above 150 a task marker is larger than the selection frame the engine draws
+-- around the pin it sits next to. The modxml clamps to this range as well as reading it,
+-- since a settings file can be edited by hand.
+--
+-- NEEDS A RESTART, exactly like the two rows above and for the same reason: the value is
+-- read when the engine parses map_spots.xml, which happens once per process.
+-- rationale: docs/decisions.md#map_task_size
+{ key = "map_task_size", page = "general", def = 100, type = "track",
+  min = 50, max = 150, step = 1 },
+-- HOW BIG THE SERVICE BADGES are - medic, trader, bed, mechanic, barman, companion, VIP
+-- and quest NPC - on the same percentage scale and for the same reason as the row above.
+--
+-- SEPARATE FROM THE TASK SLIDER because the two crowd different things. Task pins crowd
+-- the route you are walking; badges crowd the hub you are standing in, where eight of
+-- them can sit inside one building. Folding both into one number would mean a player who
+-- wants quieter quest markers has to accept a trader icon they can no longer read.
+--
+-- SAME 50..150, and the modxml clamps to it as well as reading it. Restart required, for
+-- the reason every row in this block states: map_spots.xml is parsed once per process.
+-- rationale: docs/decisions.md#map_badge_size
+{ key = "map_badge_size", page = "general", def = 100, type = "track",
+  min = 50, max = 150, step = 1 },
+-- HOW BIG THE LEVEL-TRANSITION ARCH IS, all nine elements of it: the eight compass
+-- variants the PDA map picks between and the single minimap mark.
+--
+-- ITS OWN ROW RATHER THAN A SHARE OF THE BADGES, because it is the one mark on the map
+-- whose size is doing navigation rather than identification - it is how you find the way
+-- out of a level you do not know - and the player who wants a quiet map is often exactly
+-- the player who wants this one left alone. Nine ids, one slider: nobody reads them as
+-- nine marks.
+-- rationale: docs/decisions.md#map_exit_size
+{ key = "map_exit_size", page = "general", def = 100, type = "track",
+  min = 50, max = 150, step = 1 },
 -- Skull on a mutant hunt, red reticle on a bounty, while the job is still outstanding.
 -- Live, unlike the row above -- iqm_taskspot re-reads this on its next pass and moves
 -- the pins either way, which is also how switching it off puts the vanilla marker back.

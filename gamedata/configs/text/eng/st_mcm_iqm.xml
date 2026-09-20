@@ -138,6 +138,15 @@
 	<string id="ui_mcm_lst_iqm_mapstyle_badge"><text>Colourised circles</text></string>
 	<string id="ui_mcm_lst_iqm_mapstyle_s2"><text>STALKER 2 diamonds</text></string>
 
+	<string id="ui_mcm_iqm_map_task_size"><text>Task marker size (%, restart required)</text></string>
+	<string id="ui_mcm_iqm_map_task_size_desc"><text>How big task markers are drawn on the PDA map and the HUD minimap, as a percentage of this mod's own size. 100 is unchanged; 67 is about a third smaller. It covers the task family only - both story tiers, the turn-in and timed pins, the new-task pulse and the hunt, bounty, delivery and hand-in marks - and leaves the service badges, squad dots and level transitions where they are. The selection ring scales with the marker it frames. Read once at startup like the two rows above, so a change applies at the next launch.</text></string>
+
+	<string id="ui_mcm_iqm_map_badge_size"><text>Service badge size (%, restart required)</text></string>
+	<string id="ui_mcm_iqm_map_badge_size_desc"><text>How big the service badges are drawn on the PDA map and the HUD minimap, as a percentage of this mod's own size. 100 is unchanged; 67 is about a third smaller. It covers the eight badges this mod draws - medic, trader, bed, mechanic, barman, companion, important character and quest NPC - on both views, and leaves the task markers, squad dots and level transitions to their own settings. Separate from the task slider because the two crowd different things: task pins crowd the route you are walking, badges crowd the hub you are standing in. Read once at startup, so a change applies at the next launch.</text></string>
+
+	<string id="ui_mcm_iqm_map_exit_size"><text>Level transition size (%, restart required)</text></string>
+	<string id="ui_mcm_iqm_map_exit_size_desc"><text>How big the level-transition arch is drawn, as a percentage of this mod's own size. 100 is unchanged. It covers all nine elements at once - the eight compass variants the PDA map picks between and the single minimap mark - because nobody reads them as nine separate marks. It has a row of its own because this is the one mark whose size is doing navigation rather than identification: it is how you find the way out of a level you do not know. Read once at startup, so a change applies at the next launch.</text></string>
+
 	<string id="ui_mcm_iqm_map_task_kinds"><text>Mark hunts and bounties</text></string>
 	<string id="ui_mcm_iqm_map_task_kinds_desc"><text>A skull on a mutant hunt, a red reticle on a bounty. Both return to the plain task marker once the objective is done and the job only needs handing in. Applies immediately, and turning it off puts every marker back. Needs "Enable icons".</text></string>
 	<string id="ui_mcm_iqm_map_palette"><text>Hunt and bounty colours (restart for pins)</text></string>

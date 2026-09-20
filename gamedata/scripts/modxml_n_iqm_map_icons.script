@@ -936,7 +936,12 @@ local S2_SPOT_SCALE = 1.19
 -- because what such a constant tunes is clear space in map units, not a multiplier.
 -- The geometry attributes that scale. x/y are offsets from the spot's anchor, so they
 -- scale with the box; on the ordinary spots they are 0 and this is a no-op.
-local S2_SCALE_ATTRS = { "width", "height", "x", "y" }
+--
+-- SHARED with the task-size pass further down (scale_spot), which is why the name lost
+-- its S2_ prefix: the two passes multiply the same four numbers and differ only in what
+-- each does to the selection border afterwards. scale_spot says why that difference is
+-- deliberate rather than a copy that drifted.
+local SCALE_ATTRS = { "width", "height", "x", "y" }
 -- Marks whose ART IS THE SAME IN BOTH STYLES (S2_KEEP in build.py), and which therefore
 -- must not be resized either: the correction above exists because a DIAMOND of a given
 -- extent reads smaller than a RING of it, and none of these became a diamond. Growing
@@ -1012,7 +1017,7 @@ local function grow_spot(xml_obj, el, k)
 
 	local iw0, ih0 = attr_num(data.attr, "width"), attr_num(data.attr, "height")
 	local args
-	for _, key in ipairs(S2_SCALE_ATTRS) do
+	for _, key in ipairs(SCALE_ATTRS) do
 		local v = attr_num(data.attr, key)
 		if v and v ~= 0 then
 			args = args or {}
@@ -1137,6 +1142,223 @@ local function restyle_s2(xml_obj, grow)
 		xml_obj:setElementAttr(b.el, (b.spot and tint[b.spot]) or WHITE)
 	end
 	return n
+end
+
+-- --------------------------------------------------------------------------
+-- TASK MARKER SIZE (R2.65): the one piece of spot geometry the player owns
+-- --------------------------------------------------------------------------
+-- From a report: "size of quest markers on minimap (and pda map too probably) - I would
+-- like them to be a bit smaller, like 67% of current size."
+--
+-- A PERCENTAGE RATHER THAN A UNIT COUNT, because what is asked for is a proportion of
+-- whatever is on screen now - and what that is depends on two things this file has
+-- already settled by the time the slider is read. The ring style draws a task spot at 19
+-- units and the S2 style at 23 (S2_SPOT_SCALE), and the timed-task pin arrives at
+-- vanilla's 11 and is put to 19 by its own SPOTS entry. So this pass runs LAST, over the
+-- numbers actually written, and 67% means 67% of those in either style.
+--
+-- WHICH MARKS: the task family, and nothing else IN THIS LIST. R2.66 gave the service
+-- badges (BADGE_SIZED) and the level changers (EXIT_SIZED) sliders of their own, both of
+-- them this mod's own art. What stays out of all three is the squad dots - see the squad
+-- note in SPOTS, where resizing the elements rather than insetting the art was rejected
+-- precisely because it would be IQM choosing a squad-dot size for Sota UI, AlphaLion and
+-- Milspec PDA. Three named sliders are not that decision with a number on it: each moves
+-- one family the player asked for by name, and none of them moves a mark this file did
+-- not draw.
+--
+-- NOT primary_task_spot / third_task_spot, and that is the one exclusion worth arguing
+-- with. They ARE task pins by name (21/15 and 27 units in the shipped file). But this
+-- file does not patch their art, so they are drawing whatever the rest of the setup put
+-- there, and scaling somebody else's picture is the thing re-skinning instead of
+-- overriding exists to avoid. Add the ids here if a report ever names them.
+--
+-- NOT PAW's waypoint pulse (paw_task_default_spot). A placed waypoint is not a quest
+-- marker -- this mod gives it a page of its own -- and the element is Personal Adjustable
+-- Waypoint's, which this file only re-textures.
+--
+-- GATED ON map_icons, i.e. called from below the escape hatch rather than above it like
+-- retint_kinds. With the art switched off there are no IQM task pins on the map at all
+-- (iqm_taskspot tests C.map_icons before it will place one), so every id here would be
+-- resizing a mark this mod did not draw.
+--
+-- NEEDS A RESTART, for the same reason as every other value this file reads: g_uiSpotXml
+-- is parsed once per process and freed only at DLL detach (map_location.cpp:92-99,
+-- xrgame_dll_detach.cpp:132). The MCM label says so.
+local TASK_SIZED = {
+	-- The game's own two tiers, both views. Their selection frames are children and are
+	-- carried by scale_spot rather than listed.
+	"storyline_task_spot", "storyline_task_spot_mini",
+	"secondary_task_spot", "secondary_task_spot_mini",
+	-- Objective done, marker moved onto the giver. Minimap only (no <level_map>), and no
+	-- static_border to carry.
+	"storyline_task_on_guider_spot", "secondary_task_on_guider_spot",
+	-- The timed task's orange pin. Minimap only, and the one entry whose 19 units this
+	-- file wrote rather than inherited.
+	"secondary_task_complex_spot_mini_timer",
+	-- The 15-second pulse around a task that has just appeared. It scales WITH the mark
+	-- rather than being left alone: it is a halo about a pin, so at 39 units around a
+	-- 13-unit marker it would stop reading as that marker's arrival and start reading as
+	-- an area. The engine's xform_anim still bounces it, from the smaller rect.
+	"ui_storyline_task_blink_spot", "ui_secondary_task_blink_spot",
+	-- gamma-active-task-ui-enhancements' return marker. Absent without that mod, which
+	-- costs an empty query and nothing else.
+	"atue_return_task_spot", "atue_return_task_spot_mini",
+	-- ...and the four types this mod declares for itself, spliced into this DOM earlier in
+	-- the callback. Not read from iqm_taskspot.spot_types, which names the LOCATION types
+	-- (iqm_task_bounty) and not the spot elements (iqm_task_bounty_spot / _spot_mini) --
+	-- two vocabularies one letter apart, and the probe above already owns the first.
+	"iqm_task_mutant_spot",   "iqm_task_mutant_spot_mini",
+	"iqm_task_bounty_spot",   "iqm_task_bounty_spot_mini",
+	"iqm_task_delivery_spot", "iqm_task_delivery_spot_mini",
+	"iqm_task_handin_spot",   "iqm_task_handin_spot_mini",
+}
+
+-- --------------------------------------------------------------------------
+-- THE OTHER TWO FAMILIES (R2.66)
+-- --------------------------------------------------------------------------
+-- SERVICE BADGES: medic, trader, bed, mechanic, barman, companion, VIP and quest NPC,
+-- both views. A slider of their own rather than a share of the task one, because the two
+-- answer different complaints - task pins crowd the route you are walking, badges crowd
+-- the hub you are standing in - and a player who wants smaller quest markers over a
+-- readable trader icon can now have both.
+--
+-- ALL SIXTEEN ARE THIS MOD'S OWN ART, which is what makes this family safe where the
+-- squad dots are not: every id here draws an iqm_mapspot_* texture the SPOTS loop above
+-- just wrote, so a percentage of it is a percentage of a number this file chose. The map
+-- copies are 19 units and the minimap copies 14; both take the same multiplier, which is
+-- the whole reason this is a percentage rather than a unit count.
+--
+-- NONE OF THEM HAS A static_border - a service badge is never "the selected one" - so
+-- scale_spot's border loop finds nothing here and the centring arithmetic never runs.
+local BADGE_SIZED = {
+	"ui_pda2_medic_location_spot",        "ui_pda2_medic_location_mini_spot",
+	"ui_pda2_trader_location_spot",       "ui_pda2_trader_location_mini_spot",
+	"ui_pda2_actor_sleep_location_spot",  "ui_pda2_actor_sleep_location_mini_spot",
+	"ui_pda2_mechanic_location_spot",     "ui_pda2_mechanic_location_mini_spot",
+	"ui_pda2_barman_location_spot",       "ui_pda2_barman_location_mini_spot",
+	"ui_pda2_companion_location_spot",    "ui_pda2_companion_location_mini_spot",
+	"ui_pda2_special_location_spot",      "ui_pda2_special_location_mini_spot",
+	"ui_pda2_quest_npc_location_spot",    "ui_pda2_quest_npc_location_mini_spot",
+}
+
+-- LEVEL CHANGERS: eight compass variants on the map and one mark on the minimap. Nine ids
+-- for what the player reads as a single arch, so they move together on one slider.
+--
+-- THE SPOTS LOOP ABOVE HAS ALREADY SQUARED THEM. Vanilla ships these at 19x21 and every
+-- entry in SPOTS carries el = { width = 19, height = 19, stretch = 1 }, so by the time
+-- this pass runs the rect is square and a percentage of it stays square. One more reason
+-- the sizing runs last - see the note at the call site.
+--
+-- stretch = 1 IS LEFT ALONE, because SCALE_ATTRS names only the four geometry attributes.
+-- The flag that makes the art fill whatever rect it is handed is exactly what makes these
+-- legible at 67%, so it must survive the pass that shrinks them.
+local EXIT_SIZED = {
+	"level_changer_up_spot",         "level_changer_up_right_spot",
+	"level_changer_right_spot",      "level_changer_right_down_spot",
+	"level_changer_down_spot",       "level_changer_down_left_spot",
+	"level_changer_left_spot",       "level_changer_left_up_spot",
+	"level_changer_spot_mini",
+}
+
+--- How big the player asked one family of marks to be, as a multiplier. 1 leaves it alone.
+--
+--  ONE READER FOR ALL THREE SLIDERS, because they differ only in which key they name. The
+--  failure directions, the clamp and the range are properties of the feature rather than
+--  of any family, and three copies of this would be three places for a range to drift out
+--  of step with the registry's.
+--
+--  Read straight from MCM and defaulted to 1 at every failure, for the reasons icons_on
+--  and palette_mode both state at length: this is a modxml with no apply_config, running
+--  on whatever frame the engine first parses map_spots.xml, and 1 is the only safe
+--  direction -- no MCM, no registered menu and a key never written all mean "the player
+--  has not asked for a different size".
+--
+--  CLAMPED to the registry's own range as well as read from it, because the value comes
+--  out of a settings file a player can edit by hand and a stale key can outlive a rename.
+--  0 or a negative is a marker with no rect at all, which the engine draws as nothing and
+--  which would look exactly like this mod having broken.
+--
+--  THE 50 FLOOR WAS ARGUED FROM A 19-UNIT PIN and does not bind equally on all three
+--  families now that one reader serves them all. Half of 19 is 9 -- the squad dot's own
+--  size, and about where a glyph stops surviving the minimap. The badge family's minimap
+--  copies are 14 units, so the same 50 puts them at 7, past that line. Left as one shared
+--  range rather than a floor per family: three ranges would be three things to keep in
+--  step with the registry, and a player who drags a family to its floor is asking for
+--  exactly what they get. It is recorded because it is the one place where the same
+--  number means something different depending on which slider moved.
+local function family_size(key)
+	if not (ui_mcm and ui_mcm.get) then return 1 end
+	local ok, v = pcall(ui_mcm.get, "iqm/general/" .. key)
+	if not ok or type(v) ~= "number" then return 1 end
+	if v < 50 then v = 50 elseif v > 150 then v = 150 end
+	return v / 100
+end
+
+--- Scale one task spot, and its selection frame with it. Returns true if it was touched.
+--
+--  THE BORDER SCALES PROPORTIONALLY HERE, where grow_spot holds its air constant, and the
+--  two are right answers to different questions. grow_spot is handling a mark that
+--  changed SHAPE: a diamond needs more room inside a frame that was tuned around a ring,
+--  so the gap is the thing to preserve. This is the same picture at another size, and a
+--  picture taken to 67% with its frame left 5 units out is not the same picture -- at 13
+--  units inside a 23-unit ring the selection frame stops reading as that mark's own frame
+--  and starts reading as a second mark around it.
+--
+--  WHAT IS SCALED IS THE AIR, not the border's own rect, and that is what makes the
+--  result centrable rather than merely close. The border is a top-left child (waNone) of
+--  a centre-aligned spot (waCenter, uiabstract.h:87-96), so centred is -(border - icon)/2
+--  on each axis -- which is an INTEGER only when the difference is even. Scale the two
+--  rects independently and it stops being: 23 and 33 at 67% round to 15 and 22, and there
+--  is no offset that centres a 15 inside a 22. Writing the border as icon + 2*air makes
+--  the difference even by construction and the offset exactly -air, at every percentage
+--  and under either icon style. Same size to within a unit, and no drift to chase -- the
+--  note on S2_SPOT_SCALE records a frame sitting a unit up and left of its marker being
+--  reported once already, which is what this shape of arithmetic prevents.
+local function scale_spot(xml_obj, el, k)
+	local data = xml_obj:getElement(el)
+	if not data then return false end
+	local iw0, ih0 = attr_num(data.attr, "width"), attr_num(data.attr, "height")
+	-- A spot with no rect of its own, or a zero one, is not one this can size. Nothing in
+	-- TASK_SIZED is such a spot today; the guard is for the next id somebody adds to the
+	-- list, and it is what guarantees `args` below is never empty -- dxml_core treats an
+	-- empty args table as a caller mistake and prints a parser error per element
+	-- (dxml_core.script:526-530), which on three spot files is a screenful.
+	if not (iw0 and ih0) or iw0 == 0 or ih0 == 0 then return false end
+
+	local args = {}
+	for _, key in ipairs(SCALE_ATTRS) do
+		local v = attr_num(data.attr, key)
+		-- x/y are 0 on every task spot by the time this runs -- the blink pair is put
+		-- there by its own SPOTS entry -- so in practice this writes width and height.
+		if v and v ~= 0 then args[key] = round(v * k) end
+	end
+	xml_obj:setElementAttr(el, args)
+
+	local iw, ih = args.width or iw0, args.height or ih0
+	for _, b in ipairs(xml_obj:query("static_border", el) or {}) do
+		local bd = xml_obj:getElement(b)
+		local bw0, bh0 = attr_num(bd and bd.attr, "width"), attr_num(bd and bd.attr, "height")
+		if bw0 and bh0 then
+			local aw, ah = round((bw0 - iw0) / 2 * k), round((bh0 - ih0) / 2 * k)
+			xml_obj:setElementAttr(b, { width = iw + 2 * aw, height = ih + 2 * ah,
+			                            x = -aw, y = -ah })
+		end
+	end
+	return true
+end
+
+--- Resize one family of marks to the player's percentage for it. No-op at 100.
+local function resize_family(xml_obj, ids, key, label, xml_file_name)
+	local k = family_size(key)
+	if k == 1 then return end
+	local n = 0
+	for _, id in ipairs(ids) do
+		for _, el in ipairs(xml_obj:query(id) or {}) do
+			if scale_spot(xml_obj, el, k) then n = n + 1 end
+		end
+	end
+	printf("%s: DXML sized %s %s to %s% in %s",
+	       addon_name, n, label, round(k * 100), xml_file_name)
 end
 
 --- Swap the legend rows we have art for. Scoped per row rather than run over one flat
@@ -1455,6 +1677,18 @@ function on_xml_read()
 			printf("%s: DXML restyled %s spot textures to S2 diamonds in %s",
 			       addon_name, restyle_s2(xml_obj, true), xml_file_name)
 		end
+
+		-- ...and only then the player's own sizes. LAST of everything, because each
+		-- percentage is of what they can SEE: the SPOTS loop above has just put the
+		-- timed-task pin to 19 units and squared the level changers, and the S2 pass may
+		-- have taken every task spot to 23. A scale applied before either would be a
+		-- percentage of a number nobody was looking at. See TASK_SIZED.
+		--
+		-- THREE FAMILIES, THREE PASSES, and the order between them carries nothing: the
+		-- three id lists are disjoint, so this order is for the log's legibility only.
+		resize_family(xml_obj, TASK_SIZED,  "map_task_size",  "task spots",        xml_file_name)
+		resize_family(xml_obj, BADGE_SIZED, "map_badge_size", "service badges",    xml_file_name)
+		resize_family(xml_obj, EXIT_SIZED,  "map_exit_size",  "level transitions", xml_file_name)
 
 		printf("%s: DXML patched map spot icons in %s", addon_name, xml_file_name)
 	end)

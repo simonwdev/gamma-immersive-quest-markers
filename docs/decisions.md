@@ -26,6 +26,9 @@ waypoint marker were built out of) and `docs/minimap-route.md` (F3, the trail).
 - [`route_flow`](#route_flow) — conveyor speed
 - [`map_icons`](#map_icons) — why it needs a restart and cannot not
 - [`map_icon_style`](#map_icon_style) — the STALKER 2 diamonds, and the two things they stop saying
+- [`map_task_size`](#map_task_size) — the size slider, and why it is the task family only
+- [`map_badge_size`](#map_badge_size) — the service badges' own slider, and the line it draws
+- [`map_exit_size`](#map_exit_size) — why the level transitions get a row to themselves
 - [`map_task_kinds`](#map_task_kinds) — the skull and the red reticle, and what they cost
 - [`map_palette`](#map_palette) — the hunt and bounty colours, and the defect the request uncovered
 - [`mutant_r` / `bounty_r` / …](#mutant_r--mutant_g--mutant_b--bounty_r--bounty_g--bounty_b) — the six custom channels
@@ -398,6 +401,154 @@ hardware. `S2_GLYPH_SRC` is where a style disagrees with `GLYPH_SRC`.
 **Needs a restart, for `map_icons`' reason exactly** — the value is read when the engine
 parses `map_spots.xml`, which happens once per process. Same read path, same
 default-to-off-at-every-failure, same label.
+
+### `map_task_size`
+
+**From a report**: *"size of quest markers on minimap (and pda map too probably) — I
+would like them to be a bit smaller, like 67% of current size."* The number in it is the
+reason this is a slider and not a second style: one player wanting a third off is a
+preference, and the request names its own units.
+
+**A percentage, not a unit count**, because what is being asked for is a proportion of
+*what is on screen* — and what that is depends on settings this mod already owns. The
+ring badges draw a task pin at 19 units and the S2 diamonds at 23 (`S2_SPOT_SCALE`), and
+the timed-task pin arrives at vanilla's 11 and is put to 19 by its own `SPOTS` entry. So
+the pass runs **last**, over the numbers actually written, and 67% means 67% of those
+under either style. `tools/legend-harness` asserts exactly that pair — 13 units in the
+ring style, 15 in S2 — because running the scale *before* the S2 grow gives 13 for both:
+a plausible number, the wrong one, and not one anybody would catch by looking at a
+minimap.
+
+**Scope is the task family and nothing else.** Both story tiers on both views, the two
+turn-in pins, the timed-task pin, the new-task pulse, ATUE's return marker and this mod's
+own four kinds. *Not* the squad dots — and that is the same rule the squad block has
+always followed rather than a new caution. The squad dot's apparent size was fixed **in
+the art** (`SQUAD_EXTENT` in `tools/map-icons/build.py`) precisely so this mod would not
+be choosing a squad-dot size for Sota UI, AlphaLion and Milspec PDA; a slider that quietly
+took the whole map with it would be that decision again with a number on it. The service
+badges and the level-changer arch were excluded here for the same reason until they were
+given sliders of their own — see [`map_badge_size`](#map_badge_size) and
+[`map_exit_size`](#map_exit_size), where the line that actually matters turns out to be
+*whose art it is* rather than *which family it is*. The harness asserts the exclusions as
+well as the inclusions, because the promise is the half a reader cannot see.
+
+**Not `primary_task_spot` / `third_task_spot`, and that is the one exclusion worth
+arguing with.** They *are* task pins by name (21/15 and 27 units). But this file does not
+patch their art either, so they are still drawing whatever the rest of the setup put
+there, and scaling somebody else's picture is the thing re-skinning instead of overriding
+exists to avoid. Nobody has reported them; the ids go in `TASK_SIZED` if that changes.
+
+**One asymmetry the slider makes visible.** The PDA map's *complex* task spots —
+`secondary_task_complex_spot`, `secondary_task_complex_spot_timer` and the bring-item,
+eliminate and defend variants in `map_spots_complex.xml`, all 30x27 — stay out under that
+same rule, because this file does not patch their art. Their minimap twins
+(`secondary_task_spot_mini`, `secondary_task_complex_spot_mini_timer`) are *in*, because it
+does. So for a timed or dynamic task at 67% the minimap pin shrinks while the PDA-map pin
+for the same task does not. That split is not new — it is exactly where the re-skin has
+always stopped — but the slider is the first setting that lets a player see it, so it is
+written down here rather than left to be discovered.
+
+**The selection frame shrinks with the pin**, which is the one place this pass
+deliberately differs from the S2 grow above it. `grow_spot` holds the frame's air constant
+because the mark changed *shape* inside a frame tuned for the old one; this is the same
+picture at another size, and a 13-unit mark left inside a 29-unit ring is not that
+picture — the frame stops reading as the mark's own and starts reading as a second mark
+around it.
+
+**What is scaled is the air, not the border's rect**, and that is arithmetic rather than
+taste. A border is a top-left child (`waNone`) of a centre-aligned spot (`waCenter`,
+`uiabstract.h:87-96`), so centred is `-(border - icon)/2` — an integer only when the
+difference is even. Scale the two rects independently and it stops being: 23 and 33 at 67%
+round to 15 and 22, and no offset centres a 15 inside a 22. Writing the border as
+`icon + 2*air` makes the difference even by construction and the offset exactly `-air`, at
+every percentage and under either style. The alternative fails by a unit, which is exactly
+the drift recorded on `S2_SPOT_SCALE` as having been reported from the map once already.
+
+**50–150, and clamped as well as ranged.** Below 50 a 19-unit pin is 9 units — the squad
+dot's own size, and past where the glyph inside it survives the minimap. Above 150 a task
+marker is bigger than the selection frame the engine draws around the pin beside it. The
+modxml clamps to the same range it is declared with, because the value comes out of a
+settings file a player can edit by hand and a stale key can outlive a rename; 0 would be a
+marker with no rect at all, which the engine draws as nothing and which looks exactly like
+this mod having broken.
+
+**Defaults to 100, which is a no-op byte for byte** — the pass returns before it queries
+anything. That matters beyond tidiness: a default that cost a DOM walk per spot file would
+be charging every player for a setting almost none of them will move.
+
+**Needs a restart**, for the fourth time in this file's options and for the same reason
+every other time: `g_uiSpotXml` is parsed once per process and freed only at DLL detach
+(`map_location.cpp:92-99`, `xrgame_dll_detach.cpp:132`). See [`map_icons`](#map_icons).
+
+**Gated on `map_icons`.** With the art switched off there are no IQM task pins on the map
+at all — `iqm_taskspot` tests `C.map_icons` before it will place one — so every id in
+`TASK_SIZED` would be resizing a mark this mod did not draw.
+
+### `map_badge_size`
+
+**The same slider, one family over.** 50–150% of the size this mod draws the eight service
+badges at — medic, trader, bed, mechanic, barman, companion, important character and quest
+NPC — across the PDA map and the minimap.
+
+**Why it is not a share of the task slider.** The two crowd different things. Task pins
+crowd the *route* you are walking, and there are as many of them as you have jobs; badges
+crowd the *hub* you are standing in, where eight can sit inside one building and none of
+them moves until you do. Folding both into one number means a player who wants quieter
+quest markers has to accept a trader icon they can no longer read — a trade the report
+that started this never asked anyone to make.
+
+**It is this mod's own art, which is what makes it safe.** Every id in `BADGE_SIZED` draws
+an `iqm_mapspot_*` texture the `SPOTS` loop wrote moments earlier, so a percentage of it is
+a percentage of a number this file chose. That is the line the squad dots sit on the far
+side of, and it is a sharper line than "task markers only": the question is never whether
+a mark is a task, it is whether this mod drew it. Applied to
+[`map_task_size`](#map_task_size)'s own exclusions it also explains why
+`primary_task_spot` stays out while a service badge comes in.
+
+**The map copies are 19 units and the minimap copies 14**, and both take the same
+multiplier — the whole reason this is a percentage rather than a unit count. At 67% that
+is 13 and 9, and the harness asserts the pair, because one number written to both would
+have looked right on the map and wrong on the minimap.
+
+**No selection frame anywhere in the family.** A service badge is never "the selected
+one", so none of these elements carries a `static_border` and `scale_spot`'s border loop
+finds nothing to carry. The centring arithmetic the task pins need is never reached here.
+
+**The 50% floor bottoms out lower here than the argument for it assumed.** That floor was
+chosen against a 19-unit task pin: half of 19 is 9, which is the squad dot's own size and
+about where a glyph stops surviving the minimap. This family's minimap copies are 14 units,
+so the same 50% lands them at **7**, past that line. It stays one shared range rather than
+a floor per family — three ranges would be three things to keep in step with the registry,
+and a player who drags a family to its floor is asking for what they get — but it is the
+one place where the same number means something different depending on which slider moved.
+
+**Restart, `map_icons` gate, clamp and a no-op at 100** — all four exactly as
+[`map_task_size`](#map_task_size) sets out. One reader serves all three sliders
+(`family_size`), so a range can only drift out of step in one place.
+
+### `map_exit_size`
+
+**Nine ids, one slider.** Eight compass variants the PDA map picks between and the single
+minimap mark. Nobody reads them as nine marks — they are one arch seen from different
+approaches — so they move together or the setting would be nonsense.
+
+**A row of its own rather than a share of the badges**, because this is the one mark whose
+size is doing *navigation* rather than *identification*. A badge answers "what is that";
+the arch answers "how do I get out of here", and it is what you go looking for on a level
+you do not know. The player who wants a quiet map is often exactly the player who does not
+want that one quieter, and riding it on the badge slider leaves nowhere to say so.
+
+**They are square before the scale reaches them, and that is upstream.** Vanilla ships the
+eight map variants at 19x21; every `level_changer_*` entry in `SPOTS` carries
+`el = { width = 19, height = 19, stretch = 1 }`, so by the time the sizing pass runs the
+rect is square and 67% of it is 13 on both axes. The harness asserts both axes rather than
+the width alone, since a pass that ran before the squaring would give 13x14 and look
+almost right.
+
+**`stretch = 1` survives the pass**, because `SCALE_ATTRS` names only the four geometry
+attributes. The flag that makes the art fill whatever rect it is handed is exactly what
+keeps these legible at 67%, so a pass that helpfully rewrote it would break the thing it
+was shrinking.
 
 ### `map_task_kinds`
 
